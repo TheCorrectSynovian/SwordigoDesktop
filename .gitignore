@@ -1,30 +1,100 @@
-### IntelliJ IDEA ###
+# ============================================================
+# SwordigoDesktop — Comprehensive .gitignore for GitHub Release
+# ============================================================
+
+# -------- BUILDS / OUTPUTS / BINARIES --------
+# Compiled project binaries (project-created)
+swordigo_boot
+swordigo_headless
+loader_test
+
+# Object files
+*.o
+
+# Build outputs directory
+build/
 out/
-!**/src/main/**/out/
-!**/src/test/**/out/
-.kotlin
 
-### Eclipse ###
-.apt_generated
-.classpath
-.factorypath
-.project
-.settings
-.springBeans
-.sts4-cache
-bin/
-!**/src/main/**/bin/
-!**/src/test/**/bin/
+# -------- LOGS / COREDUMPS / RUNTIME DATA --------
+# Logs from testing and debugging
+*.log
+*.core
 
-### NetBeans ###
-/nbproject/private/
-/nbbuild/
-/dist/
-/nbdist/
-/.nb-gradle/
+# Caches, saves (runtime data, not source)
+cache/
+save/
 
-### VS Code ###
-.vscode/
+# -------- PROPRIETARY GAME BINARY --------
+# Extracted from the original APK — DO NOT DISTRIBUTE
+libswordigo.so
 
-### Mac OS ###
+# -------- PROPRIETARY REFERENCE MATERIALS --------
+# Contains:
+#   - decompiled Java from original APK (copyrighted)
+#   - extracted APK resources (XML, PNG, MP3, etc.)
+#   - proprietary native .so libraries from the game
+#   - extracted game assets (copyrighted textures, audio, models)
+reference/
+
+# -------- EXTRACTED GAME ASSETS --------
+# Commercial game assets extracted from the APK
+# (textures, audio, 3D models, scenes, fonts, game data)
+assets/resources/*.pvr
+assets/resources/*.POD
+assets/resources/*.tex.png
+assets/resources/*.png
+assets/resources/*.wav
+assets/resources/*.mp3
+assets/resources/*.ogg
+assets/resources/*.fnt
+assets/resources/*.scene
+assets/resources/*.atlas
+assets/resources/*.scl
+assets/resources/*.gdata
+assets/resources/*.gstate
+assets/resources/*.gopt
+assets/resources/*.proto
+assets/resources/gamedata.txt
+assets/resources/docs/
+
+# Keep the README which has license attributions
+!assets/README
+
+# -------- INTERNAL AGENT PROMPTS --------
+prompt/
+
+# -------- DEVELOPMENT TOOLS (JADX, SRCC) --------
+.tools/
+
+# -------- IDE CONFIGS --------
+.idea/
+*.iml
+*.desktop
+
+# -------- OS ARTIFACTS --------
 .DS_Store
+Thumbs.db
+
+# -------- ANDROID NDK (large download) --------
+android-ndk-*-linux.zip
+
+# ------------- EXTERNAL THIRD-PARTY RESEARCH --------
+# Vita port (separate third-party project)
+docs/research/vita/vistaPort/
+
+# -------- FORENSIC / DEBUG TOOLS --------
+# ELF analysis binaries (internal tools)
+analyze_syms
+check_relocations
+find_bad_ptr
+verify_0x10000000
+
+# POC loader (ARM static binary test)
+poc_loader
+
+# Python research scripts
+generate_poc.py
+
+# -------- OTHER --------
+# Docs research archives
+docs/research/vita/*.zip
