@@ -19,23 +19,20 @@ static bool hook_mem_unmapped(uc_engine *uc, uc_mem_type type, uint64_t address,
     return false;
 }
 
-static void hook_code(uc_engine *uc, uint64_t address, uint32_t size, void *user_data) {
-    Emulator* emu = (Emulator*)user_data;
+// Lightweight global code hook — only counts instructions in debug mode
+static void hook_code_count(uc_engine *uc, uint64_t address, uint32_t size, void *user_data) {
     g_instruction_count++;
+}
 
-    if (!emu->quiet_mode) {
-        emu->record_pc(address);
-    }
+// Bridge-specific hook — only fires for bridge address range (0xFF000000+)
+static void hook_bridge(uc_engine *uc, uint64_t address, uint32_t size, void *user_data) {
+    Emulator* emu = (Emulator*)user_data;
+    emu->handle_bridge_call((uint32_t)address);
+}
 
-    if (address >= emu->get_bridge_base()) {
-        emu->handle_bridge_call(address);
-    }
-
-    // ---- Camera: intercept CameraController constructor to capture 'this' ----
-    // CameraController::CameraController() is at 0x002e35c5 (Thumb, real addr 0x002e35c4)
-    // At entry, r0 = 'this' (the newly allocated CameraController object).
-    // We only need to capture it once — g_cam_ctrl_ptr stays 0 until set.
-    if (g_cam_ctrl_ptr == 0 && (address == 0x002e35c4 || address == 0x002e35c5)) {
+// Camera capture hook — only fires at the specific CameraController constructor address
+static void hook_camera_ctor(uc_engine *uc, uint64_t address, uint32_t size, void *user_data) {
+    if (g_cam_ctrl_ptr == 0) {
         uint32_t this_ptr = 0;
         uc_reg_read(uc, UC_ARM_REG_R0, &this_ptr);
         if (this_ptr != 0) {
@@ -87,8 +84,18 @@ Emulator::Emulator(uint8_t* guest_mem, uint32_t mem_size)
         std::cerr << "Failed to map magic LR page: " << err << std::endl;
     }
 
-    uc_hook trace, mem_hook;
-    uc_hook_add((uc_engine*)uc, &trace, UC_HOOK_CODE, (void*)hook_code, this, 1, 0);
+    // Hook 1: Bridge calls — only for bridge address range (HUGE perf win vs global hook)
+    uc_hook bridge_hook;
+    uc_hook_add((uc_engine*)uc, &bridge_hook, UC_HOOK_CODE, (void*)hook_bridge, this,
+                0xFF000000, 0xFF100000);
+
+    // Hook 2: Camera controller capture — only fires at the constructor address
+    uc_hook cam_hook;
+    uc_hook_add((uc_engine*)uc, &cam_hook, UC_HOOK_CODE, (void*)hook_camera_ctor, this,
+                0x002e35c4, 0x002e35c6);
+
+    // Hook 3: Unmapped memory
+    uc_hook mem_hook;
     uc_hook_add((uc_engine*)uc, &mem_hook, UC_HOOK_MEM_UNMAPPED, (void*)hook_mem_unmapped, this, 1, 0);
 }
 

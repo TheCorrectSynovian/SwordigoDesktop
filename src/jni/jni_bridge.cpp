@@ -1,5 +1,6 @@
 #include "jni_bridge.h"
 #include "platform/emulator.h"
+#include "platform/io_thread.h"
 #include "android/asset_manager.h"
 #include <iostream>
 #include <cstring>
@@ -889,7 +890,6 @@ static void pref_set(const std::string& key, const std::string& val) {
 }
 
 // Resolve a jstring handle (from g_jstrings map) or a raw guest C-string pointer
-static std::unordered_map<uint32_t, std::string> g_jstrings; // forward — defined below
 static std::string resolve_jstring(uint32_t handle, uint8_t* memory) {
     auto it = g_jstrings.find(handle);
     if (it != g_jstrings.end()) return it->second;
@@ -980,7 +980,17 @@ void bridge_CallBooleanMethodV(void* emu_ptr) {
             alSourcei(g_music_source, AL_BUFFER, 0);
         }
         
-        std::string wav_path = "assets/resources/music/music_" + fname;
+        // Build music path — use SWORDIGO_DATA_DIR if set (AppImage), else relative
+        std::string music_base;
+        const char* data_dir = getenv("SWORDIGO_DATA_DIR");
+        if (data_dir) {
+            music_base = std::string(data_dir);
+            if (!music_base.empty() && music_base.back() != '/') music_base += "/";
+            music_base += "assets/resources/music/music_";
+        } else {
+            music_base = "assets/resources/music/music_";
+        }
+        std::string wav_path = music_base + fname;
         size_t pos;
         while ((pos = wav_path.find('-')) != std::string::npos) {
             wav_path.replace(pos, 1, "_");
@@ -1222,25 +1232,18 @@ void bridge_CallStaticVoidMethodV(void* emu_ptr) {
         std::cout << "[JNI] receivedPrivacyConsent() -> Stubbed!" << std::endl;
     } else if (mid == 0x13250001) { // loadSnapshot
         std::string snap_path = g_save_dir + "/snapshot.bin";
-        std::cout << "[SAVE] loadSnapshot() -> Reading " << snap_path << std::endl;
-        g_snapshot_load_pending = true;
-        g_snapshot_has_data = false;
-        // Try to read save data from disk
-        FILE* sf = fopen(snap_path.c_str(), "rb");
-        if (sf) {
-            fseek(sf, 0, SEEK_END);
-            long sz = ftell(sf);
-            fseek(sf, 0, SEEK_SET);
-            if (sz > 0) {
-                g_snapshot_data.resize(sz);
-                fread(g_snapshot_data.data(), 1, sz, sf);
-                g_snapshot_has_data = true;
-                std::cout << "[SAVE] Loaded " << sz << " bytes from snapshot.bin" << std::endl;
+        std::cout << "[SAVE] loadSnapshot() -> Posting async load for " << snap_path << std::endl;
+        io_thread_post_load(snap_path, [](bool ok, std::vector<uint8_t> data) {
+            g_snapshot_load_pending = true;
+            g_snapshot_has_data = ok;
+            if (ok) {
+                g_snapshot_data = std::move(data);
+                std::cout << "[SAVE] Loaded " << g_snapshot_data.size() << " bytes via async thread" << std::endl;
+            } else {
+                g_snapshot_data.clear();
+                std::cout << "[SAVE] Async load completed (no save data or error)" << std::endl;
             }
-            fclose(sf);
-        } else {
-            std::cout << "[SAVE] No snapshot.bin found — new game" << std::endl;
-        }
+        });
     } else if (mid == 0x13250002) { // saveSnapshot
         // Extract save data from JNI args: saveSnapshot(String name, byte[] data)
         uint8_t* memory = emu->get_memory_base();
@@ -1251,20 +1254,14 @@ void bridge_CallStaticVoidMethodV(void* emu_ptr) {
                   << ", data=0x" << data_ref << ")" << std::dec << std::endl;
         
         if (data_ref != 0) {
-            // Read byte array: first 4 bytes at the array address = length, followed by data
-            // JNI array layout in our guest: length (4 bytes) then data
             uint32_t array_len = *(uint32_t*)(memory + data_ref);
             uint8_t* array_data = memory + data_ref + 4;
             
-            // Sanity check
             if (array_len > 0 && array_len < 0x1000000) {
-                FILE* sf = fopen((g_save_dir + "/snapshot.bin").c_str(), "wb");
-                if (sf) {
-                    fwrite(array_data, 1, array_len, sf);
-                    fflush(sf);
-                    fclose(sf);
-                    std::cout << "[SAVE] Wrote " << array_len << " bytes to " << g_save_dir << "/snapshot.bin" << std::endl;
-                }
+                std::vector<uint8_t> data_to_save(array_data, array_data + array_len);
+                std::string snap_path = g_save_dir + "/snapshot.bin";
+                io_thread_post_save(snap_path, std::move(data_to_save));
+                std::cout << "[SAVE] Wrote " << array_len << " bytes asynchronously via IO thread" << std::endl;
             }
         }
     } else if (mid == 0x13250003) { // deleteSnapshot
@@ -1652,16 +1649,28 @@ void bridge_fopen(void* emu_ptr) {
     uint32_t mode_ptr = emu->get_reg(1);
     const char* path = (const char*)(memory + path_ptr);
     const char* mode = (const char*)(memory + mode_ptr);
-    if (!emu->quiet_mode) {
+    
+    // Always log write-mode opens for save debugging
+    bool is_write = (strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+'));
+    if (is_write) {
+        std::cout << "[File] fopen(\"" << path << "\", \"" << mode << "\") [WRITE]" << std::endl;
+    } else if (!emu->quiet_mode) {
         std::cout << "[File] fopen(\"" << path << "\", \"" << mode << "\")" << std::endl;
     }
+    
     FILE* f = fopen(path, mode);
     if (f) {
         uint32_t handle = g_next_file_handle++;
         g_file_handles[handle] = f;
         emu->set_reg(0, handle);
+        if (is_write) {
+            std::cout << "[File]   -> OK (handle=" << handle << ")" << std::endl;
+        }
     } else {
         emu->set_reg(0, 0);
+        if (is_write) {
+            std::cout << "[File]   -> FAILED: " << strerror(errno) << " (errno=" << errno << ")" << std::endl;
+        }
     }
 }
 
@@ -1716,8 +1725,11 @@ void bridge_fwrite(void* emu_ptr) {
     if (g_file_handles.count(handle)) {
         size_t written = fwrite(memory + buf, elem_size, count, g_file_handles[handle]);
         emu->set_reg(0, (uint32_t)written);
+        std::cout << "[File] fwrite(handle=" << handle << ", size=" << elem_size 
+                  << ", count=" << count << ") -> wrote " << written << std::endl;
     } else {
         emu->set_reg(0, 0);
+        std::cout << "[File] fwrite(handle=" << handle << ") -> INVALID HANDLE" << std::endl;
     }
 }
 
@@ -1752,6 +1764,13 @@ void bridge_mkdir(void* emu_ptr) {
     const char* path = (const char*)(memory + path_ptr);
     std::cout << "[File] mkdir(\"" << path << "\", " << std::oct << mode << std::dec << ")" << std::endl;
     int result = mkdir(path, (mode_t)mode);
+    if (result != 0 && errno == EEXIST) {
+        // Directory already exists — treat as success (game does recursive mkdir)
+        result = 0;
+    }
+    if (result != 0) {
+        std::cout << "[File]   mkdir FAILED: " << strerror(errno) << std::endl;
+    }
     emu->set_reg(0, (uint32_t)result);
 }
 
@@ -2529,25 +2548,17 @@ void bridge_gl_clear_color(void* emu_ptr) {
     }
 }
 
-// Global resolution scaling (game renders at GAME_W x GAME_H, window is g_win_w x g_win_h)
-// g_win_w/g_win_h are updated by main.cpp when window resizes or goes fullscreen
+// Global window dimensions — updated by main.cpp when window resizes or goes fullscreen
 int g_win_w = 1920;
 int g_win_h = 1080;
-static const int GAME_W = 960;
-static const int GAME_H = 544;
 
 void bridge_gl_viewport(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.viewport_calls++;
     if (g_display_active) {
-        int x = emu->get_reg(0);
-        int y = emu->get_reg(1);
-        int w = emu->get_reg(2);
-        int h = emu->get_reg(3);
-        // Scale from game coordinate space to actual window size
-        float sx = (float)g_win_w / GAME_W;
-        float sy = (float)g_win_h / GAME_H;
-        glViewport((int)(x * sx), (int)(y * sy), (int)(w * sx), (int)(h * sy));
+        // Pass viewport through unchanged — the FBO captures at game resolution,
+        // fbo_end_game_and_blit() handles all scaling to window via GLSL shaders.
+        glViewport(emu->get_reg(0), emu->get_reg(1), emu->get_reg(2), emu->get_reg(3));
     }
 }
 

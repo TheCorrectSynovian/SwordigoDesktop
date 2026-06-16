@@ -1,6 +1,7 @@
 #include "platform/display.h"
 #include <iostream>
 #include <GL/gl.h>
+#include <SDL2/SDL_image.h>
 
 Display::Display() {}
 
@@ -52,7 +53,30 @@ bool Display::init(int w, int h, const std::string& title) {
     std::cout << "[Display] GL Vendor:   " << glGetString(GL_VENDOR) << std::endl;
     std::cout << "[Display] GL Renderer: " << glGetString(GL_RENDERER) << std::endl;
     std::cout << "[Display] GL Version:  " << glGetString(GL_VERSION) << std::endl;
-    
+    // Set window icon from icon_gnome.png
+    {
+        // Try multiple paths (installed vs development)
+        const char* icon_paths[] = {
+            "src/assets/icon_gnome.png",
+            "assets/icon_gnome.png",
+            "/usr/share/icons/hicolor/128x128/apps/swordigo-desktop.png",
+            "/usr/share/pixmaps/swordigo-desktop.png",
+            nullptr
+        };
+        SDL_Surface* icon = nullptr;
+        for (int i = 0; icon_paths[i]; i++) {
+            icon = IMG_Load(icon_paths[i]);
+            if (icon) break;
+        }
+        if (icon) {
+            SDL_SetWindowIcon(window, icon);
+            SDL_FreeSurface(icon);
+            std::cout << "[Display] Window icon set" << std::endl;
+        } else {
+            std::cerr << "[Display] Could not load icon: " << IMG_GetError() << std::endl;
+        }
+    }
+
     return true;
 }
 

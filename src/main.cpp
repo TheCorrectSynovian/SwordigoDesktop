@@ -1,3 +1,4 @@
+#include <unistd.h>
 #include <iostream>
 #include <vector>
 #include <stdint.h>
@@ -8,6 +9,8 @@
 #include "platform/display.h"
 #include "android/asset_manager.h"
 #include "game/camera_override.h"
+#include "game/mod_tools.h"
+#include "platform/input_config.h"
 #include <cstring>
 #define GL_GLEXT_PROTOTYPES
 #include <GL/gl.h>
@@ -15,6 +18,8 @@
 #include <sys/stat.h>
 
 #include "platform/gui.h"
+#include "platform/fbo_scaler.h"
+#include "platform/io_thread.h"
 
 extern bool g_display_active;
 extern int g_win_w;
@@ -23,6 +28,13 @@ extern int g_win_h;
 // --- Global Context ---
 uint8_t* g_guest_memory = nullptr;
 const uint32_t GUEST_MEM_SIZE = 0xC0000000; // 3GB
+
+// Game internal render resolution — game engine sees this via setApplicationViewSize.
+// Touch coordinates are kept in legacy 960×544 space and auto-scaled.
+static const int GAME_W = 1920;
+static const int GAME_H = 1080;
+static const float TOUCH_SCALE_X = (float)GAME_W / 960.0f;   // 2.0
+static const float TOUCH_SCALE_Y = (float)GAME_H / 544.0f;   // ~1.985
 
 // Add a specific area for guest-side global variables (libc stuff)
 const uint32_t GUEST_GLOBALS_BASE = 0x50000; 
@@ -33,32 +45,66 @@ ElfLoader* g_loader = nullptr;
 JniBridge g_bridge;
 Emulator* g_emulator = nullptr;
 GuiRenderer g_gui;
+InputConfig g_input_config;
+SDL_GameController* g_gamepad = nullptr;
+FBOScale g_fbo_mode = FBOScale::SHARP_BILINEAR;
+
+// FWKeyboard API — resolved from game binary symbols
+static uint32_t g_fw_sharedKeyboard = 0;   // Caver::FWKeyboard::sharedKeyboard()
+static uint32_t g_fw_sendKeyDown = 0;       // Caver::FWKeyboard::SendKeyDownEvent(uint, uint, double)
+static uint32_t g_fw_sendKeyUp = 0;         // Caver::FWKeyboard::SendKeyUpEvent(uint, uint, double)
+static uint32_t g_fw_sendKeyChar = 0;       // Caver::FWKeyboard::SendKeyCharEvent(uint, double)
+static uint32_t g_fw_handleMenuBtn = 0;     // Java_com_touchfoo_swordigo_Native_handleMenuButtonPress
+static bool g_typing_mode = false;          // F6 toggle: keyboard sends FWKeyboard events
 
 extern std::string g_save_dir;  // Defined in jni_bridge.cpp
 std::string g_cache_dir;
 
 std::string get_data_path(const std::string& relative_path) {
+    // 1. Environment variable (AppImage / manual override)
     const char* env_dir = getenv("SWORDIGO_DATA_DIR");
-    std::string base_dir;
     if (env_dir) {
-        base_dir = env_dir;
-    } else {
-#ifdef SWORDIGO_DATA_DIR
-        base_dir = SWORDIGO_DATA_DIR;
-#else
-        base_dir = "./";
+        std::string base = env_dir;
+        if (!base.empty() && base.back() != '/') base += "/";
+        return base + relative_path;
+    }
+
+    // 2. Compile-time define
+#ifdef SWORDIGO_DATA_DIR_PATH
+    {
+        std::string path = std::string(SWORDIGO_DATA_DIR_PATH) + "/" + relative_path;
+        if (access(path.c_str(), F_OK) == 0) return path;
+    }
 #endif
+
+    // 3. Current directory (development mode)
+    {
+        std::string path = "./" + relative_path;
+        if (access(path.c_str(), F_OK) == 0) return path;
     }
-    // Ensure base_dir ends with a slash if not empty
-    if (!base_dir.empty() && base_dir.back() != '/') {
-        base_dir += "/";
+
+    // 4. Standard system install paths
+    const char* sys_paths[] = {
+        "/usr/share/swordigo/",
+        "/usr/local/share/swordigo/",
+        nullptr
+    };
+    for (int i = 0; sys_paths[i]; i++) {
+        std::string path = std::string(sys_paths[i]) + relative_path;
+        if (access(path.c_str(), F_OK) == 0) return path;
     }
-    return base_dir + relative_path;
+
+    // Fallback to current directory
+    return "./" + relative_path;
 }
 
 void call_handle_touch_event(uint32_t addr, uint32_t env, uint32_t obj, int action, int id, double time_val, float x, float y, float old_x, float old_y, int tap_count) {
     if (addr == 0) return;
     
+    // Auto-scale from legacy 960×544 touch space to actual game resolution
+    x     *= TOUCH_SCALE_X;  y     *= TOUCH_SCALE_Y;
+    old_x *= TOUCH_SCALE_X;  old_y *= TOUCH_SCALE_Y;
+
     // Save current SP
     uint32_t old_sp = g_emulator->get_reg(13);
     
@@ -88,12 +134,101 @@ void call_handle_touch_event(uint32_t addr, uint32_t env, uint32_t obj, int acti
     g_emulator->set_reg(13, old_sp);
 }
 
+// Get FWKeyboard singleton pointer from the game engine
+static uint32_t get_fw_keyboard() {
+    if (!g_fw_sharedKeyboard) return 0;
+    g_emulator->run(g_fw_sharedKeyboard);
+    return g_emulator->get_reg(0);  // Returns FWKeyboard* in R0
+}
+
+// Call FWKeyboard::SendKeyDownEvent(keyCode, modifiers, timestamp) or SendKeyUpEvent
+// ARM32 AAPCS: this=R0, keyCode=R1, modifiers=R2, double timestamp → aligned to stack
+static void call_fw_key_event(uint32_t func_addr, uint32_t keyboard_ptr, uint32_t keyCode, uint32_t modifiers, double timestamp) {
+    if (!func_addr || !keyboard_ptr) return;
+    
+    uint32_t old_sp = g_emulator->get_reg(13);
+    uint32_t new_sp = (old_sp - 16) & ~7;  // 8-byte aligned
+    g_emulator->set_reg(13, new_sp);
+    
+    uint8_t* memory = g_emulator->get_memory_base();
+    // double on stack (R3 skipped for 8-byte alignment)
+    *(double*)(memory + new_sp) = timestamp;
+    
+    g_emulator->set_reg(0, keyboard_ptr);  // this
+    g_emulator->set_reg(1, keyCode);
+    g_emulator->set_reg(2, modifiers);
+    // R3 is padding for double alignment
+    
+    g_emulator->run(func_addr);
+    g_emulator->set_reg(13, old_sp);
+}
+
+// Call FWKeyboard::SendKeyCharEvent(charCode, timestamp)
+// ARM32: this=R0, charCode=R1, double timestamp → R2+R3 (8-byte aligned)
+static void call_fw_key_char(uint32_t keyboard_ptr, uint32_t charCode, double timestamp) {
+    if (!g_fw_sendKeyChar || !keyboard_ptr) return;
+    
+    uint32_t old_sp = g_emulator->get_reg(13);
+    uint32_t new_sp = (old_sp - 16) & ~7;
+    g_emulator->set_reg(13, new_sp);
+    
+    uint8_t* memory = g_emulator->get_memory_base();
+    // charCode in R1, then double must be 8-byte aligned → goes to R2+R3
+    union { double d; uint32_t u[2]; } conv;
+    conv.d = timestamp;
+    
+    g_emulator->set_reg(0, keyboard_ptr);
+    g_emulator->set_reg(1, charCode);
+    g_emulator->set_reg(2, conv.u[0]);  // low word
+    g_emulator->set_reg(3, conv.u[1]);  // high word
+    
+    g_emulator->run(g_fw_sendKeyChar);
+    g_emulator->set_reg(13, old_sp);
+}
+
+// Send a complete key press (down + up) through FWKeyboard
+static void fw_send_key_press(uint32_t keyCode, double timestamp) {
+    uint32_t kb = get_fw_keyboard();
+    if (!kb) return;
+    call_fw_key_event(g_fw_sendKeyDown, kb, keyCode, 0, timestamp);
+    call_fw_key_event(g_fw_sendKeyUp, kb, keyCode, 0, timestamp);
+}
+
+// Send a character through FWKeyboard (for text input fields)
+static void fw_send_char(uint32_t charCode, double timestamp) {
+    uint32_t kb = get_fw_keyboard();
+    if (!kb) return;
+    call_fw_key_char(kb, charCode, timestamp);
+}
+
 void init_all() {
     g_guest_memory = new uint8_t[GUEST_MEM_SIZE];
     g_loader = new ElfLoader(g_guest_memory, GUEST_MEM_SIZE);
     g_bridge.init_standard_bridges();
     asset_manager_init(get_data_path("assets").c_str());
     g_gui.init();
+    g_input_config.load(g_save_dir + "/controls.ini");
+    std::cout << "[Input] Loaded controls config (" << g_input_config.button_count() << " buttons)" << std::endl;
+    
+    // Start async IO thread
+    io_thread_start();
+
+    // Initialize FBO Scaler
+    if (g_display_active) {
+        fbo_init(GAME_W, GAME_H);
+    }
+    
+    // Open any connected gamepad
+    SDL_Init(SDL_INIT_GAMECONTROLLER);
+    for (int i = 0; i < SDL_NumJoysticks(); i++) {
+        if (SDL_IsGameController(i)) {
+            g_gamepad = SDL_GameControllerOpen(i);
+            if (g_gamepad) {
+                std::cout << "[Input] Gamepad: " << SDL_GameControllerName(g_gamepad) << std::endl;
+                break;
+            }
+        }
+    }
     std::cout << "[Main] Infrastructure initialized." << std::endl;
 }
 
@@ -220,6 +355,17 @@ void load_and_boot() {
     uint32_t setApplicationViewSize = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_setApplicationViewSize");
     uint32_t applicationDidBecomeActive = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_applicationDidBecomeActive");
 
+    // Resolve FWKeyboard API symbols (mangled C++ names from the Caver engine)
+    g_fw_sharedKeyboard = g_loader->get_symbol_vaddr(&g_main_mod, "_ZN5Caver10FWKeyboard14sharedKeyboardEv");
+    g_fw_sendKeyDown    = g_loader->get_symbol_vaddr(&g_main_mod, "_ZN5Caver10FWKeyboard16SendKeyDownEventEjjd");
+    g_fw_sendKeyUp      = g_loader->get_symbol_vaddr(&g_main_mod, "_ZN5Caver10FWKeyboard14SendKeyUpEventEjjd");
+    g_fw_sendKeyChar    = g_loader->get_symbol_vaddr(&g_main_mod, "_ZN5Caver10FWKeyboard16SendKeyCharEventEjd");
+    g_fw_handleMenuBtn  = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_handleMenuButtonPress");
+    std::cout << "[Boot] FWKeyboard API: sharedKeyboard=0x" << std::hex << g_fw_sharedKeyboard
+              << " sendDown=0x" << g_fw_sendKeyDown << " sendUp=0x" << g_fw_sendKeyUp
+              << " sendChar=0x" << g_fw_sendKeyChar << " menuBtn=0x" << g_fw_handleMenuBtn
+              << std::dec << std::endl;
+
     // Setup fake JNI structures in guest memory
     uint32_t env_ptr = setup_jni_env(g_guest_memory);
     std::cout << "[Debug] env_ptr = 0x" << std::hex << env_ptr << " vtable_ptr = 0x" << *(uint32_t*)(g_guest_memory + env_ptr) << std::dec << std::endl;
@@ -272,7 +418,7 @@ void load_and_boot() {
     }
     if (setApplicationViewSize) {
         std::cout << "[Boot] Calling setApplicationViewSize" << std::endl;
-        g_emulator->call(setApplicationViewSize, {env_ptr, 0, 960, 544, 1}); // Match Vita port: 960x544
+        g_emulator->call(setApplicationViewSize, {env_ptr, 0, (uint32_t)GAME_W, (uint32_t)GAME_H, 1}); // Full HD internal resolution
     }
     if (applicationDidBecomeActive) {
         std::cout << "[Boot] Calling applicationDidBecomeActive" << std::endl;
@@ -289,6 +435,12 @@ void load_and_boot() {
     if (googleSignInCompleted) {
         std::cout << "[Boot] Calling googleSignInCompleted(false) — no Google Play services" << std::endl;
         g_emulator->call(googleSignInCompleted, {env_ptr, 0, 0}); // (env, this, false)
+    }
+
+    // Hide the game's native on-screen touch controls (we use keyboard/gamepad instead)
+    if (g_fw_handleMenuBtn) {
+        std::cout << "[Boot] Calling handleMenuButtonPress -> hide on-screen controls" << std::endl;
+        g_emulator->call(g_fw_handleMenuBtn, {});
     }
 
     if (updateApp && drawApp) {
@@ -341,17 +493,13 @@ void load_and_boot() {
         bool key_use_item = false;
         bool key_menu = false;
 
-        // Camera override keys (Numpad)
-        bool cam_key_left  = false;   // KP4 — pan left
-        bool cam_key_right = false;   // KP6 — pan right
-        bool cam_key_fwd   = false;   // KP8 — move forward (−Z)
-        bool cam_key_back  = false;   // KP2 — move backward (+Z)
-        bool cam_key_up    = false;   // KP7 / PageUp — raise camera
-        bool cam_key_down  = false;   // KP1 / PageDown — lower camera
-        bool cam_key_zin   = false;   // KP+ — zoom in
-        bool cam_key_zout  = false;   // KP− — zoom out
-        const float CAM_SPEED = 5.0f;
-        const float CAM_ZOOM  = 10.0f;
+        // Camera override keys (Arrow keys — no numpad needed!)
+        bool arrow_left  = false;
+        bool arrow_right = false;
+        bool arrow_up    = false;
+        bool arrow_down  = false;
+        bool cam_key_pgup  = false;   // PageUp — raise camera
+        bool cam_key_pgdn  = false;   // PageDown — lower camera
 
         bool running = true;
         while (running) {
@@ -364,8 +512,6 @@ void load_and_boot() {
             if (dt_seconds < 0.001f) dt_seconds = 0.016666668f;
             last_ticks = now_ticks;
             accumulated_time += dt_seconds;
-            uint32_t dt_hex;
-            memcpy(&dt_hex, &dt_seconds, 4);
             
             // Show details for first 10 frames only
             if (completed_frames < 10) {
@@ -374,32 +520,49 @@ void load_and_boot() {
                 g_emulator->quiet_mode = true;
             }
             
-            // --- Send TOUCH_MOVED every frame for held keys (Vita exact coords 960x544) ---
-            if (key_left)
-                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 6, accumulated_time, 60.0f, 94.0f, 60.0f, 94.0f, 0);
-            if (key_right)
-                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 7, accumulated_time, 155.0f, 94.0f, 155.0f, 94.0f, 0);
-            if (key_jump)
-                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 5, accumulated_time, 900.0f, 94.0f, 900.0f, 94.0f, 0);
-            if (key_attack)
-                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 8, accumulated_time, 790.0f, 94.0f, 790.0f, 94.0f, 0);
-            if (key_magic)
-                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 10, accumulated_time, 900.0f, 184.0f, 900.0f, 184.0f, 0);
-
-            // --- Per-frame camera accumulation (held keys) ---
-            if (g_cam_active) {
-                if (cam_key_left)  cam_move(-CAM_SPEED, 0.0f,  0.0f);
-                if (cam_key_right) cam_move(+CAM_SPEED, 0.0f,  0.0f);
-                if (cam_key_fwd)   cam_move(0.0f,  0.0f, -CAM_SPEED);
-                if (cam_key_back)  cam_move(0.0f,  0.0f, +CAM_SPEED);
-                if (cam_key_up)    cam_move(0.0f, +CAM_SPEED,  0.0f);
-                if (cam_key_down)  cam_move(0.0f, -CAM_SPEED,  0.0f);
-                if (cam_key_zin)   cam_move(0.0f,  0.0f, -CAM_ZOOM);
-                if (cam_key_zout)  cam_move(0.0f,  0.0f, +CAM_ZOOM);
+            // --- Send TOUCH_MOVED every frame for held buttons (uses InputConfig positions) ---
+            for (int bi = 0; bi < g_input_config.button_count(); bi++) {
+                const TouchButton* btn = g_input_config.get_button(bi);
+                if (btn && btn->is_pressed) {
+                    call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, btn->touch_id, accumulated_time,
+                        btn->game_x, btn->game_y, btn->game_x, btn->game_y, 0);
+                }
             }
 
-            g_emulator->call(updateApp, {env_ptr, 0, dt_hex});
+            // --- Per-frame camera movement (Arrow keys, dt-scaled with acceleration) ---
+            if (g_cam_active) {
+                bool any_cam_key = arrow_left || arrow_right || arrow_up || arrow_down || cam_key_pgup || cam_key_pgdn;
+                if (any_cam_key) {
+                    float dx = 0, dy = 0, dz = 0;
+                    if (arrow_left)   dx -= 1.0f;
+                    if (arrow_right)  dx += 1.0f;
+                    if (arrow_up)     dy += 1.0f;
+                    if (arrow_down)   dy -= 1.0f;
+                    if (cam_key_pgup) dz -= 1.0f;  // zoom in
+                    if (cam_key_pgdn) dz += 1.0f;  // zoom out
+                    cam_move_scaled(dx, dy, dz, dt_seconds);
+                } else {
+                    cam_reset_accel();
+                }
+            }
+
+            // --- Apply game speed multiplier ---
+            float game_dt = dt_seconds * g_game_speed;
+            uint32_t dt_hex;
+            memcpy(&dt_hex, &game_dt, 4);
+
+            // --- Pause / Frame Advance ---
+            if (!g_game_paused || g_step_one_frame) {
+                g_emulator->call(updateApp, {env_ptr, 0, dt_hex});
+                if (g_step_one_frame) {
+                    g_step_one_frame = false;
+                    mod_toast("Stepped 1 frame", 0.8f);
+                }
+            }
             
+            // Poll async IO thread completion callbacks
+            io_thread_poll();
+
             // Handle async callbacks: if loadSnapshot was called, call snapshotLoaded
             extern bool g_snapshot_load_pending;
             extern bool g_snapshot_has_data;
@@ -421,14 +584,39 @@ void load_and_boot() {
                 }
             }
             
+            if (g_display_active) {
+                fbo_begin_game();
+            }
+            
             g_emulator->call(drawApp, {env_ptr, 0});
+
+            if (g_display_active) {
+                fbo_end_game_and_blit(g_win_w, g_win_h, g_fbo_mode);
+            }
 
             // Apply camera position override (after draw, before swap)
             cam_apply(g_emulator, g_guest_memory);
 
             // Render GUI overlay (F1 toggle)
             if (g_display_active && gui_visible) {
-                g_gui.render(mouse_x, mouse_y, mouse_pressed);
+                g_gui.render(mouse_x, mouse_y, mouse_pressed, g_win_w, g_win_h);
+            }
+            
+            // Render controls editor overlay (F2 toggle)
+            if (g_display_active && g_input_config.is_editing()) {
+                g_input_config.render_editor(g_win_w, g_win_h, mouse_x, mouse_y, mouse_pressed);
+                // Draw instruction text on top (uses GUI font renderer)
+                glPushAttrib(GL_ALL_ATTRIB_BITS);
+                glViewport(0, 0, g_win_w, g_win_h);
+                glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+                glOrtho(0, g_win_w, 0, g_win_h, -1, 1);
+                glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+                glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
+                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                g_gui.draw_string("CONTROLS EDITOR - Drag buttons to reposition | F2 to save & close", 10, g_win_h - 20, 1.5f, 100, 200, 255, 255);
+                g_gui.draw_string("Blue=Movement  Green=Action  Orange=Menu", 10, g_win_h - 38, 1.2f, 180, 180, 200, 200);
+                glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix();
+                glPopAttrib();
             }
             
             // Render F3 debug overlay
@@ -451,7 +639,7 @@ void load_and_boot() {
                 glColor4ub(0, 0, 0, 180);
                 glBegin(GL_QUADS);
                 glVertex2f(10, g_win_h - 10); glVertex2f(420, g_win_h - 10);
-                glVertex2f(420, g_win_h - 200); glVertex2f(10, g_win_h - 200);
+                glVertex2f(420, g_win_h - 225); glVertex2f(10, g_win_h - 225);
                 glEnd();
                 // FPS text using simple pixel rendering
                 char dbg[256];
@@ -465,15 +653,28 @@ void load_and_boot() {
                 g_gui.draw_string(dbg, 20, g_win_h - 97, 1.2f, 180, 180, 180, 255);
                 snprintf(dbg, sizeof(dbg), "State: %d  TexUps: %d", g_frame_stats.state_changes, g_frame_stats.tex_uploads);
                 g_gui.draw_string(dbg, 20, g_win_h - 114, 1.2f, 180, 180, 180, 255);
-                snprintf(dbg, sizeof(dbg), "Game: 960x544 -> Window: %dx%d", g_win_w, g_win_h);
-                g_gui.draw_string(dbg, 20, g_win_h - 135, 1.2f, 140, 140, 160, 255);
+                snprintf(dbg, sizeof(dbg), "Game: %dx%d -> Window: %dx%d", GAME_W, GAME_H, g_win_w, g_win_h);
+                g_gui.draw_string(dbg, 20, g_win_h - 131, 1.2f, 140, 140, 160, 255);
                 snprintf(dbg, sizeof(dbg), "Mouse: %d,%d  DT: %.4fs", mouse_x, mouse_y, dt_seconds);
-                g_gui.draw_string(dbg, 20, g_win_h - 152, 1.2f, 140, 140, 160, 255);
-                snprintf(dbg, sizeof(dbg), "F1:GUI  F3:Debug  F12:Full  F2:Camera");
-                g_gui.draw_string(dbg, 20, g_win_h - 175, 1.1f, 100, 100, 120, 200);
+                g_gui.draw_string(dbg, 20, g_win_h - 148, 1.2f, 140, 140, 160, 255);
+                
+                const char* mode_str = "Unknown";
+                if (g_fbo_mode == FBOScale::SHARP_BILINEAR) mode_str = "Sharp-Bilinear";
+                else if (g_fbo_mode == FBOScale::NEAREST) mode_str = "Nearest";
+                else if (g_fbo_mode == FBOScale::CRT_SCANLINE) mode_str = "CRT Scanline";
+                snprintf(dbg, sizeof(dbg), "Scale Mode: %s", mode_str);
+                g_gui.draw_string(dbg, 20, g_win_h - 165, 1.2f, 255, 200, 100, 255);
+
+                snprintf(dbg, sizeof(dbg), "Speed: %s  %s", mod_speed_label(), g_game_paused ? "|| PAUSED" : "");
+                g_gui.draw_string(dbg, 20, g_win_h - 185, 1.2f, 255, 180, 50, 255);
+                snprintf(dbg, sizeof(dbg), "F1:GUI F2:Ctrl F3:Dbg F4:Scale F5:Cam F7:Type F10:HUD");
+                g_gui.draw_string(dbg, 20, g_win_h - 202, 1.1f, 100, 100, 120, 200);
+                if (g_typing_mode) {
+                    g_gui.draw_string("TYPING MODE ACTIVE", 20, g_win_h - 218, 1.2f, 255, 100, 100, 255);
+                }
                 char cam_dbg[128];
                 cam_debug_string(cam_dbg, sizeof(cam_dbg));
-                g_gui.draw_string(cam_dbg, 20, g_win_h - 195, 1.1f,
+                g_gui.draw_string(cam_dbg, 20, g_win_h - 222, 1.1f,
                     g_cam_active ? 0 : 120,
                     g_cam_active ? 220 : 120,
                     g_cam_active ? 100 : 120, 255);
@@ -483,7 +684,21 @@ void load_and_boot() {
                 glPopAttrib();
             }
             
-            // Show "Press F1" hint for first 5 seconds
+            // Render mod tools overlay (speed indicator, toasts, pause screen)
+            if (g_display_active) {
+                glPushAttrib(GL_ALL_ATTRIB_BITS);
+                glViewport(0, 0, g_win_w, g_win_h);
+                glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+                glOrtho(0, g_win_w, 0, g_win_h, -1, 1);
+                glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+                glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
+                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                mod_render_overlay(g_gui, g_win_w, g_win_h, dt_seconds);
+                glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix();
+                glPopAttrib();
+            }
+
+            // Show hint for first 5 seconds
             if (g_display_active && !gui_visible && (SDL_GetTicks() - hint_start_time) < 5000) {
                 glPushAttrib(GL_ALL_ATTRIB_BITS);
                 glViewport(0, 0, g_win_w, g_win_h);
@@ -503,10 +718,10 @@ void load_and_boot() {
                 int cx = g_win_w / 2;
                 int cy = g_win_h / 2;
                 glBegin(GL_QUADS);
-                glVertex2f(cx - 260, cy - 15); glVertex2f(cx + 260, cy - 15);
-                glVertex2f(cx + 260, cy + 15); glVertex2f(cx - 260, cy + 15);
+                glVertex2f(cx - 280, cy - 15); glVertex2f(cx + 280, cy - 15);
+                glVertex2f(cx + 280, cy + 15); glVertex2f(cx - 280, cy + 15);
                 glEnd();
-                g_gui.draw_string("Press F1 for GUI | F3 for Debug | F12 Fullscreen", cx - 250, cy - 7, 1.2f, 0, 200, 255, 255);
+                g_gui.draw_string("WASD:Move  Arrows:Camera  +/-:Speed  F5:Cam  F8:Pause  F12:Fullscreen", cx - 310, cy - 7, 1.1f, 0, 200, 255, 255);
                 glPopMatrix();
                 glMatrixMode(GL_PROJECTION);
                 glPopMatrix();
@@ -543,11 +758,65 @@ void load_and_boot() {
                                 mouse_pressed = true;
                                 mouse_x = event.button.x;
                                 mouse_y = g_win_h - event.button.y;
-                                if (gui_visible && g_gui.handle_click(mouse_x, mouse_y)) {
+                                
+                                // Controls editor intercepts all mouse events
+                                if (g_input_config.is_editing()) {
+                                    float gx = event.button.x * 960.0f / (float)g_win_w;
+                                    float gy = 544.0f - (event.button.y * 544.0f / (float)g_win_h);
+                                    g_input_config.editor_mouse_down(gx, gy);
                                     click_swallowed_by_gui = true;
+                                    break;
+                                }
+                                
+                                GuiAction gui_action = GUI_NONE;
+                                bool gui_consumed = false;
+                                if (gui_visible) {
+                                    gui_action = g_gui.handle_click(mouse_x, mouse_y, g_win_w, g_win_h);
+                                    gui_consumed = (gui_action != GUI_NONE) || (mouse_y >= g_win_h - (int)(32 * g_gui.get_scale()));
+                                }
+                                if (gui_consumed) {
+                                    click_swallowed_by_gui = true;
+                                    switch (gui_action) {
+                                        case GUI_EXIT:
+                                            running = false;
+                                            break;
+                                        case GUI_PAUSE:
+                                            mod_toggle_pause();
+                                            std::cout << "[GUI] Emulation " << (g_game_paused ? "PAUSED" : "RESUMED") << std::endl;
+                                            break;
+                                        case GUI_CUSTOMIZE_CONTROLS:
+                                            g_input_config.set_editing(true);
+                                            std::cout << "[GUI] Controls editor opened" << std::endl;
+                                            break;
+                                        case GUI_SAVE_STATE:
+                                            std::cout << "[GUI] Save State requested" << std::endl;
+                                            break;
+                                        case GUI_LOAD_STATE:
+                                            std::cout << "[GUI] Load State requested" << std::endl;
+                                            break;
+                                        case GUI_GAME_SPEED_UP:
+                                            mod_speed_up();
+                                            break;
+                                        case GUI_GAME_SPEED_DOWN:
+                                            mod_speed_down();
+                                            break;
+                                        case GUI_GAME_SPEED_RESET:
+                                            mod_speed_reset();
+                                            break;
+                                        case GUI_TOGGLE_CAM:
+                                            cam_toggle();
+                                            break;
+                                        case GUI_TOGGLE_PAUSE:
+                                            mod_toggle_pause();
+                                            break;
+                                        case GUI_TOGGLE_SMOOTH_CAM:
+                                            cam_toggle_smooth();
+                                            break;
+                                        default:
+                                            break;
+                                    }
                                 } else {
                                     click_swallowed_by_gui = false;
-                                    // Scale mouse from window to 960x544 game coords
                                     float x = event.button.x * 960.0f / (float)g_win_w;
                                     float y = 544.0f - (event.button.y * 544.0f / (float)g_win_h);
                                     last_mouse_x = x;
@@ -559,7 +828,11 @@ void load_and_boot() {
                         case SDL_MOUSEMOTION:
                             mouse_x = event.motion.x;
                             mouse_y = g_win_h - event.motion.y;
-                            if (mouse_pressed && !click_swallowed_by_gui) {
+                            if (g_input_config.is_editing() && mouse_pressed) {
+                                float gx = event.motion.x * 960.0f / (float)g_win_w;
+                                float gy = 544.0f - (event.motion.y * 544.0f / (float)g_win_h);
+                                g_input_config.editor_mouse_move(gx, gy);
+                            } else if (mouse_pressed && !click_swallowed_by_gui) {
                                 float x = event.motion.x * 960.0f / (float)g_win_w;
                                 float y = 544.0f - (event.motion.y * 544.0f / (float)g_win_h);
                                 call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 1, accumulated_time, x, y, last_mouse_x, last_mouse_y, 0);
@@ -572,7 +845,9 @@ void load_and_boot() {
                                 mouse_pressed = false;
                                 mouse_x = event.button.x;
                                 mouse_y = g_win_h - event.button.y;
-                                if (!click_swallowed_by_gui) {
+                                if (g_input_config.is_editing()) {
+                                    g_input_config.editor_mouse_up();
+                                } else if (!click_swallowed_by_gui) {
                                     float x = event.button.x * 960.0f / (float)g_win_w;
                                     float y = 544.0f - (event.button.y * 544.0f / (float)g_win_h);
                                     call_handle_touch_event(handleTouchEvent, env_ptr, 0, 2, 1, accumulated_time, x, y, last_mouse_x, last_mouse_y, 0);
@@ -582,6 +857,11 @@ void load_and_boot() {
                                 click_swallowed_by_gui = false;
                             }
                             break;
+                        case SDL_MOUSEWHEEL:
+                            if (g_cam_active) {
+                                cam_scroll_zoom((float)event.wheel.y);
+                            }
+                            break;
                         case SDL_KEYDOWN:
                             if (event.key.keysym.sym == SDLK_F1 && !event.key.repeat) {
                                 gui_visible = !gui_visible;
@@ -589,12 +869,26 @@ void load_and_boot() {
                                 break;
                             }
                             if (event.key.keysym.sym == SDLK_F2 && !event.key.repeat) {
-                                cam_set_active(!g_cam_active);
+                                g_input_config.toggle_editor();
+                                if (!g_input_config.is_editing()) {
+                                    g_input_config.save(g_save_dir + "/controls.ini");
+                                    std::cout << "[Input] Controls config saved" << std::endl;
+                                }
+                                std::cout << "[Controls Editor] " << (g_input_config.is_editing() ? "ON" : "OFF") << std::endl;
                                 break;
                             }
                             if (event.key.keysym.sym == SDLK_F3 && !event.key.repeat) {
                                 debug_visible = !debug_visible;
                                 std::cout << "[Debug] " << (debug_visible ? "ON" : "OFF") << std::endl;
+                                break;
+                            }
+                            if (event.key.keysym.sym == SDLK_F4 && !event.key.repeat) {
+                                g_fbo_mode = static_cast<FBOScale>((static_cast<int>(g_fbo_mode) + 1) % 3);
+                                const char* m_name = "Unknown";
+                                if (g_fbo_mode == FBOScale::SHARP_BILINEAR) m_name = "Sharp-Bilinear";
+                                else if (g_fbo_mode == FBOScale::NEAREST) m_name = "Nearest";
+                                else if (g_fbo_mode == FBOScale::CRT_SCANLINE) m_name = "CRT Scanline";
+                                std::cout << "[FBO] Scale mode changed to " << m_name << std::endl;
                                 break;
                             }
                             if (event.key.keysym.sym == SDLK_F12 && !event.key.repeat) {
@@ -615,76 +909,127 @@ void load_and_boot() {
                                 }
                                 break;
                             }
+                            if (event.key.keysym.sym == SDLK_F5 && !event.key.repeat) {
+                                cam_toggle();
+                                break;
+                            }
+                            if (event.key.keysym.sym == SDLK_F6 && !event.key.repeat) {
+                                cam_toggle_smooth();
+                                break;
+                            }
+                            if (event.key.keysym.sym == SDLK_F7 && !event.key.repeat) {
+                                g_typing_mode = !g_typing_mode;
+                                if (g_typing_mode) {
+                                    SDL_StartTextInput();
+                                    std::cout << "[Keyboard] Typing mode ON — keyboard sends FWKeyboard events" << std::endl;
+                                } else {
+                                    SDL_StopTextInput();
+                                    std::cout << "[Keyboard] Typing mode OFF — keyboard sends touch events" << std::endl;
+                                }
+                                break;
+                            }
+                            if (event.key.keysym.sym == SDLK_F10 && !event.key.repeat) {
+                                // Toggle on-screen controls via handleMenuButtonPress
+                                if (g_fw_handleMenuBtn) {
+                                    g_emulator->call(g_fw_handleMenuBtn, {});
+                                    std::cout << "[Keyboard] Toggled on-screen controls" << std::endl;
+                                }
+                                break;
+                            }
+                            if (event.key.keysym.sym == SDLK_F8 && !event.key.repeat) {
+                                mod_toggle_pause();
+                                break;
+                            }
+                            if (event.key.keysym.sym == SDLK_F9 && !event.key.repeat) {
+                                mod_step_frame();
+                                break;
+                            }
+                            if (event.key.keysym.sym == SDLK_EQUALS && !event.key.repeat) {
+                                mod_speed_up();
+                                break;
+                            }
+                            if (event.key.keysym.sym == SDLK_MINUS && !event.key.repeat) {
+                                mod_speed_down();
+                                break;
+                            }
+                            if (event.key.keysym.sym == SDLK_0 && !event.key.repeat) {
+                                mod_speed_reset();
+                                break;
+                            }
                             // fall through
                         case SDL_KEYUP: {
                             bool is_down = (event.type == SDL_KEYDOWN);
+                            int scancode = event.key.keysym.scancode;
+                            
+                            // ---- TYPING MODE: route through FWKeyboard API ----
+                            if (g_typing_mode && g_fw_sendKeyDown && g_fw_sendKeyUp) {
+                                // Map SDL keysym to FWKeyboard key codes
+                                // Based on Caver engine internal codes (iOS/Android keycodes)
+                                uint32_t fw_key = 0;
+                                switch (event.key.keysym.sym) {
+                                    case SDLK_RETURN:     fw_key = 0x24; break; // Enter
+                                    case SDLK_BACKSPACE:  fw_key = 0x33; break; // Backspace/Delete
+                                    case SDLK_ESCAPE:     fw_key = 0x35; break; // Escape
+                                    case SDLK_LEFT:       fw_key = 0x7B; break; // Arrow left
+                                    case SDLK_RIGHT:      fw_key = 0x7C; break; // Arrow right
+                                    case SDLK_DOWN:       fw_key = 0x7D; break; // Arrow down
+                                    case SDLK_UP:         fw_key = 0x7E; break; // Arrow up
+                                    case SDLK_TAB:        fw_key = 0x30; break; // Tab
+                                    case SDLK_SPACE:      fw_key = 0x31; break; // Space
+                                    case SDLK_DELETE:     fw_key = 0x75; break; // Forward delete
+                                    // Menu button (same as handleMenuButtonPress)
+                                    case SDLK_F10:        fw_key = 0x5d; break;
+                                    default: break;
+                                }
+                                if (fw_key != 0) {
+                                    uint32_t kb = get_fw_keyboard();
+                                    if (kb) {
+                                        if (is_down)
+                                            call_fw_key_event(g_fw_sendKeyDown, kb, fw_key, 0, accumulated_time);
+                                        else
+                                            call_fw_key_event(g_fw_sendKeyUp, kb, fw_key, 0, accumulated_time);
+                                    }
+                                }
+                                break; // Don't fall through to InputConfig
+                            }
+                            
+                            // ---- NORMAL MODE: route through InputConfig ----
+                            int btn_idx = g_input_config.find_by_scancode(scancode);
+                            if (btn_idx >= 0) {
+                                TouchButton* btn = g_input_config.get_button(btn_idx);
+                                if (btn && btn->is_pressed != is_down) {
+                                    btn->is_pressed = is_down;
+                                    call_handle_touch_event(handleTouchEvent, env_ptr, 0,
+                                        is_down ? 1 : 2, btn->touch_id, accumulated_time,
+                                        btn->game_x, btn->game_y, btn->game_x, btn->game_y,
+                                        is_down ? 1 : 0);
+                                }
+                                break;
+                            }
+                            
+                            // Camera + arrow keys (camera-only, not game movement)
                             switch (event.key.keysym.sym) {
-                                case SDLK_LEFT:
-                                case SDLK_a:
-                                    if (key_left != is_down) {
-                                        key_left = is_down;
-                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 6, accumulated_time, 60.0f, 94.0f, 60.0f, 94.0f, is_down ? 1 : 0);
-                                    }
-                                    break;
-                                case SDLK_RIGHT:
-                                case SDLK_d:
-                                    if (key_right != is_down) {
-                                        key_right = is_down;
-                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 7, accumulated_time, 155.0f, 94.0f, 155.0f, 94.0f, is_down ? 1 : 0);
-                                    }
-                                    break;
-                                case SDLK_SPACE:
-                                case SDLK_UP:
-                                case SDLK_w:
-                                    if (key_jump != is_down) {
-                                        key_jump = is_down;
-                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 5, accumulated_time, 900.0f, 94.0f, 900.0f, 94.0f, is_down ? 1 : 0);
-                                    }
-                                    break;
-                                case SDLK_j:
-                                case SDLK_z:
-                                    if (key_attack != is_down) {
-                                        key_attack = is_down;
-                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 8, accumulated_time, 790.0f, 94.0f, 790.0f, 94.0f, is_down ? 1 : 0);
-                                    }
-                                    break;
-                                case SDLK_k:
-                                case SDLK_x:
-                                    if (key_magic != is_down) {
-                                        key_magic = is_down;
-                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 10, accumulated_time, 900.0f, 184.0f, 900.0f, 184.0f, is_down ? 1 : 0);
-                                    }
-                                    break;
-                                case SDLK_i:
-                                    if (key_use_item != is_down) {
-                                        key_use_item = is_down;
-                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 12, accumulated_time, 425.0f, 54.0f, 425.0f, 54.0f, is_down ? 1 : 0);
-                                    }
-                                    break;
-                                case SDLK_ESCAPE:
-                                    if (key_menu != is_down) {
-                                        key_menu = is_down;
-                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 9, accumulated_time, 48.0f, 500.0f, 48.0f, 500.0f, is_down ? 1 : 0);
-                                    }
-                                    break;
-
-                                // ---- Camera override keys (no numpad required) ----
-                                //   Pan  L/R  : [ and ]
-                                //   Depth F/B : , and .
-                                //   Height    : PageUp / PageDown
-                                //   Zoom      : - and =
-                                //   Reset     : backslash  (\)
-                                case SDLK_LEFTBRACKET:   cam_key_left  = is_down; break;
-                                case SDLK_RIGHTBRACKET:  cam_key_right = is_down; break;
-                                case SDLK_COMMA:         cam_key_fwd   = is_down; break;
-                                case SDLK_PERIOD:        cam_key_back  = is_down; break;
-                                case SDLK_PAGEUP:        cam_key_up    = is_down; break;
-                                case SDLK_PAGEDOWN:      cam_key_down  = is_down; break;
-                                case SDLK_EQUALS:        cam_key_zin   = is_down; break;
-                                case SDLK_MINUS:         cam_key_zout  = is_down; break;
-                                case SDLK_BACKSLASH:  // Reset camera
+                                case SDLK_LEFT:     arrow_left   = is_down; break;
+                                case SDLK_RIGHT:    arrow_right  = is_down; break;
+                                case SDLK_UP:       arrow_up     = is_down; break;
+                                case SDLK_DOWN:     arrow_down   = is_down; break;
+                                case SDLK_PAGEUP:   cam_key_pgup = is_down; break;
+                                case SDLK_PAGEDOWN: cam_key_pgdn = is_down; break;
+                                case SDLK_HOME:
                                     if (is_down) cam_reset();
                                     break;
+                            }
+                            break;
+                        }
+                        // --- Text input events (typing mode F7) ---
+                        case SDL_TEXTINPUT: {
+                            if (g_typing_mode && g_fw_sendKeyChar) {
+                                // Send each character through FWKeyboard::SendKeyCharEvent
+                                const char* text = event.text.text;
+                                for (int ci = 0; text[ci] != '\0'; ci++) {
+                                    uint32_t ch = (uint32_t)(unsigned char)text[ci];
+                                    fw_send_char(ch, accumulated_time);
+                                }
                             }
                             break;
                         }
@@ -711,6 +1056,99 @@ void load_and_boot() {
                             float old_y = (1.0f - (event.tfinger.y - event.tfinger.dy)) * 544.0f;
                             int finger_id = (int)(event.tfinger.fingerId % 10) + 20;
                             call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, finger_id, accumulated_time, x, y, old_x, old_y, 0);
+                            break;
+                        }
+                        // --- Gamepad support ---
+                        case SDL_CONTROLLERDEVICEADDED: {
+                            if (!g_gamepad) {
+                                g_gamepad = SDL_GameControllerOpen(event.cdevice.which);
+                                if (g_gamepad)
+                                    std::cout << "[Input] Gamepad connected: " << SDL_GameControllerName(g_gamepad) << std::endl;
+                            }
+                            break;
+                        }
+                        case SDL_CONTROLLERDEVICEREMOVED: {
+                            if (g_gamepad && event.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_gamepad))) {
+                                SDL_GameControllerClose(g_gamepad);
+                                g_gamepad = nullptr;
+                                std::cout << "[Input] Gamepad disconnected" << std::endl;
+                            }
+                            break;
+                        }
+                        case SDL_CONTROLLERAXISMOTION: {
+                            if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
+                                float val = event.caxis.value / 32768.0f;
+                                if (g_cam_active) {
+                                    cam_move_scaled(val, 0.0f, 0.0f, dt_seconds);
+                                } else {
+                                    bool new_left = (val < -0.2f);
+                                    bool new_right = (val > 0.2f);
+                                    
+                                    if (key_left != new_left) {
+                                        key_left = new_left;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0,
+                                            key_left ? 1 : 2, 6, accumulated_time,
+                                            60.0f, 94.0f, 60.0f, 94.0f, key_left ? 1 : 0);
+                                    }
+                                    if (key_right != new_right) {
+                                        key_right = new_right;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0,
+                                            key_right ? 1 : 2, 7, accumulated_time,
+                                            155.0f, 94.0f, 155.0f, 94.0f, key_right ? 1 : 0);
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        case SDL_CONTROLLERBUTTONDOWN:
+                        case SDL_CONTROLLERBUTTONUP: {
+                            bool gp_down = (event.type == SDL_CONTROLLERBUTTONDOWN);
+                            switch (event.cbutton.button) {
+                                case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+                                    if (key_left != gp_down) {
+                                        key_left = gp_down;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, gp_down ? 1 : 2, 6, accumulated_time, 60.0f, 94.0f, 60.0f, 94.0f, gp_down ? 1 : 0);
+                                    }
+                                    break;
+                                case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+                                    if (key_right != gp_down) {
+                                        key_right = gp_down;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, gp_down ? 1 : 2, 7, accumulated_time, 155.0f, 94.0f, 155.0f, 94.0f, gp_down ? 1 : 0);
+                                    }
+                                    break;
+                                case SDL_CONTROLLER_BUTTON_A:
+                                    if (key_jump != gp_down) {
+                                        key_jump = gp_down;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, gp_down ? 1 : 2, 5, accumulated_time, 900.0f, 94.0f, 900.0f, 94.0f, gp_down ? 1 : 0);
+                                    }
+                                    break;
+                                case SDL_CONTROLLER_BUTTON_X:
+                                    if (key_attack != gp_down) {
+                                        key_attack = gp_down;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, gp_down ? 1 : 2, 8, accumulated_time, 790.0f, 94.0f, 790.0f, 94.0f, gp_down ? 1 : 0);
+                                    }
+                                    break;
+                                case SDL_CONTROLLER_BUTTON_Y:
+                                    if (key_magic != gp_down) {
+                                        key_magic = gp_down;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, gp_down ? 1 : 2, 10, accumulated_time, 900.0f, 184.0f, 900.0f, 184.0f, gp_down ? 1 : 0);
+                                    }
+                                    break;
+                                case SDL_CONTROLLER_BUTTON_B:
+                                case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
+                                case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
+                                    if (key_use_item != gp_down) {
+                                        key_use_item = gp_down;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, gp_down ? 1 : 2, 12, accumulated_time, 425.0f, 54.0f, 425.0f, 54.0f, gp_down ? 1 : 0);
+                                    }
+                                    break;
+                                case SDL_CONTROLLER_BUTTON_START:
+                                    if (key_menu != gp_down) {
+                                        key_menu = gp_down;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, gp_down ? 1 : 2, 9, accumulated_time, 48.0f, 500.0f, 48.0f, 500.0f, gp_down ? 1 : 0);
+                                    }
+                                    break;
+                            }
                             break;
                         }
                     }
@@ -753,6 +1191,13 @@ void load_and_boot() {
             
             // In headless mode, stop after TARGET_FRAMES
             if (TARGET_FRAMES > 0 && completed_frames >= TARGET_FRAMES) running = false;
+        }
+
+        // Cleanup
+        g_input_config.save(g_save_dir + "/controls.ini");
+        if (g_gamepad) {
+            SDL_GameControllerClose(g_gamepad);
+            g_gamepad = nullptr;
         }
 
         std::cout << "\n========================================" << std::endl;
@@ -808,10 +1253,10 @@ int main(int argc, char* argv[]) {
     Display display;
     
     if (!headless) {
-        if (display.init(1920, 1080, "Swordigo Desktop - Remastered")) {
+        if (display.init(1280, 720, "Swordigo Desktop - Remastered")) {
             g_display_active = true;
             g_display_ptr = &display;
-            std::cout << "[Main] Display initialized - 1920x1080 HD" << std::endl;
+            std::cout << "[Main] Display initialized - 1280x720" << std::endl;
         } else {
             std::cerr << "[Main] Display init failed, falling back to headless" << std::endl;
         }
@@ -821,6 +1266,12 @@ int main(int argc, char* argv[]) {
     
     init_all();
     load_and_boot();
+
+    // Cleanup FBO and background IO thread
+    if (g_display_active) {
+        fbo_destroy();
+    }
+    io_thread_stop();
     
     std::cout << "[Main] Swordigo Desktop Engine — session complete." << std::endl;
     

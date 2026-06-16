@@ -86,26 +86,19 @@ cat > "$APPDIR/Swordigo.desktop" << 'DESKTOP'
 [Desktop Entry]
 Name=Swordigo Desktop
 Exec=swordigo_boot
-Icon=swordigo
+Icon=swordigo-desktop
 Terminal=false
 Type=Application
-Categories=Game;
+Categories=Game;ActionGame;AdventureGame;
 Comment=Swordigo Desktop Port — ARM Emulation Engine
+Keywords=swordigo;game;rpg;adventure;sword;
 DESKTOP
 cp "$APPDIR/Swordigo.desktop" "$APPDIR/usr/share/applications/"
 
-# Create a simple icon (solid colored square with 'S')
-# Using ImageMagick if available, otherwise a 1x1 PNG placeholder
-if command -v convert &>/dev/null; then
-    convert -size 256x256 xc:"#2d1b69" -fill white -gravity center \
-        -pointsize 180 -annotate 0 "S" \
-        "$APPDIR/swordigo.png" 2>/dev/null || \
-    printf '\x89PNG\r\n\x1a\n' > "$APPDIR/swordigo.png"
-else
-    # Minimal valid 1x1 purple PNG
-    printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82' > "$APPDIR/swordigo.png"
-fi
-cp "$APPDIR/swordigo.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/"
+# Copy the real game icon
+cp "$ROOT_DIR/src/assets/icon_gnome.png" "$APPDIR/swordigo-desktop.png"
+cp "$ROOT_DIR/src/assets/icon_gnome.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/swordigo-desktop.png"
+cp "$ROOT_DIR/src/assets/icon_gnome.png" "$APPDIR/.DirIcon"
 
 # AppRun script — the entry point
 cat > "$APPDIR/AppRun" << 'APPRUN'
