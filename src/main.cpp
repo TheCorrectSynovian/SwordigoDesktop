@@ -306,8 +306,8 @@ void load_and_boot() {
         while (running) {
             g_frame_stats.reset();
             
-            // Show details for first 100 frames to trace initialization
-            if (completed_frames < 100) {
+            // Show details for first 10 frames only
+            if (completed_frames < 10) {
                 g_emulator->quiet_mode = false;
             } else {
                 g_emulator->quiet_mode = true;
@@ -325,12 +325,25 @@ void load_and_boot() {
 
             g_emulator->call(updateApp, {env_ptr, 0, dt_hex});
             
-            // Handle async callbacks: if loadSnapshot was called, call snapshotLoaded(null_name, null_data)
+            // Handle async callbacks: if loadSnapshot was called, call snapshotLoaded
             extern bool g_snapshot_load_pending;
+            extern bool g_snapshot_has_data;
+            extern std::vector<uint8_t> g_snapshot_data;
             if (g_snapshot_load_pending && snapshotLoaded) {
                 g_snapshot_load_pending = false;
-                std::cout << "[Callback] Calling snapshotLoaded(null, null) — no saved game" << std::endl;
-                g_emulator->call(snapshotLoaded, {env_ptr, 0, 0, 0}); // (env, this, name=null, data=null)
+                if (g_snapshot_has_data && !g_snapshot_data.empty()) {
+                    // Allocate byte array in guest memory: [length(4)] [data(N)]
+                    static uint32_t save_buf_addr = 0x40000000; // high address for save buffer
+                    uint32_t array_len = g_snapshot_data.size();
+                    *(uint32_t*)(g_guest_memory + save_buf_addr) = array_len;
+                    memcpy(g_guest_memory + save_buf_addr + 4, g_snapshot_data.data(), array_len);
+                    std::cout << "[Callback] snapshotLoaded with " << array_len << " bytes of save data" << std::endl;
+                    g_emulator->call(snapshotLoaded, {env_ptr, 0, 0, save_buf_addr}); // (env, this, name=null, data=array)
+                    g_snapshot_has_data = false;
+                } else {
+                    std::cout << "[Callback] snapshotLoaded(null, null) — no saved game" << std::endl;
+                    g_emulator->call(snapshotLoaded, {env_ptr, 0, 0, 0}); // (env, this, name=null, data=null)
+                }
             }
             
             g_emulator->call(drawApp, {env_ptr, 0});
@@ -398,26 +411,8 @@ void load_and_boot() {
             extern int g_gl_diag_frame;
             g_gl_diag_frame++;
             
-            // Present the frame (engine's own GL calls already went to OpenGL)
+            // Present the frame
             if (g_display_active && g_display_ptr) {
-                // Capture BEFORE swap — reads the completed back buffer that is about to be shown
-                if (g_gl_diag_frame == 3) {
-                    const int W = 800, H = 480;
-                    std::vector<uint8_t> pixels(W * H * 3);
-                    glFinish(); // ensure all GL commands completed
-                    glReadPixels(0, 0, W, H, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
-                    GLenum err = glGetError();
-                    FILE* f = fopen("/tmp/swordigo_capture.ppm", "wb");
-                    if (f) {
-                        fprintf(f, "P6\n%d %d\n255\n", W, H);
-                        for (int row = H-1; row >= 0; row--)
-                            fwrite(pixels.data() + row*W*3, 1, W*3, f);
-                        fclose(f);
-                        std::cout << "[CAPTURE] Frame " << g_gl_diag_frame
-                                  << " saved to /tmp/swordigo_capture.ppm"
-                                  << " (GL err=" << err << ")" << std::endl;
-                    }
-                }
                 
                 g_display_ptr->swap();
                 

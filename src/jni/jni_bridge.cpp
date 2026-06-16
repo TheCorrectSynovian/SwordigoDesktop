@@ -608,6 +608,8 @@ void bridge_GetMethodID(void* emu_ptr) {
     else if (strcmp(name, "setLooping") == 0) id = 0x13230001;
     else if (strcmp(name, "setVolume") == 0) id = 0x13240001;
     else if (strcmp(name, "loadSnapshot") == 0) id = 0x13250001;
+    else if (strcmp(name, "saveSnapshot") == 0) id = 0x13250002;
+    else if (strcmp(name, "deleteSnapshot") == 0) id = 0x13250003;
     else if (strcmp(name, "isGoogleGameServicesAvailable") == 0) id = 0x13260001;
     else if (strcmp(name, "startAdsAndAnalytics") == 0) id = 0x13270001;
     else if (strcmp(name, "<init>") == 0) id = 0x13000001;
@@ -816,7 +818,9 @@ static ALuint g_music_source = 0;
 static ALuint g_music_buffer = 0;
 
 static int g_saved_age = 25; // Pre-set age to bypass age gate entirely
-bool g_snapshot_load_pending = false; // Set when game calls loadSnapshot, cleared after snapshotLoaded callback
+bool g_snapshot_load_pending = false;
+std::vector<uint8_t> g_snapshot_data; // Loaded save data to pass back via snapshotLoaded
+bool g_snapshot_has_data = false; // Whether we have save data to return
 
 static bool load_wav_to_buffer(const std::string& path, ALuint buffer) {
     FILE* f = fopen(path.c_str(), "rb");
@@ -1028,7 +1032,9 @@ void bridge_CallStaticObjectMethodV(void* emu_ptr) {
     } else {
         res = 0;
     }
-    std::cout << "[JNI] CallStaticObjectMethodV(mid=0x" << std::hex << mid << ") -> 0x" << res << std::dec << std::endl;
+    if (!emu->quiet_mode) {
+        std::cout << "[JNI] CallStaticObjectMethodV(mid=0x" << std::hex << mid << ") -> 0x" << res << std::dec << std::endl;
+    }
     emu->set_reg(0, res);
 }
 
@@ -1073,7 +1079,9 @@ void bridge_CallStaticIntMethodV(void* emu_ptr) {
 void bridge_CallStaticLongMethodV(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     uint32_t mid = emu->get_reg(2);
-    std::cout << "[JNI] CallStaticLongMethodV(mid=0x" << std::hex << mid << ") -> 0" << std::dec << std::endl;
+    if (!emu->quiet_mode) {
+        std::cout << "[JNI] CallStaticLongMethodV(mid=0x" << std::hex << mid << ") -> 0" << std::dec << std::endl;
+    }
     emu->set_reg(0, 0);
     emu->set_reg(1, 0);
 }
@@ -1081,7 +1089,9 @@ void bridge_CallStaticLongMethodV(void* emu_ptr) {
 void bridge_CallStaticFloatMethodV(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     uint32_t mid = emu->get_reg(2);
-    std::cout << "[JNI] CallStaticFloatMethodV(mid=0x" << std::hex << mid << ") -> 0" << std::dec << std::endl;
+    if (!emu->quiet_mode) {
+        std::cout << "[JNI] CallStaticFloatMethodV(mid=0x" << std::hex << mid << ") -> 0" << std::dec << std::endl;
+    }
     emu->set_reg(0, 0);
 }
 
@@ -1101,8 +1111,53 @@ void bridge_CallStaticVoidMethodV(void* emu_ptr) {
     } else if (mid == 0x13170007) { // receivedPrivacyConsent
         std::cout << "[JNI] receivedPrivacyConsent() -> Stubbed!" << std::endl;
     } else if (mid == 0x13250001) { // loadSnapshot
-        std::cout << "[JNI] loadSnapshot() -> Requesting callback!" << std::endl;
+        std::cout << "[SAVE] loadSnapshot() -> Reading ./save/snapshot.bin" << std::endl;
         g_snapshot_load_pending = true;
+        g_snapshot_has_data = false;
+        // Try to read save data from disk
+        FILE* sf = fopen("./save/snapshot.bin", "rb");
+        if (sf) {
+            fseek(sf, 0, SEEK_END);
+            long sz = ftell(sf);
+            fseek(sf, 0, SEEK_SET);
+            if (sz > 0) {
+                g_snapshot_data.resize(sz);
+                fread(g_snapshot_data.data(), 1, sz, sf);
+                g_snapshot_has_data = true;
+                std::cout << "[SAVE] Loaded " << sz << " bytes from snapshot.bin" << std::endl;
+            }
+            fclose(sf);
+        } else {
+            std::cout << "[SAVE] No snapshot.bin found — new game" << std::endl;
+        }
+    } else if (mid == 0x13250002) { // saveSnapshot
+        // Extract save data from JNI args: saveSnapshot(String name, byte[] data)
+        uint8_t* memory = emu->get_memory_base();
+        uint32_t va_list_ptr = emu->get_reg(3);
+        uint32_t name_ref = *(uint32_t*)(memory + va_list_ptr);
+        uint32_t data_ref = *(uint32_t*)(memory + va_list_ptr + 4);
+        std::cout << "[SAVE] saveSnapshot(name=0x" << std::hex << name_ref 
+                  << ", data=0x" << data_ref << ")" << std::dec << std::endl;
+        
+        if (data_ref != 0) {
+            // Read byte array: first 4 bytes at the array address = length, followed by data
+            // JNI array layout in our guest: length (4 bytes) then data
+            uint32_t array_len = *(uint32_t*)(memory + data_ref);
+            uint8_t* array_data = memory + data_ref + 4;
+            
+            // Sanity check
+            if (array_len > 0 && array_len < 0x1000000) {
+                FILE* sf = fopen("./save/snapshot.bin", "wb");
+                if (sf) {
+                    fwrite(array_data, 1, array_len, sf);
+                    fclose(sf);
+                    std::cout << "[SAVE] Wrote " << array_len << " bytes to snapshot.bin" << std::endl;
+                }
+            }
+        }
+    } else if (mid == 0x13250003) { // deleteSnapshot
+        remove("./save/snapshot.bin");
+        std::cout << "[SAVE] Deleted snapshot.bin" << std::endl;
     } else if (mid == 0x13270001) { // startAdsAndAnalytics
         std::cout << "[JNI] startAdsAndAnalytics() -> Stubbed!" << std::endl;
     }
@@ -1461,7 +1516,9 @@ void bridge_fopen(void* emu_ptr) {
     uint32_t mode_ptr = emu->get_reg(1);
     const char* path = (const char*)(memory + path_ptr);
     const char* mode = (const char*)(memory + mode_ptr);
-    std::cout << "[File] fopen(\"" << path << "\", \"" << mode << "\")" << std::endl;
+    if (!emu->quiet_mode) {
+        std::cout << "[File] fopen(\"" << path << "\", \"" << mode << "\")" << std::endl;
+    }
     FILE* f = fopen(path, mode);
     if (f) {
         uint32_t handle = g_next_file_handle++;
@@ -2937,7 +2994,7 @@ void bridge_glGetString(void* emu_ptr) {
         initialized = true;
     }
     uint32_t name = emu->get_reg(0);
-    std::cout << "[GL] glGetString(0x" << std::hex << name << std::dec << ")" << std::endl;
+    if (g_gl_diag_frame < 3) std::cout << "[GL] glGetString(0x" << std::hex << name << std::dec << ")" << std::endl;
     switch (name) {
         case 0x1F00: emu->set_reg(0, 0x40100); break; // GL_VENDOR
         case 0x1F01: emu->set_reg(0, 0x40100); break; // GL_RENDERER

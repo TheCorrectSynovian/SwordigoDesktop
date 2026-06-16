@@ -27,6 +27,16 @@ save/
 # -------- PROPRIETARY GAME BINARY --------
 # Extracted from the original APK — DO NOT DISTRIBUTE
 libswordigo.so
+libswordigo_patched.so
+libswordigo64.so
+libswordigo*.so
+
+# -------- TRACES / SYMBOLS --------
+symbols_*.txt
+trace_log.txt
+background_prepare.txt
+CLEANUP_REPORT.md
+assets.tar.xz
 
 # -------- PROPRIETARY REFERENCE MATERIALS --------
 # Contains:
