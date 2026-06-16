@@ -36,7 +36,7 @@ symbols_*.txt
 trace_log.txt
 background_prepare.txt
 CLEANUP_REPORT.md
-assets.tar.xz
+assets.tar*
 
 # -------- PROPRIETARY REFERENCE MATERIALS --------
 # Contains:
