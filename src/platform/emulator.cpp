@@ -1,4 +1,5 @@
 #include "emulator.h"
+#include "../game/camera_override.h"
 #include <iostream>
 #include <cstring>
 #include <unicorn/unicorn.h>
@@ -26,8 +27,18 @@ static void hook_code(uc_engine *uc, uint64_t address, uint32_t size, void *user
     if (address >= emu->get_bridge_base()) {
         emu->handle_bridge_call(address);
     }
-    
-    // Debug hooks removed — enable selectively when needed
+
+    // ---- Camera: intercept CameraController constructor to capture 'this' ----
+    // CameraController::CameraController() is at 0x002e35c5 (Thumb, real addr 0x002e35c4)
+    // At entry, r0 = 'this' (the newly allocated CameraController object).
+    // We only need to capture it once — g_cam_ctrl_ptr stays 0 until set.
+    if (g_cam_ctrl_ptr == 0 && (address == 0x002e35c4 || address == 0x002e35c5)) {
+        uint32_t this_ptr = 0;
+        uc_reg_read(uc, UC_ARM_REG_R0, &this_ptr);
+        if (this_ptr != 0) {
+            cam_capture_controller(this_ptr);
+        }
+    }
 }
 
 

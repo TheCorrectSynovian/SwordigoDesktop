@@ -7,6 +7,7 @@
 #include "platform/emulator.h"
 #include "platform/display.h"
 #include "android/asset_manager.h"
+#include "game/camera_override.h"
 #include <cstring>
 #define GL_GLEXT_PROTOTYPES
 #include <GL/gl.h>
@@ -340,6 +341,18 @@ void load_and_boot() {
         bool key_use_item = false;
         bool key_menu = false;
 
+        // Camera override keys (Numpad)
+        bool cam_key_left  = false;   // KP4 — pan left
+        bool cam_key_right = false;   // KP6 — pan right
+        bool cam_key_fwd   = false;   // KP8 — move forward (−Z)
+        bool cam_key_back  = false;   // KP2 — move backward (+Z)
+        bool cam_key_up    = false;   // KP7 / PageUp — raise camera
+        bool cam_key_down  = false;   // KP1 / PageDown — lower camera
+        bool cam_key_zin   = false;   // KP+ — zoom in
+        bool cam_key_zout  = false;   // KP− — zoom out
+        const float CAM_SPEED = 5.0f;
+        const float CAM_ZOOM  = 10.0f;
+
         bool running = true;
         while (running) {
             g_frame_stats.reset();
@@ -373,6 +386,18 @@ void load_and_boot() {
             if (key_magic)
                 call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 10, accumulated_time, 900.0f, 184.0f, 900.0f, 184.0f, 0);
 
+            // --- Per-frame camera accumulation (held keys) ---
+            if (g_cam_active) {
+                if (cam_key_left)  cam_move(-CAM_SPEED, 0.0f,  0.0f);
+                if (cam_key_right) cam_move(+CAM_SPEED, 0.0f,  0.0f);
+                if (cam_key_fwd)   cam_move(0.0f,  0.0f, -CAM_SPEED);
+                if (cam_key_back)  cam_move(0.0f,  0.0f, +CAM_SPEED);
+                if (cam_key_up)    cam_move(0.0f, +CAM_SPEED,  0.0f);
+                if (cam_key_down)  cam_move(0.0f, -CAM_SPEED,  0.0f);
+                if (cam_key_zin)   cam_move(0.0f,  0.0f, -CAM_ZOOM);
+                if (cam_key_zout)  cam_move(0.0f,  0.0f, +CAM_ZOOM);
+            }
+
             g_emulator->call(updateApp, {env_ptr, 0, dt_hex});
             
             // Handle async callbacks: if loadSnapshot was called, call snapshotLoaded
@@ -397,6 +422,9 @@ void load_and_boot() {
             }
             
             g_emulator->call(drawApp, {env_ptr, 0});
+
+            // Apply camera position override (after draw, before swap)
+            cam_apply(g_emulator, g_guest_memory);
 
             // Render GUI overlay (F1 toggle)
             if (g_display_active && gui_visible) {
@@ -441,8 +469,14 @@ void load_and_boot() {
                 g_gui.draw_string(dbg, 20, g_win_h - 135, 1.2f, 140, 140, 160, 255);
                 snprintf(dbg, sizeof(dbg), "Mouse: %d,%d  DT: %.4fs", mouse_x, mouse_y, dt_seconds);
                 g_gui.draw_string(dbg, 20, g_win_h - 152, 1.2f, 140, 140, 160, 255);
-                snprintf(dbg, sizeof(dbg), "F1:GUI  F3:Debug  F12:Fullscreen");
+                snprintf(dbg, sizeof(dbg), "F1:GUI  F3:Debug  F12:Full  F2:Camera");
                 g_gui.draw_string(dbg, 20, g_win_h - 175, 1.1f, 100, 100, 120, 200);
+                char cam_dbg[128];
+                cam_debug_string(cam_dbg, sizeof(cam_dbg));
+                g_gui.draw_string(cam_dbg, 20, g_win_h - 195, 1.1f,
+                    g_cam_active ? 0 : 120,
+                    g_cam_active ? 220 : 120,
+                    g_cam_active ? 100 : 120, 255);
                 glPopMatrix();
                 glMatrixMode(GL_PROJECTION);
                 glPopMatrix();
@@ -554,6 +588,10 @@ void load_and_boot() {
                                 std::cout << "[GUI] " << (gui_visible ? "ON" : "OFF") << std::endl;
                                 break;
                             }
+                            if (event.key.keysym.sym == SDLK_F2 && !event.key.repeat) {
+                                cam_set_active(!g_cam_active);
+                                break;
+                            }
                             if (event.key.keysym.sym == SDLK_F3 && !event.key.repeat) {
                                 debug_visible = !debug_visible;
                                 std::cout << "[Debug] " << (debug_visible ? "ON" : "OFF") << std::endl;
@@ -628,6 +666,22 @@ void load_and_boot() {
                                         key_menu = is_down;
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 9, accumulated_time, 48.0f, 500.0f, 48.0f, 500.0f, is_down ? 1 : 0);
                                     }
+                                    break;
+
+                                // ---- Camera override keys (Numpad) ----
+                                case SDLK_KP_4:    cam_key_left  = is_down; break;
+                                case SDLK_KP_6:    cam_key_right = is_down; break;
+                                case SDLK_KP_8:    cam_key_fwd   = is_down; break;
+                                case SDLK_KP_2:    cam_key_back  = is_down; break;
+                                case SDLK_KP_7:
+                                case SDLK_PAGEUP:   cam_key_up   = is_down; break;
+                                case SDLK_KP_1:
+                                case SDLK_PAGEDOWN: cam_key_down = is_down; break;
+                                case SDLK_KP_PLUS:  cam_key_zin  = is_down; break;
+                                case SDLK_KP_MINUS: cam_key_zout = is_down; break;
+                                case SDLK_KP_5:  // Reset camera position
+                                case SDLK_HOME:
+                                    if (is_down) cam_reset();
                                     break;
                             }
                             break;

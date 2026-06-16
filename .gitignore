@@ -13,12 +13,10 @@ find_bad_ptr
 verify_0x10000000
 poc_loader
 
-# Object files
+# Object files and shared libraries
 *.o
 *.so
 *.so.*
-!libswordigo.so
-!libswordigo64.so
 
 # Archives
 *.zip
@@ -41,17 +39,6 @@ out/
 cache/
 save/
 *.ppm
-*.wav
-*.pvr
-*.POD
-*.scene
-*.scl
-*.gdata
-*.gstate
-*.gopt
-*.proto
-*.fnt
-*.atlas
 
 # -------- PROPRIETARY GAME BINARY --------
 # Extracted from the original APK — DO NOT DISTRIBUTE
@@ -77,6 +64,17 @@ reference/**
 assets/resources/
 assets/dexopt/
 dexopt/
+*.wav
+*.pvr
+*.POD
+*.scene
+*.scl
+*.gdata
+*.gstate
+*.gopt
+*.proto
+*.fnt
+*.atlas
 
 # Keep the README which has license attributions
 !assets/README
