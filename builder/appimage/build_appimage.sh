@@ -3,9 +3,9 @@ set -e
 
 # ============================================================
 # Swordigo Desktop — AppImage Builder
-# Bundles: binary, assets, music, libswordigo.so, all shared
-# library dependencies (libunicorn, SDL2, OpenAL, GL, etc.)
-# ============================================================
+# Bundles: binary, assets, music, game libraries (.so), all shared
+# library dependencies (libunicorn, SDL3, OpenAL, GL, etc.)
+# Ships both libswordigo_nx.so (v1.4.12, default) and libswordigo.so (v1.4.6)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -36,7 +36,15 @@ echo "      Binary size: $(du -h swordigo_boot | cut -f1)"
 # ---------- Copy binary + game lib ----------
 echo "[3/7] Copying binary and game library..."
 cp swordigo_boot "$APPDIR/usr/bin/"
-cp libswordigo.so "$APPDIR/usr/share/swordigo/"
+# Ship both game binaries so the launcher lets users choose
+if [ -f libswordigo_nx.so ]; then
+    cp libswordigo_nx.so "$APPDIR/usr/share/swordigo/"
+    echo "      ✓ libswordigo_nx.so (v1.4.12 — default)"
+fi
+if [ -f libswordigo.so ]; then
+    cp libswordigo.so "$APPDIR/usr/share/swordigo/"
+    echo "      ✓ libswordigo.so (v1.4.6)"
+fi
 cp LICENSE "$APPDIR/usr/share/licenses/LICENSE"
 
 # ---------- Copy ALL assets (textures, models, sounds, music) ----------
@@ -70,7 +78,7 @@ for lib in $DEPS; do
 done
 
 # Also explicitly bundle these critical libraries if not caught above
-for critical_lib in libunicorn libopenal libSDL2 libSDL2_image libsndio libpulse libsamplerate libasound libvorbis libvorbisfile libogg libFLAC libopus libsndfile libmpg123 libzlib libz.so libpulsecommon libpulse-simple libasyncns; do
+for critical_lib in libunicorn libopenal libSDL3 libSDL3_image libsndio libpulse libsamplerate libasound libvorbis libvorbisfile libogg libFLAC libopus libsndfile libmpg123 libzlib libz.so libpulsecommon libpulse-simple libasyncns; do
     FOUND=$(ldconfig -p 2>/dev/null | grep "$critical_lib" | head -n1 | awk '{print $NF}')
     if [ -n "$FOUND" ] && [ -f "$FOUND" ] && [ ! -f "$APPDIR/usr/lib/$(basename $FOUND)" ]; then
         cp -L "$FOUND" "$APPDIR/usr/lib/" 2>/dev/null && BUNDLED=$((BUNDLED+1)) || true

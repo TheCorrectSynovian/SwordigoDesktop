@@ -3,7 +3,6 @@
 # ============================================================
 
 # -------- BUILDS / OUTPUTS / BINARIES --------
-# Compiled project binaries (project-created)
 swordigo_boot
 swordigo_headless
 loader_test
@@ -18,7 +17,7 @@ poc_loader
 *.so
 *.so.*
 
-# Archives
+# Archives (game asset bundles, compressed builds, etc.)
 *.zip
 *.tar
 *.tar.*
@@ -31,43 +30,32 @@ build/
 out/
 
 # -------- LOGS / COREDUMPS / RUNTIME DATA --------
-# Logs from testing and debugging
 *.log
 *.core
-
-# Caches, saves (runtime data, not source)
 cache/
 save/
 *.ppm
 
-# -------- PROPRIETARY GAME BINARY --------
-# Extracted from the original APK — DO NOT DISTRIBUTE
-libswordigo.so
-libswordigo_patched.so
-libswordigo64.so
+# -------- PROPRIETARY GAME BINARIES --------
+# Extracted from original APKs — copyrighted, DO NOT DISTRIBUTE
 libswordigo*.so
-rl_libswordigo.so
+rl_libswordigo*.so
 rl_libmini.so
 rl_libGlossHook.so
 rl_*.so
 
-# -------- TRACES / SYMBOLS --------
-symbols_*.txt
-trace_log.txt
-background_prepare.txt
-CLEANUP_REPORT.md
-assets.tar*
+# -------- COPYRIGHTED GAME MUSIC --------
+# Original Swordigo + RLSwordigo music — copyrighted
+res/
+res/**
+*.mp3
+*.ogg
 
-# -------- PROPRIETARY REFERENCE MATERIALS --------
-# (decompiled code, extracted resources, proprietary libraries, etc.)
-reference/
-reference/**
-
-# -------- EXTRACTED GAME ASSETS --------
-# Commercial game assets extracted from the APK
+# -------- COPYRIGHTED GAME ASSETS --------
+# Commercial game assets extracted from APK
 assets/resources/
-rl_assets/
 assets/dexopt/
+rl_assets/
 dexopt/
 *.wav
 *.pvr
@@ -84,53 +72,63 @@ dexopt/
 # Keep the README which has license attributions
 !assets/README
 
-# -------- BUILDER ARTIFACTS --------
+# -------- VITA TROPHY DATA (copyrighted) --------
+src/assets/TROPHY.TRP
+
+# -------- TRACES / SYMBOLS / DEBUGGING --------
+symbols_*.txt
+trace_log.txt
+background_prepare.txt
+CLEANUP_REPORT.md
+assets.tar*
+
+# -------- RESEARCH EXPERIMENT LOGS (large) --------
+research/experiments/
+
+# -------- PROPRIETARY REFERENCE MATERIALS --------
+reference/
+reference/**
+
+# -------- WINDOWS BUILD DEPENDENCIES --------
+# vcpkg and build artifacts (large, downloadable)
+winbuild/
+
+# -------- BUILDER / PACKAGING ARTIFACTS --------
 builder/appimage/Swordigo.AppDir/
 builder/appimage/Swordigo-x86_64.AppImage
 builder/appimage/appimagetool
 builder/flatpak/.flatpak-builder/
 builder/flatpak/repo/
 builder/flatpak/export/
-packaging/deb/usr/
 packaging/
 *.deb
 *.rpm
+*.AppImage
 
 # -------- INTERNAL AGENT PROMPTS --------
 prompt/
 
-# -------- DEVELOPMENT TOOLS (JADX, SRCC) --------
+# -------- DEVELOPMENT TOOLS --------
 .tools/
 
 # -------- IDE CONFIGS --------
 .idea/
 *.iml
 *.desktop
+.vscode/
 
 # -------- OS ARTIFACTS --------
 .DS_Store
 Thumbs.db
+desktop.ini
+System Volume Information/
 
-# -------- ANDROID NDK (large download) --------
+# -------- ANDROID NDK --------
 android-ndk-*-linux.zip
 
-# ------------- EXTERNAL THIRD-PARTY RESEARCH --------
-# Vita port (separate third-party project)
+# -------- EXTERNAL THIRD-PARTY RESEARCH --------
 docs/research/vita/vistaPort/
-
-# -------- FORENSIC / DEBUG TOOLS --------
-# ELF analysis binaries (internal tools)
-analyze_syms
-check_relocations
-find_bad_ptr
-verify_0x10000000
-
-# POC loader (ARM static binary test)
-poc_loader
-
-# Python research scripts
-generate_poc.py
-
-# -------- OTHER --------
-# Docs research archives
 docs/research/vita/*.zip
+
+# -------- PYTHON SCRIPTS --------
+generate_poc.py

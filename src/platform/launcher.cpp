@@ -1,10 +1,10 @@
 // Unified pre-launch configuration window for Swordigo Desktop
-// Borderless SDL2 + OpenGL window: Graphics API + Binary selection
+// Borderless SDL3 + OpenGL window: Graphics API + Binary selection
 
 #include "platform/launcher.h"
 #include "platform/data_path.h"
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_image.h>
+#include <SDL3/SDL.h>
+#include <SDL3_image/SDL_image.h>
 #define GL_GLEXT_PROTOTYPES
 #include "platform/gl_inc.h"
 #include <iostream>
@@ -174,8 +174,8 @@ static GLuint load_texture(const char* path) {
         return 0;
     }
     // Convert to RGBA
-    SDL_Surface* rgba = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ABGR8888, 0);
-    SDL_FreeSurface(surf);
+    SDL_Surface* rgba = SDL_ConvertSurface(surf, SDL_PIXELFORMAT_ABGR8888);
+    SDL_DestroySurface(surf);
     if (!rgba) return 0;
 
     GLuint tex;
@@ -187,7 +187,7 @@ static GLuint load_texture(const char* path) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba->w, rgba->h, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, rgba->pixels);
-    SDL_FreeSurface(rgba);
+    SDL_DestroySurface(rgba);
     std::cout << "[Launcher] Loaded texture: " << path << " -> " << tex << std::endl;
     return tex;
 }
@@ -249,7 +249,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
     int bin_section_h = has_bins ? (int)(bins.size() * 80 + 60) : 0;
     const int WIN_H = 700 + bin_section_h;
 
-    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::cerr << "[Launcher] SDL_Init failed: " << SDL_GetError() << std::endl;
         return cfg;
     }
@@ -259,9 +259,8 @@ LaunchConfig show_launcher(BinarySelector& selector) {
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
     SDL_Window* win = SDL_CreateWindow("Swordigo",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         WIN_W, WIN_H,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN);
+        SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS);
     if (!win) {
         std::cerr << "[Launcher] Window create failed" << std::endl;
         return cfg;
@@ -272,7 +271,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
     SDL_GL_SetSwapInterval(1);
 
     // Load launcher textures from src/assets/ (game assets repurposed for UI)
-    IMG_Init(IMG_INIT_PNG);
+    // SDL3_image: no IMG_Init() needed — initialization is automatic
     std::string assets_base = get_data_path("src/assets");
     GLuint tex_bg       = load_texture((assets_base + "/launcher_bg.png").c_str());
     GLuint tex_ui_atlas = load_texture((assets_base + "/ui_atlas.png").c_str());
@@ -300,11 +299,11 @@ LaunchConfig show_launcher(BinarySelector& selector) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             switch (ev.type) {
-                case SDL_QUIT:
+                case SDL_EVENT_QUIT:
                     cfg.should_launch = false;
                     running = false;
                     break;
-                case SDL_MOUSEMOTION:
+                case SDL_EVENT_MOUSE_MOTION:
                     mouse_x = ev.motion.x;
                     mouse_y = WIN_H - ev.motion.y;
                     if (dragging) {
@@ -313,7 +312,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                         SDL_SetWindowPosition(win, wx + ev.motion.xrel, wy + ev.motion.yrel);
                     }
                     break;
-                case SDL_MOUSEBUTTONDOWN:
+                case SDL_EVENT_MOUSE_BUTTON_DOWN:
                     if (ev.button.button == SDL_BUTTON_LEFT) {
                         mouse_x = ev.button.x;
                         mouse_y = WIN_H - ev.button.y;
@@ -372,15 +371,15 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                         if (ev.button.y < 50) dragging = true;
                     }
                     break;
-                case SDL_MOUSEBUTTONUP:
+                case SDL_EVENT_MOUSE_BUTTON_UP:
                     dragging = false;
                     break;
-                case SDL_KEYDOWN:
+                case SDL_EVENT_KEY_DOWN:
                     start_time = std::chrono::steady_clock::now(); // Reset countdown
-                    if (ev.key.keysym.sym == SDLK_ESCAPE) {
+                    if (ev.key.key == SDLK_ESCAPE) {
                         cfg.should_launch = false; running = false;
                     }
-                    if (ev.key.keysym.sym == SDLK_RETURN || ev.key.keysym.sym == SDLK_KP_ENTER) {
+                    if (ev.key.key == SDLK_RETURN || ev.key.key == SDLK_KP_ENTER) {
                         cfg.graphics_api = (api_sel == 0) ? GraphicsAPI::OPENGL : GraphicsAPI::VULKAN;
                         if (has_bins && bin_sel >= 0 && bin_sel < (int)bins.size()) {
                             cfg.selected_binary = bins[bin_sel].filename;
@@ -390,12 +389,12 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                         cfg.should_launch = true; running = false;
                     }
                     if (has_bins) {
-                        if (ev.key.keysym.sym == SDLK_UP)
+                        if (ev.key.key == SDLK_UP)
                             bin_sel = std::max(0, bin_sel - 1);
-                        if (ev.key.keysym.sym == SDLK_DOWN)
+                        if (ev.key.key == SDLK_DOWN)
                             bin_sel = std::min((int)bins.size() - 1, bin_sel + 1);
                     }
-                    if (ev.key.keysym.sym == SDLK_TAB) {
+                    if (ev.key.key == SDLK_TAB) {
                         api_sel = 1 - api_sel; // Toggle OpenGL/Vulkan
                     }
                     break;
@@ -613,10 +612,10 @@ LaunchConfig show_launcher(BinarySelector& selector) {
     // Cleanup textures
     GLuint textures[] = {tex_bg, tex_ui_atlas, tex_panel, tex_button, tex_bar, tex_grove};
     glDeleteTextures(6, textures);
-    IMG_Quit();
+    // SDL3_image: no IMG_Quit() needed
 
     // Cleanup SDL
-    SDL_GL_DeleteContext(ctx);
+    SDL_GL_DestroyContext(ctx);
     SDL_DestroyWindow(win);
 
     // Set selection on the selector so main.cpp can read it

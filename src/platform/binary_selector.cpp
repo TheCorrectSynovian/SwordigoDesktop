@@ -104,7 +104,7 @@ const std::map<std::string, std::pair<std::string, BinaryStatus>> BinarySelector
     {"cee15dd2730746269ce5db97d150371ebbad1f41371c6a728f1bb7d045632138",
         {"1.4.6", BinaryStatus::TESTED}},
     {"08d49dd6f7f8639a4c59f290ff2bb79254accf710f530bf53c2fce1659191c9e",
-        {"NX", BinaryStatus::TESTED}},
+        {"1.4.12", BinaryStatus::TESTED}},
     {"5ae524abc08d4a1c8304d5faa8d55340bea1b191c5dcb0e68b35faeeae011368",
         {"1.4.6-patched", BinaryStatus::TESTING}},
     // RLSwordigo

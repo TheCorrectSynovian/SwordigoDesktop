@@ -95,8 +95,5 @@ Just copy your game binaries (libswordigo_nx.so, etc.) and assets / rl_assets fo
 Safe travels rebooting into Windows! Let me know if you run into any compilation questions there.
 
 
-AI Credits Used to Generate Response
-14:40
-
 
 

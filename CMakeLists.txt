@@ -15,6 +15,7 @@ set(COMMON_SOURCES
     src/platform/input_config.cpp
     src/game/camera_override.cpp
     src/game/mod_tools.cpp
+    src/game/save_editor_logic.cpp
     src/platform/fbo_scaler.cpp
     src/platform/io_thread.cpp
     src/platform/data_path.cpp
@@ -32,7 +33,7 @@ set(MAIN_SOURCES
 include_directories(src include)
 
 # Find Package Dependencies
-find_package(SDL2 REQUIRED)
+find_package(SDL3 REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(OpenAL REQUIRED)
@@ -42,12 +43,12 @@ if(WIN32)
     # On Windows, look for libraries via standard names or vcpkg
     find_library(UNICORN_LIB NAMES unicorn REQUIRED)
     find_library(VORBISFILE_LIB NAMES vorbisfile vorbisfile_static REQUIRED)
-    find_library(SDL2_IMAGE_LIB NAMES SDL2_image REQUIRED)
+    find_library(SDL3_IMAGE_LIB NAMES SDL3_image REQUIRED)
 else()
-    # On Linux, try PkgConfig first for vorbisfile and sdl2_image
+    # On Linux, try PkgConfig first for vorbisfile and sdl3_image
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(VORBISFILE REQUIRED vorbisfile)
-    pkg_check_modules(SDL2_IMAGE REQUIRED SDL2_image)
+    find_package(SDL3_image REQUIRED)
     find_library(UNICORN_LIB NAMES unicorn REQUIRED)
 endif()
 
@@ -67,23 +68,23 @@ add_executable(swordigo_boot ${MAIN_SOURCES} ${COMMON_SOURCES} ${VULKAN_SRC})
 
 if(WIN32)
     target_link_libraries(swordigo_boot 
-        SDL2::SDL2
+        SDL3::SDL3
         OpenGL::GL
         ZLIB::ZLIB
         OpenAL::OpenAL
         ${UNICORN_LIB}
         ${VORBISFILE_LIB}
-        ${SDL2_IMAGE_LIB}
+        ${SDL3_IMAGE_LIB}
     )
 else()
     target_link_libraries(swordigo_boot 
-        SDL2::SDL2
+        SDL3::SDL3
         OpenGL::GL
         ZLIB::ZLIB
         OpenAL::OpenAL
         ${UNICORN_LIB}
         ${VORBISFILE_LIBRARIES}
-        ${SDL2_IMAGE_LIBRARIES}
+        SDL3_image::SDL3_image
         pthread
     )
 endif()
@@ -96,23 +97,23 @@ target_compile_definitions(swordigo_headless PRIVATE HEADLESS_DEFAULT)
 
 if(WIN32)
     target_link_libraries(swordigo_headless 
-        SDL2::SDL2
+        SDL3::SDL3
         OpenGL::GL
         ZLIB::ZLIB
         OpenAL::OpenAL
         ${UNICORN_LIB}
         ${VORBISFILE_LIB}
-        ${SDL2_IMAGE_LIB}
+        ${SDL3_IMAGE_LIB}
     )
 else()
     target_link_libraries(swordigo_headless 
-        SDL2::SDL2
+        SDL3::SDL3
         OpenGL::GL
         ZLIB::ZLIB
         OpenAL::OpenAL
         ${UNICORN_LIB}
         ${VORBISFILE_LIBRARIES}
-        ${SDL2_IMAGE_LIBRARIES}
+        SDL3_image::SDL3_image
         pthread
     )
 endif()
@@ -124,23 +125,23 @@ add_executable(loader_test src/loader_test.cpp ${COMMON_SOURCES})
 
 if(WIN32)
     target_link_libraries(loader_test 
-        SDL2::SDL2
+        SDL3::SDL3
         OpenGL::GL
         ZLIB::ZLIB
         OpenAL::OpenAL
         ${UNICORN_LIB}
         ${VORBISFILE_LIB}
-        ${SDL2_IMAGE_LIB}
+        ${SDL3_IMAGE_LIB}
     )
 else()
     target_link_libraries(loader_test 
-        SDL2::SDL2
+        SDL3::SDL3
         OpenGL::GL
         ZLIB::ZLIB
         OpenAL::OpenAL
         ${UNICORN_LIB}
         ${VORBISFILE_LIBRARIES}
-        ${SDL2_IMAGE_LIBRARIES}
+        SDL3_image::SDL3_image
         pthread
     )
 endif()

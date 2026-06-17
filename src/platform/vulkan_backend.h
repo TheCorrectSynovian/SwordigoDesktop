@@ -4,8 +4,8 @@
 #define VULKAN_BACKEND_H
 
 #include <vulkan/vulkan.h>
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_vulkan.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
 
 #include <vector>
 #include <unordered_map>

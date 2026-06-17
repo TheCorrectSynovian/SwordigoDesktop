@@ -2,7 +2,7 @@
 #include "platform/data_path.h"
 #include <iostream>
 #include "platform/gl_inc.h"
-#include <SDL2/SDL_image.h>
+#include <SDL3_image/SDL_image.h>
 
 Display::Display() {}
 
@@ -10,9 +10,9 @@ Display::~Display() {
 #ifdef VULKAN_BACKEND
     // When using Vulkan, there is no GL context to delete.
     // VulkanBackend::destroy() handles Vulkan cleanup separately.
-    if (!use_vulkan && gl_context) SDL_GL_DeleteContext(gl_context);
+    if (!use_vulkan && gl_context) SDL_GL_DestroyContext(gl_context);
 #else
-    if (gl_context) SDL_GL_DeleteContext(gl_context);
+    if (gl_context) SDL_GL_DestroyContext(gl_context);
 #endif
     if (window) SDL_DestroyWindow(window);
     SDL_Quit();
@@ -22,7 +22,7 @@ bool Display::init(int w, int h, const std::string& title) {
     width = w;
     height = h;
     
-    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::cerr << "[Display] SDL_Init failed: " << SDL_GetError() << std::endl;
         return false;
     }
@@ -37,9 +37,8 @@ bool Display::init(int w, int h, const std::string& title) {
     
     window = SDL_CreateWindow(
         title.c_str(),
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         width, height,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE
     );
     
     if (!window) {
@@ -78,10 +77,10 @@ bool Display::init(int w, int h, const std::string& title) {
         }
         if (icon) {
             SDL_SetWindowIcon(window, icon);
-            SDL_FreeSurface(icon);
+            SDL_DestroySurface(icon);
             std::cout << "[Display] Window icon set" << std::endl;
         } else {
-            std::cerr << "[Display] Could not load icon: " << IMG_GetError() << std::endl;
+            std::cerr << "[Display] Could not load icon: " << SDL_GetError() << std::endl;
         }
     }
 
@@ -102,16 +101,15 @@ bool Display::init_vulkan(int w, int h, const std::string& title) {
     height = h;
     use_vulkan = true;
 
-    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::cerr << "[Display] SDL_Init failed: " << SDL_GetError() << std::endl;
         return false;
     }
 
     window = SDL_CreateWindow(
         title.c_str(),
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         width, height,
-        SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+        SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE
     );
 
     if (!window) {
@@ -141,10 +139,10 @@ bool Display::init_vulkan(int w, int h, const std::string& title) {
         }
         if (icon) {
             SDL_SetWindowIcon(window, icon);
-            SDL_FreeSurface(icon);
+            SDL_DestroySurface(icon);
             std::cout << "[Display] Window icon set" << std::endl;
         } else {
-            std::cerr << "[Display] Could not load icon: " << IMG_GetError() << std::endl;
+            std::cerr << "[Display] Could not load icon: " << SDL_GetError() << std::endl;
         }
     }
 
@@ -156,16 +154,14 @@ void Display::poll_events() {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
-            case SDL_QUIT:
+            case SDL_EVENT_QUIT:
                 quit = true;
                 break;
-            case SDL_WINDOWEVENT:
-                if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
-                    quit = true;
-                }
+            case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+                quit = true;
                 break;
-            case SDL_KEYDOWN:
-                if (event.key.keysym.sym == SDLK_ESCAPE) {
+            case SDL_EVENT_KEY_DOWN:
+                if (event.key.key == SDLK_ESCAPE) {
                     quit = true;
                 }
                 break;

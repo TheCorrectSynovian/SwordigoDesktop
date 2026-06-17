@@ -6,7 +6,7 @@ SDL_LIBS=$(shell pkg-config --libs sdl2)
 GL_FLAGS=-lGL -lz -lopenal -lSDL2_image -lvorbisfile
 VK_FLAGS=-lvulkan -lz -lopenal -lSDL2_image -lvorbisfile
 
-COMMON_SRC=src/loader/elf_loader.cpp src/jni/jni_bridge.cpp src/platform/emulator.cpp src/android/asset_manager.c src/android/log.c src/platform/gui.cpp src/platform/input_config.cpp src/game/camera_override.cpp src/game/mod_tools.cpp src/platform/fbo_scaler.cpp src/platform/io_thread.cpp src/platform/data_path.cpp src/platform/binary_selector.cpp src/platform/launcher.cpp
+COMMON_SRC=src/loader/elf_loader.cpp src/jni/jni_bridge.cpp src/platform/emulator.cpp src/android/asset_manager.c src/android/log.c src/platform/gui.cpp src/platform/input_config.cpp src/game/camera_override.cpp src/game/mod_tools.cpp src/game/save_editor_logic.cpp src/platform/fbo_scaler.cpp src/platform/io_thread.cpp src/platform/data_path.cpp src/platform/binary_selector.cpp src/platform/launcher.cpp
 
 all: swordigo_boot swordigo_headless loader_test
 

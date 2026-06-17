@@ -17,7 +17,7 @@
 
   function createStars() {
     stars = [];
-    const n = Math.floor((W * H) / 3000);
+    const n = Math.min(Math.floor((W * H) / 3000), 500);
     for (let i = 0; i < n; i++) {
       stars.push({
         x: Math.random() * W,
@@ -147,10 +147,61 @@ document.addEventListener('click', e => {
   if (e.target.matches('.copy-btn')) {
     const code = e.target.closest('.code-block').querySelector('code, pre');
     if (!code) return;
-    navigator.clipboard.writeText(code.textContent).then(() => {
+    const text = code.textContent;
+    const done = () => {
       const orig = e.target.textContent;
       e.target.textContent = '✓ Copied!';
       setTimeout(() => e.target.textContent = orig, 2000);
-    });
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done);
+    } else {
+      // Fallback for non-HTTPS
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      done();
+    }
   }
 });
+
+// ---- RANDOM TERRAIN BACKGROUNDS ----
+(function initRandomTerrains() {
+  const terrains = [
+    'assets/caves_bg_flipped.png',
+    'assets/forest_bg_flipped.png',
+    'assets/grasslands_bg_flipped.png',
+    'assets/graveyard_bg_flipped.png',
+    'assets/grove_bg_flipped.png'
+  ];
+  
+  // Select all main page sections (except the hero) and team cards/download blocks
+  const sections = document.querySelectorAll('section:not(.hero), .download-card');
+  sections.forEach((sec, idx) => {
+    const terrain = terrains[idx % terrains.length];
+    sec.style.position = 'relative';
+    sec.style.backgroundImage = `url('${terrain}')`;
+    sec.style.backgroundSize = 'cover';
+    sec.style.backgroundPosition = 'center';
+    sec.style.backgroundRepeat = 'no-repeat';
+    sec.style.zIndex = '1';
+    
+    // Create overlay if it doesn't exist
+    let overlay = sec.querySelector('.section-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.className = 'section-overlay';
+      overlay.style.position = 'absolute';
+      overlay.style.inset = '0';
+      overlay.style.background = 'rgba(10, 27, 43, 0.9)'; // Dark overlay for text readability
+      overlay.style.zIndex = '-1';
+      overlay.style.pointerEvents = 'none';
+      sec.insertBefore(overlay, sec.firstChild);
+    }
+  });
+})();

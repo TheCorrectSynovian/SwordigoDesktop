@@ -9,7 +9,7 @@
 #include <fstream>
 #include <sstream>
 #include <cstdio>
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 
 // Game coordinate space constants
 static const float GAME_W = 960.0f;
@@ -56,37 +56,37 @@ void InputConfig::load_defaults() {
     // Movement buttons (left side of screen)
     add("left",  65, 80, 55,
         SDL_SCANCODE_A,     0, 10,
-        SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+        SDL_GAMEPAD_BUTTON_DPAD_LEFT);
 
     add("right", 195, 80, 55,
         SDL_SCANCODE_D,     0, 11,
-        SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+        SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
 
     // Action buttons (right side of screen)
     add("jump",  860, 80, 45,
         SDL_SCANCODE_SPACE, SDL_SCANCODE_W, 12,
-        SDL_CONTROLLER_BUTTON_A);
+        SDL_GAMEPAD_BUTTON_SOUTH);
 
     add("attack", 900, 180, 40,
         SDL_SCANCODE_J,     SDL_SCANCODE_Z, 13,
-        SDL_CONTROLLER_BUTTON_X);
+        SDL_GAMEPAD_BUTTON_WEST);
 
     add("magic", 820, 180, 35,
         SDL_SCANCODE_K,     SDL_SCANCODE_X, 14,
-        SDL_CONTROLLER_BUTTON_Y);
+        SDL_GAMEPAD_BUTTON_NORTH);
 
     // Utility buttons
     add("use_item", 480, 510, 30,
         SDL_SCANCODE_I,     0, 15,
-        SDL_CONTROLLER_BUTTON_B);
+        SDL_GAMEPAD_BUTTON_EAST);
 
     add("menu", 480, 30, 25,
         SDL_SCANCODE_ESCAPE, 0, 16,
-        SDL_CONTROLLER_BUTTON_START);
+        SDL_GAMEPAD_BUTTON_START);
 
     add("pause", 920, 510, 25,
         SDL_SCANCODE_P,     0, 17,
-        SDL_CONTROLLER_BUTTON_BACK);
+        SDL_GAMEPAD_BUTTON_BACK);
 
     std::cout << "[InputConfig] Loaded " << buttons.size() << " default buttons\n";
 }

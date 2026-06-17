@@ -157,13 +157,27 @@ uniform float u_density;      // sample spacing
 uniform float u_exposure;     // final exposure multiply
 varying vec2 v_uv;
 
+float rand(vec2 co) {
+    return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
 void main() {
     // Direction from this pixel toward the sun
     vec2 delta = v_uv - u_sun_pos;
     float dist = length(delta);
+    
+    // Anisotropic scattering: brighter when looking closer to the sun
+    float scattering = 1.0 / (1.0 + dist * 2.0);
+    
+    // Sun corona/glow: radial glow centered on the sun
+    float sun_glow = smoothstep(0.25, 0.0, dist) * 0.4;
+    
     delta = delta / max(dist, 0.001) * (1.0 / 64.0) * u_density;
     
-    vec2 uv = v_uv;
+    // Dither starting offset to eliminate banding artifacts
+    float dither = rand(v_uv);
+    vec2 uv = v_uv + delta * dither;
+    
     float illumination_decay = 1.0;
     vec3 god_ray = vec3(0.0);
     
@@ -176,21 +190,27 @@ void main() {
         vec3 sample_col = texture2D(u_tex, uv).rgb;
         float depth = texture2D(u_depth, uv).r;
         
-        // Brightness threshold — only bright pixels contribute to rays
+        // Depth masking — only sky/background (far pixels) can emit light
+        // Depth near 1.0 = far/sky, near 0.0 = close (foreground occluder)
+        float depth_mask = smoothstep(0.95, 1.0, depth);
+        
+        // Brightness threshold for the light source
         float bright = max(max(sample_col.r, sample_col.g), sample_col.b);
-        float mask = smoothstep(0.5, 0.9, bright);
+        float brightness_mask = smoothstep(0.2, 0.7, bright);
         
-        // Depth masking — far pixels (sky/background) contribute more
-        // Depth near 1.0 = far = more light, near 0.0 = close = occluder
-        float depth_mask = smoothstep(0.85, 1.0, depth);
-        mask = max(mask, depth_mask * 0.6);
+        // Combined emission: only the sky/sun region emits rays. 
+        // Close objects (depth <= 0.95) block the light (emission = 0.0).
+        float emission = depth_mask * brightness_mask;
         
-        god_ray += sample_col * mask * illumination_decay;
+        god_ray += sample_col * emission * illumination_decay;
         illumination_decay *= u_decay;
     }
     
     god_ray *= u_exposure / 64.0;
-    gl_FragColor = vec4(god_ray * u_intensity, 1.0);
+    
+    // Add sun corona and apply intensity & scattering
+    vec3 final_ray = god_ray * u_intensity * (1.0 + scattering * 0.5) + vec3(sun_glow * u_intensity);
+    gl_FragColor = vec4(clamp(final_ray, 0.0, 1.0), 1.0);
 }
 )GLSL";
 
@@ -225,7 +245,7 @@ void main() {
         return;
     }
     
-    float ao = 0.0;
+    float occlusion = 0.0;
     int samples = 16;
     float angle_step = 6.2831853 / float(samples);
     
@@ -245,12 +265,16 @@ void main() {
         float sample_depth = texture2D(u_depth, sample_uv).r;
         float sample_z = linearize_depth(sample_depth);
         
-        // If sample is closer than center, it occludes
-        float range_check = smoothstep(0.0, 1.0, u_radius * 10.0 / abs(center_z - sample_z));
-        ao += step(center_z, sample_z + 0.001) * range_check;
+        // If sample is closer to the camera than center (sample_z < center_z), it blocks light
+        float occluded = step(sample_z, center_z - 0.001);
+        
+        // Range check: check if neighboring sample is within depth radius to prevent false halos
+        float range_check = smoothstep(u_radius * 2.0, 0.0, abs(center_z - sample_z));
+        
+        occlusion += occluded * range_check;
     }
     
-    ao = 1.0 - (ao / float(samples)) * u_intensity;
+    float ao = 1.0 - (occlusion / float(samples)) * u_intensity;
     ao = clamp(ao, 0.0, 1.0);
     
     gl_FragColor = vec4(ao, ao, ao, 1.0);
@@ -304,6 +328,20 @@ void main() {
         vec3 tint = vec3(u_gr_tint_r, u_gr_tint_g, u_gr_tint_b);
         scene += rays * tint;
     }
+    
+    // --- Tone mapping (Extended Reinhard) ---
+    // Prevents additive godrays from blowing out highlights.
+    // Lwhite controls the maximum luminance that maps to white.
+    float Lwhite = 2.5;
+    scene = scene * (1.0 + scene / (Lwhite * Lwhite)) / (1.0 + scene);
+    
+    // --- Saturation boost ---
+    // Additive light desaturates; compensate with a gentle bump.
+    float luma = dot(scene, vec3(0.2126, 0.7152, 0.0722));
+    scene = mix(vec3(luma), scene, 1.15);
+    
+    // --- Contrast micro-curve ---
+    scene = smoothstep(0.0, 1.0, scene);
     
     gl_FragColor = vec4(clamp(scene, 0.0, 1.0), 1.0);
 }

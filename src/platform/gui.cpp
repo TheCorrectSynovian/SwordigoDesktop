@@ -1,8 +1,15 @@
 #include "platform/gui.h"
 #include "platform/gl_inc.h"
+#include "game/save_editor_logic.h"
 #include <iostream>
 #include <cstring>
 #include <cstdio>
+#include <filesystem>
+
+namespace fs = std::filesystem;
+
+// External save directory
+extern std::string g_save_dir;
 
 // External game state for settings panel display
 extern bool g_game_paused;
@@ -183,6 +190,8 @@ void GuiRenderer::init() {
         m.title = "Mods";
         m.items.push_back(MenuItem("Open Mod Menu", GUI_OPEN_MOD_MENU));
         m.items.push_back(MenuItem("Pin to Screen", GUI_MOD_PIN_TOGGLE));
+        m.items.push_back(MenuItem("---", GUI_NONE, false));
+        m.items.push_back(MenuItem("Save Editor", GUI_OPEN_SAVE_EDITOR));
         m.items.push_back(MenuItem("---", GUI_NONE, false));
         m.items.push_back(MenuItem("God Mode", GUI_MOD_GOD_MODE));
         m.items.push_back(MenuItem("Infinite Mana", GUI_MOD_INFINITE_MANA));
@@ -706,6 +715,13 @@ void GuiRenderer::render(int mouse_x, int mouse_y, bool mouse_click, int win_w, 
     }
 
     // ================================================================
+    // 5.5 Save Editor panel (central modal)
+    // ================================================================
+    if (show_save_editor) {
+        render_save_editor(fwin_w, fwin_h, mouse_x, mouse_y);
+    }
+
+    // ================================================================
     // 6. Mod sidebar (pinned to right edge)
     // ================================================================
     if (mod_pinned && !show_mod_menu) {
@@ -747,6 +763,9 @@ GuiAction GuiRenderer::handle_click(int mouse_x, int mouse_y, int win_w, int win
     // ---- Mod panel click handling ----
     if (show_mod_menu) {
         return handle_mod_panel_click(mouse_x, mouse_y, win_w, win_h);
+    }
+    if (show_save_editor) {
+        return handle_save_editor_click(mouse_x, mouse_y, win_w, win_h);
     }
     if (mod_pinned) {
         GuiAction sidebar_action = handle_mod_sidebar_click(mouse_x, mouse_y, win_w, win_h);
@@ -889,6 +908,34 @@ GuiAction GuiRenderer::handle_click(int mouse_x, int mouse_y, int win_w, int win
                     // Mod menu actions
                     if (action == GUI_OPEN_MOD_MENU) {
                         show_mod_menu = true;
+                        return GUI_NONE;
+                    }
+                    if (action == GUI_OPEN_SAVE_EDITOR) {
+                        show_save_editor = true;
+                        // Find first .gplayer file in save/Documents/
+                        std::string docs_path = g_save_dir + "/Documents";
+                        std::string save_path = "";
+                        
+                        if (fs::exists(docs_path) && fs::is_directory(docs_path)) {
+                            for (const auto& entry : fs::directory_iterator(docs_path)) {
+                                if (entry.path().extension() == ".gplayer") {
+                                    save_path = entry.path().string();
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (!save_path.empty()) {
+                            SwordigoSave s;
+                            if (load_swordigo_save(save_path, s)) {
+                                save_data.level = s.level;
+                                save_data.health = s.health;
+                                save_data.max_health = s.max_health;
+                                save_data.coins = s.coins;
+                                save_data.scene = s.scene;
+                                save_data.spawn = s.spawn;
+                            }
+                        }
                         return GUI_NONE;
                     }
                     if (action == GUI_MOD_PIN_TOGGLE) {
@@ -1402,6 +1449,140 @@ GuiAction GuiRenderer::handle_mod_sidebar_click(int mouse_x, int mouse_y, int wi
         if (my_f >= scam_top - rh && my_f < scam_top) { return GUI_TOGGLE_SMOOTH_CAM; }
 
         return GUI_NONE;
+    }
+
+    return GUI_NONE;
+}
+
+// ============================================================================
+// render_save_editor() — Draw the Save Editor panel
+// ============================================================================
+void GuiRenderer::render_save_editor(float fwin_w, float fwin_h, int mouse_x, int mouse_y) {
+    float s = gui_scale;
+    draw_rect(0, 0, fwin_w, fwin_h, 0, 0, 0, 160);
+
+    float pw = 500.0f * s;
+    float ph = 400.0f * s;
+    float spx = (fwin_w - pw) / 2.0f;
+    float spy = (fwin_h - ph) / 2.0f;
+
+    draw_rect(spx, spy, pw, ph, 18, 20, 32, 248);
+    draw_border(spx, spy, pw, ph, 2.0f, 230, 130, 70, 255);
+
+    float ts = 1.3f * s;
+    float rh = 26.0f * s;
+    float mg = 22.0f * s;
+    float cx = spx + mg;
+    float cy = spy + ph - 38.0f * s;
+    float cw = pw - mg * 2.0f;
+
+    draw_string("Save Editor", cx, cy, 2.0f * s, 230, 130, 70, 255);
+    cy -= 14.0f * s;
+    draw_rect(cx, cy, cw, 1.0f, 70, 50, 50, 200);
+    cy -= rh;
+
+    auto draw_val = [&](const char* label, const char* val) {
+        draw_string(label, cx + 4*s, cy + 3*s, ts * 0.9f, 200, 200, 220, 255);
+        float vx = cx + cw * 0.55f;
+        draw_string("<", vx, cy + 3*s, ts * 0.9f, 230, 130, 70, 255);
+        draw_string(val, vx + 14*s, cy + 3*s, ts * 0.9f, 255, 220, 100, 255);
+        float vw2 = strlen(val) * 8.0f * ts * 0.9f;
+        draw_string(">", vx + 14*s + vw2 + 6*s, cy + 3*s, ts * 0.9f, 230, 130, 70, 255);
+        cy -= rh;
+    };
+
+    char buf[32];
+    snprintf(buf, 32, "%d", save_data.level); draw_val("Level", buf);
+    snprintf(buf, 32, "%d", save_data.health); draw_val("Health", buf);
+    snprintf(buf, 32, "%d", save_data.max_health); draw_val("Max Health", buf);
+    snprintf(buf, 32, "%d", save_data.coins); draw_val("Soul Shards", buf);
+    draw_val("Scene", save_data.scene.c_str());
+    draw_val("Spawn", save_data.spawn.c_str());
+
+    // Save & Close buttons
+    float btn_h = 28.0f * s;
+    float btn_y = spy + 12.0f * s;
+    
+    float sv_w = 100.0f * s;
+    float sv_x = spx + mg;
+    bool sv_hov = (mouse_x >= (int)sv_x && mouse_x < (int)(sv_x+sv_w) && mouse_y >= (int)btn_y && mouse_y < (int)(btn_y+btn_h));
+    draw_rect(sv_x, btn_y, sv_w, btn_h, sv_hov ? 100 : 70, sv_hov ? 200 : 130, sv_hov ? 100 : 70, 255);
+    draw_string("Apply", sv_x + 20*s, btn_y + 6*s, ts*0.8f, 255, 255, 255, 255);
+
+    float cl_w = 90.0f * s;
+    float cl_x = spx + pw - cl_w - mg;
+    bool cl_hov = (mouse_x >= (int)cl_x && mouse_x < (int)(cl_x+cl_w) && mouse_y >= (int)btn_y && mouse_y < (int)(btn_y+btn_h));
+    draw_rect(cl_x, btn_y, cl_w, btn_h, cl_hov ? 100 : 60, cl_hov ? 100 : 60, cl_hov ? 120 : 80, 255);
+    draw_string("Close", cl_x + 20*s, btn_y + 6*s, ts*0.8f, 255, 255, 255, 255);
+}
+
+// ============================================================================
+// handle_save_editor_click() — Process clicks in the Save Editor panel
+// ============================================================================
+GuiAction GuiRenderer::handle_save_editor_click(int mouse_x, int mouse_y, int win_w, int win_h) {
+    float s = gui_scale;
+    float pw = 500.0f * s;
+    float ph = 400.0f * s;
+    float spx = ((float)win_w - pw) / 2.0f;
+    float spy = ((float)win_h - ph) / 2.0f;
+    float mg = 22.0f * s;
+    float rh = 26.0f * s;
+    float cw = pw - mg * 2.0f;
+    float btn_h = 28.0f * s;
+    float btn_y = spy + 12.0f * s;
+
+    // Apply button
+    float sv_w = 100.0f * s;
+    float sv_x = spx + mg;
+    if (mouse_x >= (int)sv_x && mouse_x < (int)(sv_x+sv_w) && mouse_y >= (int)btn_y && mouse_y < (int)(btn_y+btn_h)) {
+        // Find first .gplayer file in save/Documents/
+        std::string docs_path = g_save_dir + "/Documents";
+        std::string save_path = "";
+        if (fs::exists(docs_path) && fs::is_directory(docs_path)) {
+            for (const auto& entry : fs::directory_iterator(docs_path)) {
+                if (entry.path().extension() == ".gplayer") {
+                    save_path = entry.path().string();
+                    break;
+                }
+            }
+        }
+
+        if (!save_path.empty()) {
+            SwordigoSave s;
+            s.level = save_data.level;
+            s.health = save_data.health;
+            s.max_health = save_data.max_health;
+            s.coins = save_data.coins;
+            s.scene = save_data.scene;
+            s.spawn = save_data.spawn;
+            save_swordigo_save(save_path, s);
+            std::cout << "[SaveEditor] Saved changes to " << save_path << std::endl;
+        }
+        return GUI_NONE;
+    }
+
+    // Close button
+    float cl_w = 90.0f * s;
+    float cl_x = spx + pw - cl_w - mg;
+    if (mouse_x >= (int)cl_x && mouse_x < (int)(cl_x+cl_w) && mouse_y >= (int)btn_y && mouse_y < (int)(btn_y+btn_h)) {
+        show_save_editor = false;
+        return GUI_NONE;
+    }
+
+    // Value editing
+    if (mouse_x >= (int)spx && mouse_x < (int)(spx+pw) && mouse_y >= (int)spy && mouse_y < (int)(spy+ph)) {
+        float first_row = spy + ph - 38.0f*s - 14.0f*s - rh;
+        int row = (int)((first_row - (float)mouse_y) / rh);
+        float vx = spx + mg + cw * 0.55f;
+        bool click_left = (mouse_x < (int)(vx + 14*s));
+
+        switch (row) {
+            case 0: save_data.level += click_left ? -1 : 1; if (save_data.level < 1) save_data.level = 1; break;
+            case 1: save_data.health += click_left ? -5 : 5; if (save_data.health < 0) save_data.health = 0; break;
+            case 2: save_data.max_health += click_left ? -5 : 5; if (save_data.max_health < 5) save_data.max_health = 5; break;
+            case 3: save_data.coins += click_left ? -100 : 100; if (save_data.coins < 0) save_data.coins = 0; break;
+            default: break;
+        }
     }
 
     return GUI_NONE;

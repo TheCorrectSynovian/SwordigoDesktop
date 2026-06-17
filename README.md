@@ -1,8 +1,55 @@
-# ⚔️ Swordigo Desktop v2.0r
+<div align="center">
 
-> *The classic action-adventure brought to Linux — no emulator required.*
+# ⚔️ Swordigo Desktop
 
-**Swordigo Desktop** is a native Linux port of the beloved 2012 mobile action-adventure platformer by Touch Foo. Instead of running through Android emulation layers, this project uses a surgical **ARM ELF loader** with **Unicorn Engine** to execute the game's original native code directly, bridging it with host-native **OpenGL**, **OpenAL**, and **SDL2** for a true desktop experience. v2.0r brings a multi-pass rendering pipeline with SSAO, God Rays, and 7 visual presets.
+### The Swordigo Runtime Environment (SRE)
+
+*The classic 2012 action-adventure — running natively on Linux through a custom ARM compatibility runtime.*
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20x86__64-purple.svg)](#)
+[![Version](https://img.shields.io/badge/Version-v2.0r-00e5ff.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases)
+[![Engine](https://img.shields.io/badge/Engine-SRE%20v2.0-8b3dff.svg)](#-sre-architecture)
+
+[Website](https://thecorrectsynovian.github.io/SwordigoDesktop/web/) · [Download](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases) · [Research](https://thecorrectsynovian.github.io/SwordigoDesktop/web/research.html) · [Changelog](https://thecorrectsynovian.github.io/SwordigoDesktop/web/changelog.html)
+
+</div>
+
+---
+
+**Swordigo Desktop** is a native Linux port of the beloved mobile action-adventure platformer by Touch Foo. Rather than running through Android emulation layers, this project uses the **Swordigo Runtime Environment (SRE)** — a surgical ARM ELF loader powered by Unicorn Engine that executes the game's original native code directly, bridging it with host-native OpenGL, OpenAL, and SDL2 for a true desktop experience.
+
+v2.0r introduces a multi-pass rendering pipeline with SSAO, God Rays, Volumetric Light Shafts, and 7 visual presets.
+
+---
+
+## ⚡ SRE Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  🎮  Your Linux Desktop                                │
+│      SDL2 window · OpenGL context · OpenAL audio        │
+├─────────────────────────────────────────────────────────┤
+│  🔧  SRE Bridge         │  🎨  SRE PostFX              │
+│      JNI compat layer   │      SSAO, God Rays, FX      │
+│      200+ functions     │      7 visual presets         │
+├─────────────────────────┼───────────────────────────────┤
+│  ⚙️  SRE Core           │  📦  SRE Loader              │
+│      Unicorn Engine     │      ELF parser + relocator   │
+│      ARMv7 execution    │      Symbol resolution        │
+├─────────────────────────────────────────────────────────┤
+│  📜  libswordigo.so (Original ARM Binary)               │
+│      Caver Engine · Lua 5.1 · Protobuf · PowerVR       │
+└─────────────────────────────────────────────────────────┘
+```
+
+| Component | Technology | Role |
+|-----------|-----------|------|
+| **SRE Loader** | Custom ELF parser | Surgical loader for `libswordigo.so` with full relocation |
+| **SRE Core** | [Unicorn Engine](https://www.unicorn-engine.org/) | High-performance ARMv7 instruction emulation |
+| **SRE Bridge** | Custom JNI bridge | 200+ bridged functions (libc, math, OpenGL, file I/O) |
+| **SRE PostFX** | OpenGL 2.1 | Multi-pass rendering with SSAO, God Rays, color grading |
+| **SRE Launcher** | SDL2 + ImGui | Pre-launch config with binary selection + graphics API |
 
 ---
 
@@ -14,13 +61,13 @@
 - Full audio: music tracks + sound effects through OpenAL
 
 ### 🖥️ Desktop-Native Experience
-- **1920×1080 internal rendering** with FBO-based scaling (Sharp Bilinear, Nearest, CRT Scanline) + multi-pass post-processing pipeline
+- **1920×1080 internal rendering** with FBO-based scaling (Sharp Bilinear, Nearest, CRT Scanline)
 - **Keyboard controls** — fully remappable via the in-game Controls Editor (F2)
 - **Gamepad support** — Xbox/PlayStation controllers with analog stick + D-pad
 - **Multi-touch support** — 10 independent touch inputs for touchscreen laptops
 - **FWKeyboard API** — direct integration with the Caver engine's native keyboard system
 
-### 🎨 Advanced Rendering Pipeline (NEW in v2.0r)
+### 🎨 SRE PostFX Pipeline (NEW in v2.0r)
 - **Post-Processing Presets** (F6) — Cinematic, Retro, Fantasy, Noir, Ethereal, Atmospheric
 - **SSAO** — Screen Space Ambient Occlusion with 16-sample hemisphere + bilateral blur
 - **God Rays** — 64-sample radial blur from configurable sun position
@@ -29,17 +76,19 @@
 - **Depth Buffer as Texture** — Enables all depth-based shader effects
 
 ### 🛠️ Engine Features
-- **F1** — Toggle GUI menu bar (File/Emulation/Config/Misc/Help)
-- **F2** — Controls Editor (drag to reposition buttons)
-- **F3** — Debug overlay (FPS, draw calls, vertices, textures, binary info, PostFX)
-- **F4** — Cycle scaling modes (Sharp Bilinear → Nearest → CRT Scanline)
-- **F5** — Camera override toggle
-- **F6** — Cycle PostFX presets (Off → Cinematic → Retro → Fantasy → Noir → Ethereal → Atmospheric)
-- **F7** — Typing mode (keyboard → FWKeyboard events for text input)
-- **F10** — Toggle game's native on-screen controls
-- **F12** — Fullscreen toggle
+| Key | Feature |
+|-----|---------|
+| **F1** | Toggle GUI menu bar (File/Emulation/Config/Misc/Help) |
+| **F2** | Controls Editor (drag to reposition buttons) |
+| **F3** | Debug overlay (FPS, draw calls, vertices, textures, binary info, PostFX) |
+| **F4** | Cycle scaling modes (Sharp Bilinear → Nearest → CRT Scanline) |
+| **F5** | Camera override toggle |
+| **F6** | Cycle PostFX presets (Off → Cinematic → Retro → Fantasy → Noir → Ethereal → Atmospheric) |
+| **F7** | Typing mode (keyboard → FWKeyboard events for text input) |
+| **F10** | Toggle game's native on-screen controls |
+| **F12** | Fullscreen toggle |
 
-### 🚀 Boot & Binary Management (NEW in v2.0r)
+### 🚀 SRE Launcher (NEW in v2.0r)
 - **Unified Launcher GUI** — Pre-launch configuration with binary selection + graphics API picker
 - **Multi-Binary Support** — SHA-256 validated, auto-detect v1.4.6 and v1.4.12 game binaries
 - **Binary Registry** — JSON-based version tracking with tested/untested status
@@ -48,20 +97,7 @@
 - Custom camera system with 6-axis control + zoom + smooth interpolation
 - Async I/O thread for non-blocking save/load
 - Speed control (0.25× to 4×), frame stepping, pause
-- Comprehensive JNI bridge with SharedPreferences persistence
-
----
-
-## 🏗️ Technical Architecture
-
-| Component | Technology | Description |
-|-----------|-----------|-------------|
-| **Loader** | Custom ELF parser | Surgical loader for `libswordigo.so` with full relocation |
-| **CPU** | [Unicorn Engine](https://www.unicorn-engine.org/) | High-performance ARMv7 instruction emulation |
-| **Graphics** | OpenGL 2.1 | Direct GLES→GL translation with FBO scaling pipeline |
-| **Audio** | OpenAL Soft | WAV playback for music + sound effects |
-| **Window** | [SDL2](https://www.libsdl.org/) | Cross-platform window, input, and gamepad management |
-| **JNI** | Custom bridge | 200+ bridged functions (libc, math, OpenGL, file I/O) |
+- Comprehensive SRE Bridge with SharedPreferences persistence
 
 ---
 
@@ -79,7 +115,7 @@ sudo apt install libunicorn-dev libsdl2-dev libopenal-dev libgl-dev zlib1g-dev
 ### Build & Run
 ```bash
 make clean && make
-./swordigo_boot          # Main build with launcher
+./swordigo_boot          # Main build with SRE Launcher
 ./swordigo_headless      # No display (testing)
 ```
 
@@ -140,7 +176,7 @@ Packages available in the `build/v2/` directory.
 | Contribution | Name | GitHub |
 |-------------|------|--------|
 | **SwMini Mod Loader** — Reverse engineering | ItsJustSomeDude | [@ItsJustSomeDude](https://github.com/ItsJustSomeDude) |
-| **SwMini Mod Loader** — Reverse engineering| Kiziyon | [@Kiziyon](https://github.com/Kiziyon) |
+| **SwMini Mod Loader** — Reverse engineering | Kiziyon | [@Kiziyon](https://github.com/Kiziyon) |
 | **Swordigo Vita Port** — Original ARM→desktop porting research & VitaGL bridge | Rinnegatamante | [@Rinnegatamante](https://github.com/Rinnegatamante) |
 
 ### Original Game
@@ -152,14 +188,14 @@ Packages available in the `build/v2/` directory.
 
 | Project | License | Purpose |
 |---------|---------|---------|
-| [Unicorn Engine](https://www.unicorn-engine.org/) | GPL-2.0 | ARMv7 CPU emulation |
+| [Unicorn Engine](https://www.unicorn-engine.org/) | GPL-2.0 | ARMv7 CPU emulation (SRE Core) |
 | [SDL2](https://www.libsdl.org/) | Zlib | Window management, input, gamepad |
 | [OpenAL Soft](https://openal-soft.org/) | LGPL-2.1 | Audio playback |
 | [GlossHook](https://github.com/XMDS/GlossHook) | MIT | Function hooking (reference from SwMini) |
 
 ### Acknowledgments
 
-- The **SwMini** project by ItsJustSomeDude and Kiziyon for their incredible reverse engineering work on the Caver engine,Lua scripting interface, and virtual filesystem architecture.
+- The **SwMini** project by ItsJustSomeDude and Kiziyon for their incredible reverse engineering work on the Caver engine, Lua scripting interface, and virtual filesystem architecture.
 - **Rinnegatamante** for the Swordigo PS Vita port which provided crucial insights into the engine's JNI interface, touch event system, and native symbol layout.
 - The **Swordigo modding community, SwordiForge** for keeping this 2012 gem alive and well-documented.
 
@@ -173,6 +209,10 @@ This is a personal research and preservation project. Swordigo is the property o
 
 ---
 
-<p align="center">
-  <i>Built with ❤️ for game preservation</i>
-</p>
+<div align="center">
+
+*Powered by the Swordigo Runtime Environment (SRE)*
+
+Built with ❤️ for game preservation
+
+</div>

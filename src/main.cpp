@@ -61,7 +61,7 @@ JniBridge g_bridge;
 Emulator* g_emulator = nullptr;
 GuiRenderer g_gui;
 InputConfig g_input_config;
-SDL_GameController* g_gamepad = nullptr;
+SDL_Gamepad* g_gamepad = nullptr;
 FBOScale g_fbo_mode = FBOScale::SHARP_BILINEAR;
 PostFXState g_postfx;
 PostFXPreset g_postfx_preset = PostFXPreset::OFF;
@@ -211,15 +211,18 @@ void init_all() {
     }
     
     // Open any connected gamepad
-    SDL_Init(SDL_INIT_GAMECONTROLLER);
-    for (int i = 0; i < SDL_NumJoysticks(); i++) {
-        if (SDL_IsGameController(i)) {
-            g_gamepad = SDL_GameControllerOpen(i);
+    SDL_Init(SDL_INIT_GAMEPAD);
+    int gpad_count = 0;
+    SDL_JoystickID *gpad_ids = SDL_GetGamepads(&gpad_count);
+    if (gpad_ids) {
+        for (int i = 0; i < gpad_count; i++) {
+            g_gamepad = SDL_OpenGamepad(gpad_ids[i]);
             if (g_gamepad) {
-                std::cout << "[Input] Gamepad: " << SDL_GameControllerName(g_gamepad) << std::endl;
+                std::cout << "[Input] Gamepad: " << SDL_GetGamepadName(g_gamepad) << std::endl;
                 break;
             }
         }
+        SDL_free(gpad_ids);
     }
     std::cout << "[Main] Infrastructure initialized." << std::endl;
 }
@@ -484,14 +487,14 @@ void load_and_boot() {
 
     if (updateApp && drawApp) {
         // Real delta time
-        Uint32 last_ticks = SDL_GetTicks();
+        Uint64 last_ticks = SDL_GetTicks();
         double accumulated_time = 0.0;
         bool gui_visible = false;  // GUI hidden by default
         bool debug_visible = false;  // F3 debug overlay
         bool hint_shown = false;  // One-time "Press F1" hint
-        Uint32 hint_start_time = SDL_GetTicks();  // Show hint for first 5 seconds
+        Uint64 hint_start_time = SDL_GetTicks();  // Show hint for first 5 seconds
         float fps = 0.0f;
-        Uint32 fps_last_time = SDL_GetTicks();
+        Uint64 fps_last_time = SDL_GetTicks();
         int fps_frame_count = 0;
         
         const int TARGET_FRAMES = g_display_active ? 0 : 1000; // 0 = infinite
@@ -545,7 +548,7 @@ void load_and_boot() {
             g_frame_stats.reset();
             
             // Real delta time
-            Uint32 now_ticks = SDL_GetTicks();
+            Uint64 now_ticks = SDL_GetTicks();
             float dt_seconds = (now_ticks - last_ticks) / 1000.0f;
             if (dt_seconds > 0.1f) dt_seconds = 0.016666668f;
             if (dt_seconds < 0.001f) dt_seconds = 0.016666668f;
@@ -868,22 +871,20 @@ void load_and_boot() {
                 SDL_Event event;
                 while (SDL_PollEvent(&event)) {
                     switch (event.type) {
-                        case SDL_QUIT:
+                        case SDL_EVENT_QUIT:
                             running = false;
                             break;
-                        case SDL_WINDOWEVENT:
-                            if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
-                                running = false;
-                            }
-                            if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                                g_win_w = event.window.data1;
-                                g_win_h = event.window.data2;
-                                // On HiDPI, drawable size may differ from window size
-                                // GUI uses window coords (matching mouse events)
-                                std::cout << "[Display] Window resized to " << g_win_w << "x" << g_win_h << std::endl;
-                            }
+                        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+                            running = false;
                             break;
-                        case SDL_MOUSEBUTTONDOWN:
+                        case SDL_EVENT_WINDOW_RESIZED:
+                            g_win_w = event.window.data1;
+                            g_win_h = event.window.data2;
+                            // On HiDPI, drawable size may differ from window size
+                            // GUI uses window coords (matching mouse events)
+                            std::cout << "[Display] Window resized to " << g_win_w << "x" << g_win_h << std::endl;
+                            break;
+                        case SDL_EVENT_MOUSE_BUTTON_DOWN:
                             if (event.button.button == SDL_BUTTON_LEFT) {
                                 mouse_pressed = true;
                                 mouse_x = event.button.x;
@@ -997,7 +998,7 @@ void load_and_boot() {
                                 }
                             }
                             break;
-                        case SDL_MOUSEMOTION:
+                        case SDL_EVENT_MOUSE_MOTION:
                             mouse_x = event.motion.x;
                             mouse_y = g_win_h - event.motion.y;
                             if (g_input_config.is_editing() && mouse_pressed) {
@@ -1012,7 +1013,7 @@ void load_and_boot() {
                                 last_mouse_y = y;
                             }
                             break;
-                        case SDL_MOUSEBUTTONUP:
+                        case SDL_EVENT_MOUSE_BUTTON_UP:
                             if (event.button.button == SDL_BUTTON_LEFT) {
                                 mouse_pressed = false;
                                 mouse_x = event.button.x;
@@ -1029,18 +1030,18 @@ void load_and_boot() {
                                 click_swallowed_by_gui = false;
                             }
                             break;
-                        case SDL_MOUSEWHEEL:
+                        case SDL_EVENT_MOUSE_WHEEL:
                             if (g_cam_active) {
                                 cam_scroll_zoom((float)event.wheel.y);
                             }
                             break;
-                        case SDL_KEYDOWN:
-                            if (event.key.keysym.sym == SDLK_F1 && !event.key.repeat) {
+                        case SDL_EVENT_KEY_DOWN:
+                            if (event.key.key == SDLK_F1 && !event.key.repeat) {
                                 gui_visible = !gui_visible;
                                 std::cout << "[GUI] " << (gui_visible ? "ON" : "OFF") << std::endl;
                                 break;
                             }
-                            if (event.key.keysym.sym == SDLK_F2 && !event.key.repeat) {
+                            if (event.key.key == SDLK_F2 && !event.key.repeat) {
                                 g_input_config.toggle_editor();
                                 if (!g_input_config.is_editing()) {
                                     g_input_config.save(g_save_dir + "/controls.ini");
@@ -1049,12 +1050,12 @@ void load_and_boot() {
                                 std::cout << "[Controls Editor] " << (g_input_config.is_editing() ? "ON" : "OFF") << std::endl;
                                 break;
                             }
-                            if (event.key.keysym.sym == SDLK_F3 && !event.key.repeat) {
+                            if (event.key.key == SDLK_F3 && !event.key.repeat) {
                                 debug_visible = !debug_visible;
                                 std::cout << "[Debug] " << (debug_visible ? "ON" : "OFF") << std::endl;
                                 break;
                             }
-                            if (event.key.keysym.sym == SDLK_F4 && !event.key.repeat) {
+                            if (event.key.key == SDLK_F4 && !event.key.repeat) {
                                 g_fbo_mode = static_cast<FBOScale>((static_cast<int>(g_fbo_mode) + 1) % 3);
                                 const char* m_name = "Unknown";
                                 if (g_fbo_mode == FBOScale::SHARP_BILINEAR) m_name = "Sharp-Bilinear";
@@ -1063,15 +1064,15 @@ void load_and_boot() {
                                 std::cout << "[FBO] Scale mode changed to " << m_name << std::endl;
                                 break;
                             }
-                            if (event.key.keysym.sym == SDLK_F12 && !event.key.repeat) {
-                                Uint32 flags = SDL_GetWindowFlags(g_display_ptr->get_window());
-                                if (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) {
-                                    SDL_SetWindowFullscreen(g_display_ptr->get_window(), 0);
+                            if (event.key.key == SDLK_F12 && !event.key.repeat) {
+                                SDL_WindowFlags flags = SDL_GetWindowFlags(g_display_ptr->get_window());
+                                if (flags & SDL_WINDOW_FULLSCREEN) {
+                                    SDL_SetWindowFullscreen(g_display_ptr->get_window(), false);
                                     g_win_w = 1920;
                                     g_win_h = 1080;
                                     std::cout << "[Display] Windowed 1920x1080" << std::endl;
                                 } else {
-                                    SDL_SetWindowFullscreen(g_display_ptr->get_window(), SDL_WINDOW_FULLSCREEN_DESKTOP);
+                                    SDL_SetWindowFullscreen(g_display_ptr->get_window(), true);
                                     // Get actual fullscreen resolution
                                     int fw, fh;
                                     SDL_GetWindowSize(g_display_ptr->get_window(), &fw, &fh);
@@ -1081,11 +1082,11 @@ void load_and_boot() {
                                 }
                                 break;
                             }
-                            if (event.key.keysym.sym == SDLK_F5 && !event.key.repeat) {
+                            if (event.key.key == SDLK_F5 && !event.key.repeat) {
                                 cam_toggle();
                                 break;
                             }
-                            if (event.key.keysym.sym == SDLK_F6 && !event.key.repeat) {
+                            if (event.key.key == SDLK_F6 && !event.key.repeat) {
                                 g_postfx_preset = static_cast<PostFXPreset>(
                                     (static_cast<int>(g_postfx_preset) + 1) % static_cast<int>(PostFXPreset::COUNT)
                                 );
@@ -1093,18 +1094,18 @@ void load_and_boot() {
                                 std::cout << "[PostFX] Preset: " << g_postfx.preset_name << std::endl;
                                 break;
                             }
-                            if (event.key.keysym.sym == SDLK_F7 && !event.key.repeat) {
+                            if (event.key.key == SDLK_F7 && !event.key.repeat) {
                                 g_typing_mode = !g_typing_mode;
                                 if (g_typing_mode) {
-                                    SDL_StartTextInput();
+                                    SDL_StartTextInput(g_display_ptr->get_window());
                                     std::cout << "[Keyboard] Typing mode ON — keyboard sends FWKeyboard events" << std::endl;
                                 } else {
-                                    SDL_StopTextInput();
+                                    SDL_StopTextInput(g_display_ptr->get_window());
                                     std::cout << "[Keyboard] Typing mode OFF — keyboard sends touch events" << std::endl;
                                 }
                                 break;
                             }
-                            if (event.key.keysym.sym == SDLK_F10 && !event.key.repeat) {
+                            if (event.key.key == SDLK_F10 && !event.key.repeat) {
                                 // Toggle host-side touch HUD visibility
                                 // (paints over button areas instead of calling handleMenuButtonPress
                                 //  which would open the game's settings menu)
@@ -1113,37 +1114,37 @@ void load_and_boot() {
                                 std::cout << "[Keyboard] Touch HUD: " << (g_hide_touch_hud ? "HIDDEN" : "VISIBLE") << std::endl;
                                 break;
                             }
-                            if (event.key.keysym.sym == SDLK_F8 && !event.key.repeat) {
+                            if (event.key.key == SDLK_F8 && !event.key.repeat) {
                                 mod_toggle_pause();
                                 break;
                             }
-                            if (event.key.keysym.sym == SDLK_F9 && !event.key.repeat) {
+                            if (event.key.key == SDLK_F9 && !event.key.repeat) {
                                 mod_step_frame();
                                 break;
                             }
-                            if (event.key.keysym.sym == SDLK_EQUALS && !event.key.repeat) {
+                            if (event.key.key == SDLK_EQUALS && !event.key.repeat) {
                                 mod_speed_up();
                                 break;
                             }
-                            if (event.key.keysym.sym == SDLK_MINUS && !event.key.repeat) {
+                            if (event.key.key == SDLK_MINUS && !event.key.repeat) {
                                 mod_speed_down();
                                 break;
                             }
-                            if (event.key.keysym.sym == SDLK_0 && !event.key.repeat) {
+                            if (event.key.key == SDLK_0 && !event.key.repeat) {
                                 mod_speed_reset();
                                 break;
                             }
                             // fall through
-                        case SDL_KEYUP: {
-                            bool is_down = (event.type == SDL_KEYDOWN);
-                            int scancode = event.key.keysym.scancode;
+                        case SDL_EVENT_KEY_UP: {
+                            bool is_down = (event.type == SDL_EVENT_KEY_DOWN);
+                            int scancode = event.key.scancode;
                             
                             // ---- TYPING MODE: route through FWKeyboard API ----
                             if (g_typing_mode && g_fw_sendKeyDown && g_fw_sendKeyUp) {
                                 // Map SDL keysym to FWKeyboard key codes
                                 // Based on Caver engine internal codes (iOS/Android keycodes)
                                 uint32_t fw_key = 0;
-                                switch (event.key.keysym.sym) {
+                                switch (event.key.key) {
                                     case SDLK_RETURN:     fw_key = 0x24; break; // Enter
                                     case SDLK_BACKSPACE:  fw_key = 0x33; break; // Backspace/Delete
                                     case SDLK_ESCAPE:     fw_key = 0x35; break; // Escape
@@ -1185,7 +1186,7 @@ void load_and_boot() {
                             }
                             
                             // Camera + arrow keys (camera-only, not game movement)
-                            switch (event.key.keysym.sym) {
+                            switch (event.key.key) {
                                 case SDLK_LEFT:     arrow_left   = is_down; break;
                                 case SDLK_RIGHT:    arrow_right  = is_down; break;
                                 case SDLK_UP:       arrow_up     = is_down; break;
@@ -1199,7 +1200,7 @@ void load_and_boot() {
                             break;
                         }
                         // --- Text input events (typing mode F7) ---
-                        case SDL_TEXTINPUT: {
+                        case SDL_EVENT_TEXT_INPUT: {
                             if (g_typing_mode && g_fw_sendKeyChar) {
                                 // Send each character through FWKeyboard::SendKeyCharEvent
                                 const char* text = event.text.text;
@@ -1211,50 +1212,50 @@ void load_and_boot() {
                             break;
                         }
                         // --- Multi-touch support (touchscreen laptops, up to 10 fingers) ---
-                        case SDL_FINGERDOWN: {
+                        case SDL_EVENT_FINGER_DOWN: {
                             // SDL finger coords are normalized 0.0-1.0, scale to game 960x544
                             float x = event.tfinger.x * 960.0f;
                             float y = (1.0f - event.tfinger.y) * 544.0f;  // flip Y
-                            int finger_id = (int)(event.tfinger.fingerId % 10) + 20;  // IDs 20-29 for touch
+                            int finger_id = (int)(event.tfinger.fingerID % 10) + 20;  // IDs 20-29 for touch
                             call_handle_touch_event(handleTouchEvent, env_ptr, 0, 1, finger_id, accumulated_time, x, y, x, y, 1);
                             break;
                         }
-                        case SDL_FINGERUP: {
+                        case SDL_EVENT_FINGER_UP: {
                             float x = event.tfinger.x * 960.0f;
                             float y = (1.0f - event.tfinger.y) * 544.0f;
-                            int finger_id = (int)(event.tfinger.fingerId % 10) + 20;
+                            int finger_id = (int)(event.tfinger.fingerID % 10) + 20;
                             call_handle_touch_event(handleTouchEvent, env_ptr, 0, 2, finger_id, accumulated_time, x, y, x, y, 0);
                             break;
                         }
-                        case SDL_FINGERMOTION: {
+                        case SDL_EVENT_FINGER_MOTION: {
                             float x = event.tfinger.x * 960.0f;
                             float y = (1.0f - event.tfinger.y) * 544.0f;
                             float old_x = (event.tfinger.x - event.tfinger.dx) * 960.0f;
                             float old_y = (1.0f - (event.tfinger.y - event.tfinger.dy)) * 544.0f;
-                            int finger_id = (int)(event.tfinger.fingerId % 10) + 20;
+                            int finger_id = (int)(event.tfinger.fingerID % 10) + 20;
                             call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, finger_id, accumulated_time, x, y, old_x, old_y, 0);
                             break;
                         }
                         // --- Gamepad support ---
-                        case SDL_CONTROLLERDEVICEADDED: {
+                        case SDL_EVENT_GAMEPAD_ADDED: {
                             if (!g_gamepad) {
-                                g_gamepad = SDL_GameControllerOpen(event.cdevice.which);
+                                g_gamepad = SDL_OpenGamepad(event.gdevice.which);
                                 if (g_gamepad)
-                                    std::cout << "[Input] Gamepad connected: " << SDL_GameControllerName(g_gamepad) << std::endl;
+                                    std::cout << "[Input] Gamepad connected: " << SDL_GetGamepadName(g_gamepad) << std::endl;
                             }
                             break;
                         }
-                        case SDL_CONTROLLERDEVICEREMOVED: {
-                            if (g_gamepad && event.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_gamepad))) {
-                                SDL_GameControllerClose(g_gamepad);
+                        case SDL_EVENT_GAMEPAD_REMOVED: {
+                            if (g_gamepad && event.gdevice.which == SDL_GetJoystickID(SDL_GetGamepadJoystick(g_gamepad))) {
+                                SDL_CloseGamepad(g_gamepad);
                                 g_gamepad = nullptr;
                                 std::cout << "[Input] Gamepad disconnected" << std::endl;
                             }
                             break;
                         }
-                        case SDL_CONTROLLERAXISMOTION: {
-                            if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
-                                float val = event.caxis.value / 32768.0f;
+                        case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
+                            if (event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX) {
+                                float val = event.gaxis.value / 32768.0f;
                                 if (g_cam_active) {
                                     cam_move_scaled(val, 0.0f, 0.0f, dt_seconds);
                                 } else {
@@ -1277,49 +1278,49 @@ void load_and_boot() {
                             }
                             break;
                         }
-                        case SDL_CONTROLLERBUTTONDOWN:
-                        case SDL_CONTROLLERBUTTONUP: {
-                            bool gp_down = (event.type == SDL_CONTROLLERBUTTONDOWN);
-                            switch (event.cbutton.button) {
-                                case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+                        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+                        case SDL_EVENT_GAMEPAD_BUTTON_UP: {
+                            bool gp_down = (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+                            switch (event.gbutton.button) {
+                                case SDL_GAMEPAD_BUTTON_DPAD_LEFT:
                                     if (key_left != gp_down) {
                                         key_left = gp_down;
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, gp_down ? 1 : 2, 6, accumulated_time, 60.0f, 94.0f, 60.0f, 94.0f, gp_down ? 1 : 0);
                                     }
                                     break;
-                                case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+                                case SDL_GAMEPAD_BUTTON_DPAD_RIGHT:
                                     if (key_right != gp_down) {
                                         key_right = gp_down;
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, gp_down ? 1 : 2, 7, accumulated_time, 155.0f, 94.0f, 155.0f, 94.0f, gp_down ? 1 : 0);
                                     }
                                     break;
-                                case SDL_CONTROLLER_BUTTON_A:
+                                case SDL_GAMEPAD_BUTTON_SOUTH:
                                     if (key_jump != gp_down) {
                                         key_jump = gp_down;
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, gp_down ? 1 : 2, 5, accumulated_time, 900.0f, 94.0f, 900.0f, 94.0f, gp_down ? 1 : 0);
                                     }
                                     break;
-                                case SDL_CONTROLLER_BUTTON_X:
+                                case SDL_GAMEPAD_BUTTON_WEST:
                                     if (key_attack != gp_down) {
                                         key_attack = gp_down;
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, gp_down ? 1 : 2, 8, accumulated_time, 790.0f, 94.0f, 790.0f, 94.0f, gp_down ? 1 : 0);
                                     }
                                     break;
-                                case SDL_CONTROLLER_BUTTON_Y:
+                                case SDL_GAMEPAD_BUTTON_NORTH:
                                     if (key_magic != gp_down) {
                                         key_magic = gp_down;
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, gp_down ? 1 : 2, 10, accumulated_time, 900.0f, 184.0f, 900.0f, 184.0f, gp_down ? 1 : 0);
                                     }
                                     break;
-                                case SDL_CONTROLLER_BUTTON_B:
-                                case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
-                                case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
+                                case SDL_GAMEPAD_BUTTON_EAST:
+                                case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER:
+                                case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER:
                                     if (key_use_item != gp_down) {
                                         key_use_item = gp_down;
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, gp_down ? 1 : 2, 12, accumulated_time, 425.0f, 54.0f, 425.0f, 54.0f, gp_down ? 1 : 0);
                                     }
                                     break;
-                                case SDL_CONTROLLER_BUTTON_START:
+                                case SDL_GAMEPAD_BUTTON_START:
                                     if (key_menu != gp_down) {
                                         key_menu = gp_down;
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, gp_down ? 1 : 2, 9, accumulated_time, 48.0f, 500.0f, 48.0f, 500.0f, gp_down ? 1 : 0);
@@ -1334,7 +1335,7 @@ void load_and_boot() {
             
             // FPS counter
             fps_frame_count++;
-            Uint32 fps_now = SDL_GetTicks();
+            Uint64 fps_now = SDL_GetTicks();
             if (fps_now - fps_last_time >= 1000) {
                 fps = fps_frame_count * 1000.0f / (fps_now - fps_last_time);
                 fps_frame_count = 0;
@@ -1373,7 +1374,7 @@ void load_and_boot() {
         // Cleanup
         g_input_config.save(g_save_dir + "/controls.ini");
         if (g_gamepad) {
-            SDL_GameControllerClose(g_gamepad);
+            SDL_CloseGamepad(g_gamepad);
             g_gamepad = nullptr;
         }
 

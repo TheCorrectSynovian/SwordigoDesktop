@@ -19,8 +19,8 @@ struct TouchButton {
     int sdl_scancode_alt;       // Alt keyboard key
 
     // Gamepad mapping
-    int gamepad_button;         // SDL_GameControllerButton (-1 = none)
-    int gamepad_axis;           // SDL_GameControllerAxis (-1 = none)
+    int gamepad_button;         // SDL_GamepadButton (-1 = none)
+    int gamepad_axis;           // SDL_GamepadAxis (-1 = none)
     float axis_threshold;       // Threshold for axis activation (0.5 default)
 
     // TV remote mapping (maps to arrow keys + enter/back)

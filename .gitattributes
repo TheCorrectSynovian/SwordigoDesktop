@@ -1,0 +1,21 @@
+# Force LF line endings everywhere (prevents CRLF chaos on Windows)
+* text=auto eol=lf
+
+# Explicitly mark binary files
+*.png binary
+*.jpg binary
+*.mp3 binary
+*.ogg binary
+*.wav binary
+*.so binary
+*.pvr binary
+*.POD binary
+*.TRP binary
+*.xz binary
+*.gz binary
+*.zip binary
+*.7z binary
+*.tar binary
+*.deb binary
+*.rpm binary
+*.AppImage binary

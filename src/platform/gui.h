@@ -53,6 +53,8 @@ enum GuiAction {
     GUI_MOD_LEVEL_DOWN,
     GUI_MOD_EXP_UP,
     GUI_MOD_EXP_DOWN,
+    GUI_OPEN_SAVE_EDITOR,
+    GUI_SAVE_EDITOR_SAVE,
 };
 
 struct MenuItem {
@@ -80,7 +82,7 @@ public:
 
     // Returns true if any modal/panel/dropdown is open
     // When true, ALL clicks should be consumed by the GUI — don't pass to game
-    bool has_modal_open() const { return show_about || show_settings || show_mod_menu || active_menu >= 0; }
+    bool has_modal_open() const { return show_about || show_settings || show_mod_menu || show_save_editor || active_menu >= 0; }
 
     bool is_paused() const { return paused; }
     void set_paused(bool p) { paused = p; }
@@ -107,6 +109,19 @@ public:
     bool mod_pinned = false;        // Pin to screen active
     bool mod_sidebar_open = false;  // Sidebar expanded
 
+    // Save Editor state
+    bool show_save_editor = false;
+    struct SaveData {
+        int level = 1;
+        int health = 100;
+        int max_health = 100;
+        int coins = 0;
+        std::string scene = "town_herohouse";
+        std::string spawn = "spawn_default";
+        std::vector<std::string> items;
+        std::vector<std::string> spells;
+    } save_data;
+
 private:
     void draw_rect(float x, float y, float w, float h, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
     void draw_border(float x, float y, float w, float h, float thickness, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
@@ -115,8 +130,10 @@ private:
     // Mod menu panel rendering & click helpers
     void render_mod_panel(float fwin_w, float fwin_h, int mouse_x, int mouse_y);
     void render_mod_sidebar(float fwin_w, float fwin_h, int mouse_x, int mouse_y);
+    void render_save_editor(float fwin_w, float fwin_h, int mouse_x, int mouse_y);
     GuiAction handle_mod_panel_click(int mouse_x, int mouse_y, int win_w, int win_h);
     GuiAction handle_mod_sidebar_click(int mouse_x, int mouse_y, int win_w, int win_h);
+    GuiAction handle_save_editor_click(int mouse_x, int mouse_y, int win_w, int win_h);
 
     std::vector<Menu> menus;
     int active_menu = -1;

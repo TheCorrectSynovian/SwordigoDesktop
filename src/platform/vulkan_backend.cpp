@@ -156,10 +156,9 @@ bool VulkanBackend::init(SDL_Window* window, int gw, int gh) {
         app_info.apiVersion = VK_API_VERSION_1_0;
 
         // Get required extensions from SDL
-        unsigned int ext_count = 0;
-        SDL_Vulkan_GetInstanceExtensions(window, &ext_count, nullptr);
-        std::vector<const char*> extensions(ext_count);
-        SDL_Vulkan_GetInstanceExtensions(window, &ext_count, extensions.data());
+        Uint32 ext_count = 0;
+        const char * const *sdl_exts = SDL_Vulkan_GetInstanceExtensions(&ext_count);
+        std::vector<const char*> extensions(sdl_exts, sdl_exts + ext_count);
 
         // Enable validation in debug builds
 #ifndef NDEBUG
@@ -200,7 +199,7 @@ bool VulkanBackend::init(SDL_Window* window, int gw, int gh) {
     }
 
     // --- 3. Create surface ---
-    if (!SDL_Vulkan_CreateSurface(window, instance_, &surface_)) {
+    if (!SDL_Vulkan_CreateSurface(window, instance_, NULL, &surface_)) {
         std::cerr << "[VK] Failed to create surface: " << SDL_GetError() << std::endl;
         return false;
     }
@@ -535,7 +534,7 @@ bool VulkanBackend::create_swapchain(SDL_Window* window) {
     VkExtent2D extent = caps.currentExtent;
     if (extent.width == UINT32_MAX) {
         int w, h;
-        SDL_Vulkan_GetDrawableSize(window, &w, &h);
+        SDL_GetWindowSizeInPixels(window, &w, &h);
         extent.width = std::clamp((uint32_t)w, caps.minImageExtent.width, caps.maxImageExtent.width);
         extent.height = std::clamp((uint32_t)h, caps.minImageExtent.height, caps.maxImageExtent.height);
     }
