@@ -42,6 +42,9 @@ cp LICENSE "$APPDIR/usr/share/licenses/LICENSE"
 # ---------- Copy ALL assets (textures, models, sounds, music) ----------
 echo "[4/7] Copying game assets (this may take a moment)..."
 cp -r assets/resources/* "$APPDIR/usr/share/swordigo/assets/resources/"
+# Also copy src/assets (icons) for window icon loading
+mkdir -p "$APPDIR/usr/share/swordigo/src/assets"
+cp src/assets/*.png "$APPDIR/usr/share/swordigo/src/assets/" 2>/dev/null || true
 echo "      Assets: $(find "$APPDIR/usr/share/swordigo/assets" -type f | wc -l) files"
 echo "      Assets size: $(du -sh "$APPDIR/usr/share/swordigo/assets" | cut -f1)"
 
@@ -67,7 +70,7 @@ for lib in $DEPS; do
 done
 
 # Also explicitly bundle these critical libraries if not caught above
-for critical_lib in libunicorn libopenal libSDL2 libsndio libpulse libsamplerate libasound libvorbis libogg libFLAC libopus libsndfile libmpg123 libzlib libz.so libpulsecommon libpulse-simple libasyncns; do
+for critical_lib in libunicorn libopenal libSDL2 libSDL2_image libsndio libpulse libsamplerate libasound libvorbis libvorbisfile libogg libFLAC libopus libsndfile libmpg123 libzlib libz.so libpulsecommon libpulse-simple libasyncns; do
     FOUND=$(ldconfig -p 2>/dev/null | grep "$critical_lib" | head -n1 | awk '{print $NF}')
     if [ -n "$FOUND" ] && [ -f "$FOUND" ] && [ ! -f "$APPDIR/usr/lib/$(basename $FOUND)" ]; then
         cp -L "$FOUND" "$APPDIR/usr/lib/" 2>/dev/null && BUNDLED=$((BUNDLED+1)) || true

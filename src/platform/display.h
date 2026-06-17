@@ -11,6 +11,9 @@ public:
     ~Display();
     
     bool init(int width, int height, const std::string& title);
+#ifdef VULKAN_BACKEND
+    bool init_vulkan(int width, int height, const std::string& title);
+#endif
     void swap();
     void poll_events();
     bool should_close() const { return quit; }
@@ -25,6 +28,9 @@ private:
     int width = 800;
     int height = 480;
     bool quit = false;
+#ifdef VULKAN_BACKEND
+    bool use_vulkan = false;
+#endif
 };
 
 #endif

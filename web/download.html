@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Download — Swordigo Desktop v1 Beta</title>
-  <meta name="description" content="Download Swordigo Desktop v1 Beta for Linux x86_64. AppImage format — no installation needed.">
+  <title>Download — Swordigo Desktop v2.0r</title>
+  <meta name="description" content="Download Swordigo Desktop v2.0r for Linux x86_64. DEB, RPM, and AppImage packages available.">
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⬇️</text></svg>">
 </head>
@@ -43,7 +43,7 @@
   <div class="container">
     <span class="section-label">Get It Now</span>
     <h1 class="section-title">Download <span class="grad">Swordigo Desktop</span></h1>
-    <p class="section-desc">Linux-native AppImage — runs on any modern x86_64 Linux distribution.</p>
+    <p class="section-desc">Linux-native packages — runs on any modern x86_64 Linux distribution. Now with advanced PostFX rendering.</p>
   </div>
 </div>
 
@@ -53,17 +53,21 @@
 
     <!-- Primary Download -->
     <div class="download-card reveal" style="margin-bottom: var(--space-xl);">
-      <div class="download-card__version">v1_beta • Stable</div>
+      <div class="download-card__version">v2.0r • Stable</div>
       <div class="download-card__title">Swordigo Desktop</div>
-      <div class="download-card__meta">Linux x86_64 • AppImage • ~7 MB runtime</div>
+      <div class="download-card__meta">Linux x86_64 • DEB / RPM / AppImage • ~48 MB</div>
       <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap; position:relative; z-index:2;">
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v1_beta/Swordigo-x86_64_v1beta.AppImage"
-           class="btn btn--primary btn--lg" id="dl-appimage-btn">
-          ⬇ Download AppImage (x86_64)
+        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2.0r/swordigo-desktop_2.0.0_amd64.deb"
+           class="btn btn--primary btn--lg" id="dl-deb-btn">
+          ⬇ Download .deb (Debian/Ubuntu)
+        </a>
+        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2.0r/swordigo-desktop-2.0.0-1.fc44.x86_64.rpm"
+           class="btn btn--secondary btn--lg" id="dl-rpm-btn">
+          ⬇ Download .rpm (Fedora/RHEL)
         </a>
       </div>
       <p style="font-size:0.78rem; color:var(--clr-text-dim); margin-top:var(--space-md); position:relative; z-index:2;">
-        Direct link: github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v1_beta/Swordigo-x86_64_v1beta.AppImage
+        Direct link: github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2.0r/swordigo-desktop_2.0.0_amd64.deb
       </p>
     </div>
 
@@ -77,11 +81,11 @@
         <div class="card__title">GitHub Repository</div>
         <div class="card__body">Source code, issues, and contributions.</div>
       </a>
-      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v1_beta" target="_blank" rel="noopener"
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v2.0r" target="_blank" rel="noopener"
          class="card" style="text-decoration:none; text-align:center;" id="dl-commits-card">
         <span style="font-size:2.5rem; display:block; margin-bottom:12px;">📝</span>
         <div class="card__title">Full Changelog</div>
-        <div class="card__body">All commits for the v1_beta release branch.</div>
+        <div class="card__body">All commits for the v2.0r release branch.</div>
       </a>
     </div>
 
@@ -98,17 +102,17 @@
       <div class="tab-panel active" id="tab-appimage">
         <p class="text-muted mb-md">The AppImage is self-contained. Just make it executable and run it:</p>
         <div class="code-block">
-<pre><span class="cm"># Download the AppImage</span>
-wget <span class="str">https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v1_beta/Swordigo-x86_64_v1beta.AppImage</span>
+<pre><span class="cm"># Download the .deb package (Debian/Ubuntu)</span>
+wget <span class="str">https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2.0r/swordigo-desktop_2.0.0_amd64.deb</span>
 
-<span class="cm"># Make executable</span>
-chmod +x Swordigo-x86_64_v1beta.AppImage
+<span class="cm"># Install</span>
+sudo dpkg -i swordigo-desktop_2.0.0_amd64.deb
 
-<span class="cm"># Place your game assets next to it</span>
+<span class="cm"># Place your game assets in the install directory</span>
 mkdir -p assets/
 
 <span class="cm"># Run!</span>
-./Swordigo-x86_64_v1beta.AppImage</pre>
+swordigo-desktop</pre>
         </div>
         <div style="margin-top:16px; padding:14px; background:rgba(245,200,66,0.08); border:1px solid rgba(245,200,66,0.25); border-radius:8px;">
           <strong style="color:var(--clr-gold)">⚠ Known issue:</strong>
@@ -155,13 +159,11 @@ sudo pacman -S sdl2 openal mesa</pre>
         </div>
         <p class="text-muted mb-md">Game assets must be placed in the <code style="font-family:var(--font-mono); color:var(--clr-cyan)">assets/</code> directory next to the executable:</p>
         <div class="code-block">
-<pre>Swordigo-x86_64_v1beta.AppImage
+<pre>swordigo-desktop            # or swordigo_boot if built from source
+libswordigo.so              # v1.4.6 game binary (required)
+libswordigo_test.so         # v1.4.12 game binary (optional)
 assets/
-  resources/
-    gamedata.gdata
-    menu.scene
-    player.gstate
-    ... (919 game files)</pre>
+  resources/</pre>
         </div>
         <p class="text-muted mt-md" style="font-size:0.85rem;">Extract assets from a legally-obtained copy of the Swordigo APK using a tool like <code style="font-family:var(--font-mono)">apktool</code>.</p>
       </div>
@@ -263,8 +265,8 @@ make swordigo_boot
         <h5>Links</h5>
         <ul class="footer__links">
           <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener">GitHub</a></li>
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v1_beta/Swordigo-x86_64_v1beta.AppImage">Direct Download</a></li>
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v1_beta" target="_blank" rel="noopener">Changelog</a></li>
+          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2.0r/swordigo-desktop_2.0.0_amd64.deb">Direct Download</a></li>
+          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v2.0r" target="_blank" rel="noopener">Changelog</a></li>
         </ul>
       </div>
       <div class="footer__col">

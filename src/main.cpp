@@ -12,14 +12,18 @@
 #include "game/mod_tools.h"
 #include "platform/input_config.h"
 #include <cstring>
+#include <chrono>
 #define GL_GLEXT_PROTOTYPES
 #include <GL/gl.h>
 #include <GL/glext.h>
 #include <sys/stat.h>
 
 #include "platform/gui.h"
+#include "platform/vulkan_backend.h"
 #include "platform/fbo_scaler.h"
 #include "platform/io_thread.h"
+#include "platform/binary_selector.h"
+#include "platform/launcher.h"
 
 extern bool g_display_active;
 extern int g_win_w;
@@ -33,7 +37,10 @@ const uint32_t GUEST_MEM_SIZE = 0xC0000000; // 3GB
 // Touch coordinates are kept in legacy 960×544 space and auto-scaled.
 static const int GAME_W = 1920;
 static const int GAME_H = 1080;
-static const float TOUCH_SCALE_X = (float)GAME_W / 960.0f;   // 2.0
+static const float TOUCH_SCALE_X = (float)GAME_W / 960.0f;
+
+// Which game binary to load (switchable via --test-lib flag)
+static std::string g_lib_name = "libswordigo.so";
 static const float TOUCH_SCALE_Y = (float)GAME_H / 544.0f;   // ~1.985
 
 // Add a specific area for guest-side global variables (libc stuff)
@@ -48,6 +55,17 @@ GuiRenderer g_gui;
 InputConfig g_input_config;
 SDL_GameController* g_gamepad = nullptr;
 FBOScale g_fbo_mode = FBOScale::SHARP_BILINEAR;
+PostFXState g_postfx;
+PostFXPreset g_postfx_preset = PostFXPreset::OFF;
+
+// Graphics API selection (enum defined in vulkan_backend.h)
+GraphicsAPI g_graphics_api = GraphicsAPI::OPENGL;
+#ifdef VULKAN_BACKEND
+VulkanBackend g_vk_backend;
+#endif
+
+// Binary selection system
+BinarySelector g_binary_selector;
 
 // FWKeyboard API — resolved from game binary symbols
 static uint32_t g_fw_sharedKeyboard = 0;   // Caver::FWKeyboard::sharedKeyboard()
@@ -58,45 +76,11 @@ static uint32_t g_fw_handleMenuBtn = 0;     // Java_com_touchfoo_swordigo_Native
 static bool g_typing_mode = false;          // F6 toggle: keyboard sends FWKeyboard events
 
 extern std::string g_save_dir;  // Defined in jni_bridge.cpp
+extern bool g_gl_hide_hud;      // Defined in jni_bridge.cpp — hides HUD draw calls
+extern int g_death_detected_countdown;  // Defined in jni_bridge.cpp
 std::string g_cache_dir;
 
-std::string get_data_path(const std::string& relative_path) {
-    // 1. Environment variable (AppImage / manual override)
-    const char* env_dir = getenv("SWORDIGO_DATA_DIR");
-    if (env_dir) {
-        std::string base = env_dir;
-        if (!base.empty() && base.back() != '/') base += "/";
-        return base + relative_path;
-    }
-
-    // 2. Compile-time define
-#ifdef SWORDIGO_DATA_DIR_PATH
-    {
-        std::string path = std::string(SWORDIGO_DATA_DIR_PATH) + "/" + relative_path;
-        if (access(path.c_str(), F_OK) == 0) return path;
-    }
-#endif
-
-    // 3. Current directory (development mode)
-    {
-        std::string path = "./" + relative_path;
-        if (access(path.c_str(), F_OK) == 0) return path;
-    }
-
-    // 4. Standard system install paths
-    const char* sys_paths[] = {
-        "/usr/share/swordigo/",
-        "/usr/local/share/swordigo/",
-        nullptr
-    };
-    for (int i = 0; sys_paths[i]; i++) {
-        std::string path = std::string(sys_paths[i]) + relative_path;
-        if (access(path.c_str(), F_OK) == 0) return path;
-    }
-
-    // Fallback to current directory
-    return "./" + relative_path;
-}
+#include "platform/data_path.h"  // get_data_path() — implemented in data_path.cpp
 
 void call_handle_touch_event(uint32_t addr, uint32_t env, uint32_t obj, int action, int id, double time_val, float x, float y, float old_x, float old_y, int tap_count) {
     if (addr == 0) return;
@@ -305,7 +289,8 @@ uint32_t setup_jni_env(uint8_t* memory) {
 }
 
 void load_and_boot() {
-    std::string so_path = get_data_path("libswordigo.so");
+    std::string so_path = get_data_path(g_lib_name);
+    std::cout << "[Loader] Loading: " << so_path << std::endl;
     uint32_t load_addr = 0x1000000;
     
     // 1. Load ELF
@@ -425,7 +410,52 @@ void load_and_boot() {
         g_emulator->call(applicationDidBecomeActive, {env_ptr, 0});
     }
 
-    // 5. Game Loop — 1000-frame stability test
+    // ========================================================================
+    // Death screen fix: Patch ShowInterstitialAd + wire ad dismissed callback
+    // The game calls ShowInterstitialAd() on death, then waits for
+    // interstitialAdVisibilityChanged(false) to proceed with respawn.
+    // Without this fix, the game hangs forever on the death screen.
+    // (The Vita port only patches the ad call but NOT the callback — that's
+    // why they still have the bug.)
+    // ========================================================================
+    {
+        // Patch ShowInterstitialAd to return immediately (Thumb: bx lr = 0x4770)
+        uint32_t showAd = g_loader->get_symbol_vaddr(&g_main_mod,
+            "_ZN5Caver24OnlineController_Android18ShowInterstitialAdERKSsif");
+        if (showAd) {
+            // Address has Thumb bit set (odd) — strip it for memory access
+            uint32_t addr = showAd & ~1u;
+            uint8_t* memory = g_emulator->get_memory_base();
+            // Write Thumb "bx lr" (0x4770) to make it return immediately
+            memory[addr + 0] = 0x70;  // bx lr (Thumb)
+            memory[addr + 1] = 0x47;
+            std::cout << "[Fix] Patched ShowInterstitialAd at 0x" << std::hex << showAd
+                      << " -> bx lr (no-op)" << std::dec << std::endl;
+        }
+
+        // Also patch AndroidShowInterstitialAd (wrapper)
+        uint32_t showAd2 = g_loader->get_symbol_vaddr(&g_main_mod,
+            "_ZN5Caver25AndroidShowInterstitialAdEd");
+        if (showAd2) {
+            uint32_t addr = showAd2 & ~1u;
+            uint8_t* memory = g_emulator->get_memory_base();
+            memory[addr + 0] = 0x70;
+            memory[addr + 1] = 0x47;
+            std::cout << "[Fix] Patched AndroidShowInterstitialAd at 0x" << std::hex << showAd2
+                      << " -> bx lr" << std::dec << std::endl;
+        }
+    }
+
+    // Resolve the ad dismissed callback — called reactively in game loop when death is detected
+    uint32_t adVisibilityChanged = g_loader->get_symbol_vaddr(&g_main_mod,
+        "Java_com_touchfoo_swordigo_Native_interstitialAdVisibilityChanged");
+    if (adVisibilityChanged) {
+        std::cout << "[Fix] Resolved interstitialAdVisibilityChanged at 0x"
+                  << std::hex << adVisibilityChanged << std::dec
+                  << " — will fire reactively on death detection" << std::endl;
+    }
+
+    // 5. Game Loop
     uint32_t updateApp = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_updateApplication");
     uint32_t drawApp = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_drawApplication");
     uint32_t handleTouchEvent = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_handleTouchEvent");
@@ -437,11 +467,12 @@ void load_and_boot() {
         g_emulator->call(googleSignInCompleted, {env_ptr, 0, 0}); // (env, this, false)
     }
 
-    // Hide the game's native on-screen touch controls (we use keyboard/gamepad instead)
-    if (g_fw_handleMenuBtn) {
-        std::cout << "[Boot] Calling handleMenuButtonPress -> hide on-screen controls" << std::endl;
-        g_emulator->call(g_fw_handleMenuBtn, {});
-    }
+    // NOTE: We used to call handleMenuButtonPress here to hide on-screen controls,
+    // but that function opens the game menu AND hides controls. The game then shows
+    // controls again on any touch input, making it useless. Instead, we use g_gl_hide_hud
+    // in the JNI bridge to make HUD draw calls fully transparent.
+    bool g_hide_touch_hud = true;  // Hide touch controls by default (desktop uses keyboard)
+    g_gl_hide_hud = g_hide_touch_hud;
 
     if (updateApp && drawApp) {
         // Real delta time
@@ -560,6 +591,47 @@ void load_and_boot() {
                 }
             }
             
+            // --- Death screen workaround: auto-restart on gameover ---
+            // The game freezes on death because ShowInterstitialAd waits for
+            // a callback that can't be properly delivered. Even the Vita port
+            // couldn't fix this. Workaround: detect death via gameover music,
+            // wait ~8s for the death animation, then restart the process.
+            // The save system auto-checkpoints, so the player resumes from
+            // their last checkpoint after restart.
+            if (g_death_detected_countdown > 0) {
+                g_death_detected_countdown--;
+                if (g_death_detected_countdown == 0) {
+                    std::cout << "\n[Fix] Death screen detected — auto-restarting engine..." << std::endl;
+                    std::cout << "[Fix] You will resume from your last checkpoint." << std::endl;
+                    
+                    // Clean up SDL before restart
+                    SDL_Quit();
+                    
+                    // Re-exec ourselves using /proc/self/exe
+                    // Pass --lib to skip the launcher on restart
+                    extern std::string g_lib_name;
+                    extern char** g_saved_argv;
+                    extern int g_saved_argc;
+                    std::vector<std::string> arg_strs;  // Keep strings alive
+                    std::vector<char*> args;
+                    for (int i = 0; i < g_saved_argc; i++) {
+                        std::string a = g_saved_argv[i];
+                        // Skip old --lib and its value
+                        if (a == "--lib" && i + 1 < g_saved_argc) { i++; continue; }
+                        arg_strs.push_back(a);
+                    }
+                    arg_strs.push_back("--lib");
+                    arg_strs.push_back(g_lib_name);
+                    for (auto& s : arg_strs) args.push_back(&s[0]);
+                    args.push_back(nullptr);
+                    execv("/proc/self/exe", args.data());
+                    
+                    // If execv fails, just exit
+                    std::cerr << "[Fix] execv failed, please restart manually." << std::endl;
+                    exit(1);
+                }
+            }
+            
             // Poll async IO thread completion callbacks
             io_thread_poll();
 
@@ -585,13 +657,27 @@ void load_and_boot() {
             }
             
             if (g_display_active) {
-                fbo_begin_game();
+#ifdef VULKAN_BACKEND
+                if (g_graphics_api == GraphicsAPI::VULKAN) {
+                    g_vk_backend.begin_frame();
+                } else
+#endif
+                {
+                    fbo_begin_game();
+                }
             }
             
             g_emulator->call(drawApp, {env_ptr, 0});
 
             if (g_display_active) {
-                fbo_end_game_and_blit(g_win_w, g_win_h, g_fbo_mode);
+#ifdef VULKAN_BACKEND
+                if (g_graphics_api == GraphicsAPI::VULKAN) {
+                    // Vulkan frame end + present is done after overlays
+                } else
+#endif
+                {
+                    fbo_end_game_and_blit(g_win_w, g_win_h, g_fbo_mode, &g_postfx);
+                }
             }
 
             // Apply camera position override (after draw, before swap)
@@ -639,7 +725,7 @@ void load_and_boot() {
                 glColor4ub(0, 0, 0, 180);
                 glBegin(GL_QUADS);
                 glVertex2f(10, g_win_h - 10); glVertex2f(420, g_win_h - 10);
-                glVertex2f(420, g_win_h - 225); glVertex2f(10, g_win_h - 225);
+                glVertex2f(420, g_win_h - 275); glVertex2f(10, g_win_h - 275);
                 glEnd();
                 // FPS text using simple pixel rendering
                 char dbg[256];
@@ -667,7 +753,7 @@ void load_and_boot() {
 
                 snprintf(dbg, sizeof(dbg), "Speed: %s  %s", mod_speed_label(), g_game_paused ? "|| PAUSED" : "");
                 g_gui.draw_string(dbg, 20, g_win_h - 185, 1.2f, 255, 180, 50, 255);
-                snprintf(dbg, sizeof(dbg), "F1:GUI F2:Ctrl F3:Dbg F4:Scale F5:Cam F7:Type F10:HUD");
+                snprintf(dbg, sizeof(dbg), "F1:GUI F2:Ctrl F3:Dbg F4:Scale F5:Cam F6:PostFX F7:Type F10:HUD");
                 g_gui.draw_string(dbg, 20, g_win_h - 202, 1.1f, 100, 100, 120, 200);
                 if (g_typing_mode) {
                     g_gui.draw_string("TYPING MODE ACTIVE", 20, g_win_h - 218, 1.2f, 255, 100, 100, 255);
@@ -678,6 +764,26 @@ void load_and_boot() {
                     g_cam_active ? 0 : 120,
                     g_cam_active ? 220 : 120,
                     g_cam_active ? 100 : 120, 255);
+
+                // Binary info
+                const BinaryInfo* binfo = g_binary_selector.get_loaded_info();
+                if (binfo) {
+                    snprintf(dbg, sizeof(dbg), "Binary: %s (%s)",
+                             binfo->filename.c_str(), binfo->label.c_str());
+                    g_gui.draw_string(dbg, 20, g_win_h - 240, 1.2f, 100, 200, 255, 255);
+                } else {
+                    snprintf(dbg, sizeof(dbg), "Binary: %s", g_lib_name.c_str());
+                    g_gui.draw_string(dbg, 20, g_win_h - 240, 1.2f, 100, 200, 255, 255);
+                }
+
+                // PostFX info
+                if (g_postfx.enabled) {
+                    snprintf(dbg, sizeof(dbg), "PostFX: %s", g_postfx.preset_name);
+                    g_gui.draw_string(dbg, 20, g_win_h - 255, 1.2f, 255, 180, 100, 255);
+                } else {
+                    g_gui.draw_string("PostFX: Off", 20, g_win_h - 255, 1.2f, 120, 120, 120, 200);
+                }
+
                 glPopMatrix();
                 glMatrixMode(GL_PROJECTION);
                 glPopMatrix();
@@ -733,8 +839,14 @@ void load_and_boot() {
             
             // Present the frame
             if (g_display_active && g_display_ptr) {
-                
-                g_display_ptr->swap();
+#ifdef VULKAN_BACKEND
+                if (g_graphics_api == GraphicsAPI::VULKAN) {
+                    g_vk_backend.end_frame_and_present();
+                } else
+#endif
+                {
+                    g_display_ptr->swap();
+                }
                 
                 // Poll and process SDL window and input events
                 SDL_Event event;
@@ -750,7 +862,9 @@ void load_and_boot() {
                             if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
                                 g_win_w = event.window.data1;
                                 g_win_h = event.window.data2;
-                                std::cout << "[Display] Resized to " << g_win_w << "x" << g_win_h << std::endl;
+                                // On HiDPI, drawable size may differ from window size
+                                // GUI uses window coords (matching mouse events)
+                                std::cout << "[Display] Window resized to " << g_win_w << "x" << g_win_h << std::endl;
                             }
                             break;
                         case SDL_MOUSEBUTTONDOWN:
@@ -772,7 +886,10 @@ void load_and_boot() {
                                 bool gui_consumed = false;
                                 if (gui_visible) {
                                     gui_action = g_gui.handle_click(mouse_x, mouse_y, g_win_w, g_win_h);
-                                    gui_consumed = (gui_action != GUI_NONE) || (mouse_y >= g_win_h - (int)(32 * g_gui.get_scale()));
+                                    // Consume click if: action returned, OR click is on menu bar, OR any modal/panel is open
+                                    gui_consumed = (gui_action != GUI_NONE) 
+                                                || (mouse_y >= g_win_h - (int)(32 * g_gui.get_scale()))
+                                                || g_gui.has_modal_open();
                                 }
                                 if (gui_consumed) {
                                     click_swallowed_by_gui = true;
@@ -811,6 +928,45 @@ void load_and_boot() {
                                             break;
                                         case GUI_TOGGLE_SMOOTH_CAM:
                                             cam_toggle_smooth();
+                                            break;
+                                        case GUI_GFX_OPENGL:
+                                            g_graphics_api = GraphicsAPI::OPENGL;
+                                            std::cout << "[GFX] Graphics API set to OpenGL (active)" << std::endl;
+                                            break;
+                                        case GUI_GFX_VULKAN:
+                                            g_graphics_api = GraphicsAPI::VULKAN;
+                                            std::cout << "[GFX] Graphics API set to Vulkan (WIP) — restart required" << std::endl;
+                                            break;
+                                        // Mod menu actions (value adjustments)
+                                        case GUI_MOD_WALK_SPEED_UP:
+                                            g_gui.mod_walk_speed = std::min(g_gui.mod_walk_speed + 0.5f, 10.0f);
+                                            break;
+                                        case GUI_MOD_WALK_SPEED_DOWN:
+                                            g_gui.mod_walk_speed = std::max(g_gui.mod_walk_speed - 0.5f, 0.5f);
+                                            break;
+                                        case GUI_MOD_RUN_SPEED_UP:
+                                            g_gui.mod_run_speed = std::min(g_gui.mod_run_speed + 0.5f, 10.0f);
+                                            break;
+                                        case GUI_MOD_RUN_SPEED_DOWN:
+                                            g_gui.mod_run_speed = std::max(g_gui.mod_run_speed - 0.5f, 0.5f);
+                                            break;
+                                        case GUI_MOD_JUMP_HEIGHT_UP:
+                                            g_gui.mod_jump_height = std::min(g_gui.mod_jump_height + 0.5f, 10.0f);
+                                            break;
+                                        case GUI_MOD_JUMP_HEIGHT_DOWN:
+                                            g_gui.mod_jump_height = std::max(g_gui.mod_jump_height - 0.5f, 0.5f);
+                                            break;
+                                        case GUI_MOD_LEVEL_UP:
+                                            g_gui.mod_level = std::min(g_gui.mod_level + 1, 99);
+                                            break;
+                                        case GUI_MOD_LEVEL_DOWN:
+                                            g_gui.mod_level = std::max(g_gui.mod_level - 1, 0);
+                                            break;
+                                        case GUI_MOD_EXP_UP:
+                                            g_gui.mod_exp += 100;
+                                            break;
+                                        case GUI_MOD_EXP_DOWN:
+                                            g_gui.mod_exp = std::max(g_gui.mod_exp - 100, 0);
                                             break;
                                         default:
                                             break;
@@ -914,7 +1070,11 @@ void load_and_boot() {
                                 break;
                             }
                             if (event.key.keysym.sym == SDLK_F6 && !event.key.repeat) {
-                                cam_toggle_smooth();
+                                g_postfx_preset = static_cast<PostFXPreset>(
+                                    (static_cast<int>(g_postfx_preset) + 1) % static_cast<int>(PostFXPreset::COUNT)
+                                );
+                                postfx_apply_preset(g_postfx, g_postfx_preset);
+                                std::cout << "[PostFX] Preset: " << g_postfx.preset_name << std::endl;
                                 break;
                             }
                             if (event.key.keysym.sym == SDLK_F7 && !event.key.repeat) {
@@ -929,11 +1089,12 @@ void load_and_boot() {
                                 break;
                             }
                             if (event.key.keysym.sym == SDLK_F10 && !event.key.repeat) {
-                                // Toggle on-screen controls via handleMenuButtonPress
-                                if (g_fw_handleMenuBtn) {
-                                    g_emulator->call(g_fw_handleMenuBtn, {});
-                                    std::cout << "[Keyboard] Toggled on-screen controls" << std::endl;
-                                }
+                                // Toggle host-side touch HUD visibility
+                                // (paints over button areas instead of calling handleMenuButtonPress
+                                //  which would open the game's settings menu)
+                                g_hide_touch_hud = !g_hide_touch_hud;
+                                g_gl_hide_hud = g_hide_touch_hud;
+                                std::cout << "[Keyboard] Touch HUD: " << (g_hide_touch_hud ? "HIDDEN" : "VISIBLE") << std::endl;
                                 break;
                             }
                             if (event.key.keysym.sym == SDLK_F8 && !event.key.repeat) {
@@ -1228,12 +1389,30 @@ void load_and_boot() {
 
 
 Display* g_display_ptr = nullptr;
+char** g_saved_argv = nullptr;
+int g_saved_argc = 0;
 
 int main(int argc, char* argv[]) {
+    g_saved_argc = argc;
+    g_saved_argv = argv;
     // Check for --headless flag
     bool headless = false;
+#ifdef HEADLESS_DEFAULT
+    headless = true;
+#endif
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--headless") == 0) headless = true;
+#ifdef VULKAN_BACKEND
+        if (strcmp(argv[i], "--vulkan") == 0) g_graphics_api = GraphicsAPI::VULKAN;
+#endif
+        if (strcmp(argv[i], "--test-lib") == 0) {
+            g_lib_name = "libswordigo_test.so";
+            std::cout << "[Main] TEST MODE: Using libswordigo_test.so" << std::endl;
+        }
+        if (strcmp(argv[i], "--lib") == 0 && i + 1 < argc) {
+            g_lib_name = argv[++i];
+            std::cout << "[Main] Custom lib: " << g_lib_name << std::endl;
+        }
     }
     
     // Set up user-writable directory paths (XDG Base Directory standard)
@@ -1252,28 +1431,106 @@ int main(int argc, char* argv[]) {
     
     Display display;
     
+    // ========================================================================
+    // Binary scan (needed BEFORE launcher so it can show binary list)
+    // ========================================================================
+    std::string data_dir = ".";
+    const char* env_dir = getenv("SWORDIGO_DATA_DIR");
+    if (env_dir) data_dir = env_dir;
+    std::string registry_path = base_dir + "/swordigo_binaries.json";
+    g_binary_selector.scan_directory(data_dir);
+    g_binary_selector.load_registry(registry_path);
+
+    // ========================================================================
+    // Show unified launcher GUI (graphics API + binary selection)
+    // ========================================================================
     if (!headless) {
-        if (display.init(1280, 720, "Swordigo Desktop - Remastered")) {
+        bool skip_launcher = false;
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--vulkan") == 0 || strcmp(argv[i], "--no-launcher") == 0) {
+                skip_launcher = true;
+                break;
+            }
+        }
+        if (!skip_launcher && g_lib_name == "libswordigo.so") {
+            LaunchConfig lconf = show_launcher(g_binary_selector);
+            if (!lconf.should_launch) {
+                std::cout << "[Main] Launch cancelled by user" << std::endl;
+                return 0;
+            }
+            g_graphics_api = lconf.graphics_api;
+            g_lib_name = lconf.selected_binary;
+            g_binary_selector.set_loaded(g_lib_name);
+            std::cout << "[Main] Launcher: " 
+                      << (g_graphics_api == GraphicsAPI::VULKAN ? "Vulkan" : "OpenGL")
+                      << " | Binary: " << g_lib_name << std::endl;
+        }
+    }
+
+    if (!headless) {
+#ifdef VULKAN_BACKEND
+        if (g_graphics_api == GraphicsAPI::VULKAN) {
+            if (display.init_vulkan(1920, 1080, "Swordigo")) {
+                g_display_active = true;
+                g_display_ptr = &display;
+                if (!g_vk_backend.init(display.get_window(), GAME_W, GAME_H)) {
+                    std::cerr << "[Main] Vulkan backend init failed, falling back to OpenGL" << std::endl;
+                    g_graphics_api = GraphicsAPI::OPENGL;
+                    // Recreate as OpenGL window
+                    display = Display();
+                    if (display.init(1920, 1080, "Swordigo")) {
+                        g_display_active = true;
+                        g_display_ptr = &display;
+                    }
+                } else {
+                    std::cout << "[Main] Vulkan backend initialized" << std::endl;
+                }
+            }
+        } else
+#endif
+        if (display.init(1920, 1080, "Swordigo")) {
             g_display_active = true;
             g_display_ptr = &display;
-            std::cout << "[Main] Display initialized - 1280x720" << std::endl;
+            std::cout << "[Main] Display initialized - 1920x1080" << std::endl;
         } else {
             std::cerr << "[Main] Display init failed, falling back to headless" << std::endl;
         }
     } else {
         std::cout << "[Main] Running in headless mode" << std::endl;
     }
-    
+
+    // ========================================================================
+    // Binary fallback (only if launcher was skipped via CLI flags)
+    // ========================================================================
+    {
+        const auto& bins = g_binary_selector.get_binaries();
+        if (g_lib_name != "libswordigo.so") {
+            std::cout << "[BinSel] CLI override: " << g_lib_name << std::endl;
+        } else if (!bins.empty()) {
+            g_lib_name = g_binary_selector.get_default();
+            g_binary_selector.set_loaded(g_lib_name);
+            std::cout << "[BinSel] Using: " << g_lib_name << std::endl;
+        }
+        g_binary_selector.save_registry(registry_path);
+    }
+
     init_all();
     load_and_boot();
 
-    // Cleanup FBO and background IO thread
+    // Cleanup FBO/Vulkan and background IO thread
     if (g_display_active) {
-        fbo_destroy();
+#ifdef VULKAN_BACKEND
+        if (g_graphics_api == GraphicsAPI::VULKAN) {
+            g_vk_backend.destroy();
+        } else
+#endif
+        {
+            fbo_destroy();
+        }
     }
     io_thread_stop();
     
-    std::cout << "[Main] Swordigo Desktop Engine — session complete." << std::endl;
+    std::cout << "[Main] Swordigo — session complete." << std::endl;
     
     return 0;
 }

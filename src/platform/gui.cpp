@@ -168,6 +168,26 @@ void GuiRenderer::init() {
         m.items.push_back(MenuItem("Customize Controls", GUI_CUSTOMIZE_CONTROLS));
         m.items.push_back(MenuItem("Audio Settings", GUI_AUDIO_SETTINGS));
         m.items.push_back(MenuItem("Toggle VSync", GUI_TOGGLE_VSYNC));
+        m.items.push_back(MenuItem("---", GUI_NONE, false));
+        m.items.push_back(MenuItem("Graphics: OpenGL", GUI_GFX_OPENGL));
+        m.items.push_back(MenuItem("Graphics: Vulkan (WIP)", GUI_GFX_VULKAN));
+        m.x = cur_x;
+        m.w = (float)m.title.length() * char_w + pad * 2.0f;
+        cur_x += m.w + pad;
+        menus.push_back(m);
+    }
+
+    // --- Mods menu ---
+    {
+        Menu m;
+        m.title = "Mods";
+        m.items.push_back(MenuItem("Open Mod Menu", GUI_OPEN_MOD_MENU));
+        m.items.push_back(MenuItem("Pin to Screen", GUI_MOD_PIN_TOGGLE));
+        m.items.push_back(MenuItem("---", GUI_NONE, false));
+        m.items.push_back(MenuItem("God Mode", GUI_MOD_GOD_MODE));
+        m.items.push_back(MenuItem("Infinite Mana", GUI_MOD_INFINITE_MANA));
+        m.items.push_back(MenuItem("Fly Mode", GUI_MOD_FLY_MODE));
+        m.items.push_back(MenuItem("Infinite Jump", GUI_MOD_INFINITE_JUMP));
         m.x = cur_x;
         m.w = (float)m.title.length() * char_w + pad * 2.0f;
         cur_x += m.w + pad;
@@ -344,11 +364,23 @@ void GuiRenderer::render(int mouse_x, int mouse_y, bool mouse_click, int win_w, 
         }
     }
 
-    // ---- Update pause/resume label dynamically ----
+    // ---- Update pause/resume label and mod labels dynamically ----
     for (size_t i = 0; i < menus.size(); ++i) {
         for (size_t j = 0; j < menus[i].items.size(); ++j) {
             if (menus[i].items[j].action == GUI_PAUSE) {
                 menus[i].items[j].label = g_game_paused ? "Resume" : "Pause";
+            }
+            if (menus[i].items[j].action == GUI_MOD_GOD_MODE) {
+                menus[i].items[j].label = mod_god_mode ? "[ON]  God Mode" : "[OFF] God Mode";
+            }
+            if (menus[i].items[j].action == GUI_MOD_INFINITE_MANA) {
+                menus[i].items[j].label = mod_infinite_mana ? "[ON]  Infinite Mana" : "[OFF] Infinite Mana";
+            }
+            if (menus[i].items[j].action == GUI_MOD_FLY_MODE) {
+                menus[i].items[j].label = mod_fly_mode ? "[ON]  Fly Mode" : "[OFF] Fly Mode";
+            }
+            if (menus[i].items[j].action == GUI_MOD_INFINITE_JUMP) {
+                menus[i].items[j].label = mod_infinite_jump ? "[ON]  Infinite Jump" : "[OFF] Infinite Jump";
             }
         }
     }
@@ -452,103 +484,103 @@ void GuiRenderer::render(int mouse_x, int mouse_y, bool mouse_click, int win_w, 
         // Full-screen dim overlay
         draw_rect(0, 0, fwin_w, fwin_h, 0, 0, 0, 180);
 
-        float modal_w = 640.0f;
-        float modal_h = 560.0f;
+        float modal_w = 500.0f * s;
+        float modal_h = 440.0f * s;
         float mx = (fwin_w - modal_w) / 2.0f;
         float my = (fwin_h - modal_h) / 2.0f;
 
         // Modal background with subtle gradient effect (two layers)
         draw_rect(mx, my, modal_w, modal_h, 15, 15, 28, 252);
-        draw_rect(mx, my + modal_h - 60.0f, modal_w, 60.0f, 25, 30, 55, 252);
+        draw_rect(mx, my + modal_h - 48.0f * s, modal_w, 48.0f * s, 25, 30, 55, 252);
         draw_border(mx, my, modal_w, modal_h, 2.0f, 70, 130, 230, 255);
 
         // Title
-        float ty = my + modal_h - 40.0f;
-        draw_string("Swordigo Desktop", mx + 20.0f, ty, 2.2f, 70, 180, 255, 255);
-        draw_string("Remastered", mx + 330.0f, ty, 1.6f, 180, 130, 255, 255);
+        float ty = my + modal_h - 32.0f * s;
+        draw_string("Swordigo", mx + 16.0f * s, ty, 1.8f * s, 70, 180, 255, 255);
+        draw_string("v2.0r", mx + 260.0f * s, ty, 1.3f * s, 180, 130, 255, 255);
 
         // Separator
-        float sep = ty - 14.0f;
-        draw_rect(mx + 20.0f, sep, modal_w - 40.0f, 2.0f, 70, 130, 230, 200);
+        float sep = ty - 12.0f * s;
+        draw_rect(mx + 16.0f * s, sep, modal_w - 32.0f * s, 2.0f, 70, 130, 230, 200);
 
-        float y = sep - 24.0f;
-        float ls = 1.3f; // label scale
-        float ts = 1.2f; // text scale
-        float line = 16.0f;
+        float y = sep - 20.0f * s;
+        float ls = 1.1f * s; // label scale
+        float ts = 1.0f * s; // text scale
+        float line = 13.0f * s;
 
         // --- Core Team ---
-        draw_string("CORE TEAM", mx + 20.0f, y, 1.5f, 255, 200, 80, 255);
-        y -= line + 4.0f;
-        draw_string("Lead Developer", mx + 30.0f, y, ts, 100, 180, 255, 255);
-        draw_string("TheMegineBraine", mx + 230.0f, y, ts, 220, 220, 240, 255);
+        draw_string("CORE TEAM", mx + 16.0f * s, y, 1.2f * s, 255, 200, 80, 255);
+        y -= line + 3.0f * s;
+        draw_string("Lead Developer", mx + 24.0f * s, y, ts, 100, 180, 255, 255);
+        draw_string("TheMegineBraine", mx + 184.0f * s, y, ts, 220, 220, 240, 255);
         y -= line;
-        draw_string("Developer", mx + 30.0f, y, ts, 100, 180, 255, 255);
-        draw_string("TheCorrectSynovian", mx + 230.0f, y, ts, 220, 220, 240, 255);
-        y -= line + 8.0f;
+        draw_string("Developer", mx + 24.0f * s, y, ts, 100, 180, 255, 255);
+        draw_string("TheCorrectSynovian", mx + 184.0f * s, y, ts, 220, 220, 240, 255);
+        y -= line + 6.0f * s;
 
         // Separator
-        draw_rect(mx + 20.0f, y, modal_w - 40.0f, 1.0f, 50, 50, 70, 180);
-        y -= 16.0f;
+        draw_rect(mx + 16.0f * s, y, modal_w - 32.0f * s, 1.0f, 50, 50, 70, 180);
+        y -= 13.0f * s;
 
         // --- Research & Community ---
-        draw_string("RESEARCH & COMMUNITY", mx + 20.0f, y, 1.5f, 255, 200, 80, 255);
-        y -= line + 4.0f;
-        draw_string("SwMini Mod Loader", mx + 30.0f, y, ts, 100, 220, 140, 255);
+        draw_string("RESEARCH & COMMUNITY", mx + 16.0f * s, y, 1.2f * s, 255, 200, 80, 255);
+        y -= line + 3.0f * s;
+        draw_string("SwMini Mod Loader", mx + 24.0f * s, y, ts, 100, 220, 140, 255);
         y -= line;
-        draw_string("  ItsJustSomeDude", mx + 30.0f, y, ts, 220, 220, 240, 255);
-        draw_string("Reverse engineering, Lua expansion", mx + 250.0f, y, 1.0f, 150, 150, 170, 220);
+        draw_string("  ItsJustSomeDude", mx + 24.0f * s, y, ts, 220, 220, 240, 255);
+        draw_string("Reverse engineering, Lua expansion", mx + 200.0f * s, y, 0.8f * s, 150, 150, 170, 220);
         y -= line;
-        draw_string("  Kiziyon", mx + 30.0f, y, ts, 220, 220, 240, 255);
-        draw_string("Reverse engineering, FWKeyboard discovery", mx + 250.0f, y, 1.0f, 150, 150, 170, 220);
-        y -= line + 4.0f;
-        draw_string("Swordigo Vita Port", mx + 30.0f, y, ts, 100, 220, 140, 255);
+        draw_string("  Kiziyon", mx + 24.0f * s, y, ts, 220, 220, 240, 255);
+        draw_string("Reverse engineering, FWKeyboard discovery", mx + 200.0f * s, y, 0.8f * s, 150, 150, 170, 220);
+        y -= line + 3.0f * s;
+        draw_string("Swordigo Vita Port", mx + 24.0f * s, y, ts, 100, 220, 140, 255);
         y -= line;
-        draw_string("  Rinnegatamante", mx + 30.0f, y, ts, 220, 220, 240, 255);
-        draw_string("ARM-to-desktop porting, VitaGL bridge", mx + 250.0f, y, 1.0f, 150, 150, 170, 220);
-        y -= line + 8.0f;
+        draw_string("  Rinnegatamante", mx + 24.0f * s, y, ts, 220, 220, 240, 255);
+        draw_string("ARM-to-desktop porting, VitaGL bridge", mx + 200.0f * s, y, 0.8f * s, 150, 150, 170, 220);
+        y -= line + 6.0f * s;
 
         // Separator
-        draw_rect(mx + 20.0f, y, modal_w - 40.0f, 1.0f, 50, 50, 70, 180);
-        y -= 16.0f;
+        draw_rect(mx + 16.0f * s, y, modal_w - 32.0f * s, 1.0f, 50, 50, 70, 180);
+        y -= 13.0f * s;
 
         // --- Original Game ---
-        draw_string("ORIGINAL GAME", mx + 20.0f, y, 1.5f, 255, 200, 80, 255);
-        y -= line + 4.0f;
-        draw_string("Swordigo (C) 2012 Ville Makynen / Touch Foo", mx + 30.0f, y, ts, 200, 200, 220, 255);
+        draw_string("ORIGINAL GAME", mx + 16.0f * s, y, 1.2f * s, 255, 200, 80, 255);
+        y -= line + 3.0f * s;
+        draw_string("Swordigo (C) 2012 Ville Makynen / Touch Foo", mx + 24.0f * s, y, ts, 200, 200, 220, 255);
         y -= line;
-        draw_string("All Rights Reserved - touchfoo.com/swordigo", mx + 30.0f, y, ts, 150, 150, 170, 200);
-        y -= line + 8.0f;
+        draw_string("All Rights Reserved - touchfoo.com/swordigo", mx + 24.0f * s, y, ts, 150, 150, 170, 200);
+        y -= line + 6.0f * s;
 
         // Separator
-        draw_rect(mx + 20.0f, y, modal_w - 40.0f, 1.0f, 50, 50, 70, 180);
-        y -= 16.0f;
+        draw_rect(mx + 16.0f * s, y, modal_w - 32.0f * s, 1.0f, 50, 50, 70, 180);
+        y -= 13.0f * s;
 
         // --- Dependencies ---
-        draw_string("POWERED BY", mx + 20.0f, y, 1.5f, 255, 200, 80, 255);
-        y -= line + 4.0f;
-        draw_string("Unicorn Engine (GPL-2.0)", mx + 30.0f, y, ts, 180, 180, 200, 255);
-        draw_string("ARMv7 emulation", mx + 380.0f, y, 1.0f, 130, 130, 150, 200);
+        draw_string("POWERED BY", mx + 16.0f * s, y, 1.2f * s, 255, 200, 80, 255);
+        y -= line + 3.0f * s;
+        draw_string("Unicorn Engine (GPL-2.0)", mx + 24.0f * s, y, ts, 180, 180, 200, 255);
+        draw_string("ARMv7 emulation", mx + 300.0f * s, y, 0.8f * s, 130, 130, 150, 200);
         y -= line;
-        draw_string("SDL2 (Zlib)", mx + 30.0f, y, ts, 180, 180, 200, 255);
-        draw_string("Window + Input", mx + 380.0f, y, 1.0f, 130, 130, 150, 200);
+        draw_string("SDL2 (Zlib)", mx + 24.0f * s, y, ts, 180, 180, 200, 255);
+        draw_string("Window + Input", mx + 300.0f * s, y, 0.8f * s, 130, 130, 150, 200);
         y -= line;
-        draw_string("OpenAL Soft (LGPL-2.1)", mx + 30.0f, y, ts, 180, 180, 200, 255);
-        draw_string("Audio playback", mx + 380.0f, y, 1.0f, 130, 130, 150, 200);
+        draw_string("OpenAL Soft (LGPL-2.1)", mx + 24.0f * s, y, ts, 180, 180, 200, 255);
+        draw_string("Audio playback", mx + 300.0f * s, y, 0.8f * s, 130, 130, 150, 200);
         y -= line;
-        draw_string("GlossHook by XMDS (MIT)", mx + 30.0f, y, ts, 180, 180, 200, 255);
-        draw_string("SwMini reference", mx + 380.0f, y, 1.0f, 130, 130, 150, 200);
-        y -= line + 10.0f;
+        draw_string("GlossHook by XMDS (MIT)", mx + 24.0f * s, y, ts, 180, 180, 200, 255);
+        draw_string("SwMini reference", mx + 300.0f * s, y, 0.8f * s, 130, 130, 150, 200);
+        y -= line + 8.0f * s;
 
         // Footer
-        draw_rect(mx + 20.0f, y, modal_w - 40.0f, 1.0f, 50, 50, 70, 180);
-        y -= 18.0f;
-        draw_string("License: MIT  |  Built with love for game preservation", mx + 30.0f, y, 1.1f, 120, 120, 150, 200);
+        draw_rect(mx + 16.0f * s, y, modal_w - 32.0f * s, 1.0f, 50, 50, 70, 180);
+        y -= 14.0f * s;
+        draw_string("License: MIT  |  Built with love for game preservation", mx + 24.0f * s, y, 0.9f * s, 120, 120, 150, 200);
 
         // Close button (bottom right)
-        float close_w = 110.0f;
-        float close_h = 30.0f;
-        float close_x = mx + modal_w - close_w - 20.0f;
-        float close_y = my + 15.0f;
+        float close_w = 88.0f * s;
+        float close_h = 24.0f * s;
+        float close_x = mx + modal_w - close_w - 16.0f * s;
+        float close_y = my + 12.0f * s;
         bool close_hover = (mouse_x >= (int)close_x && mouse_x < (int)(close_x + close_w) &&
                             mouse_y >= (int)close_y && mouse_y < (int)(close_y + close_h));
         draw_rect(close_x, close_y, close_w, close_h,
@@ -557,9 +589,10 @@ void GuiRenderer::render(int mouse_x, int mouse_y, bool mouse_click, int win_w, 
                   close_hover ? (uint8_t)120 : (uint8_t)55,
                   255);
         draw_border(close_x, close_y, close_w, close_h, 1.0f, 70, 130, 230, 255);
-        float close_text_w = 5.0f * 8.0f * 1.4f;
+        float close_ts = 1.1f * s;
+        float close_text_w = 5.0f * 8.0f * close_ts;
         draw_string("Close", close_x + (close_w - close_text_w) / 2.0f,
-                     close_y + (close_h - 8.0f * 1.4f) / 2.0f, 1.4f, 200, 200, 220, 255);
+                     close_y + (close_h - 8.0f * close_ts) / 2.0f, close_ts, 200, 200, 220, 255);
     }
 
     // ================================================================
@@ -666,14 +699,28 @@ void GuiRenderer::render(int mouse_x, int mouse_y, bool mouse_click, int win_w, 
     }
 
     // ================================================================
-    // 5. Title text on the right side of the menu bar
+    // 5. Mod panel (central modal)
+    // ================================================================
+    if (show_mod_menu) {
+        render_mod_panel(fwin_w, fwin_h, mouse_x, mouse_y);
+    }
+
+    // ================================================================
+    // 6. Mod sidebar (pinned to right edge)
+    // ================================================================
+    if (mod_pinned && !show_mod_menu) {
+        render_mod_sidebar(fwin_w, fwin_h, mouse_x, mouse_y);
+    }
+
+    // ================================================================
+    // 7. Title text on the right side of the menu bar
     // ================================================================
     {
         float title_label_scale = 1.4f * s;
-        float title_label_w = 16.0f * 8.0f * title_label_scale;  // "Swordigo Desktop" = 16 chars
+        float title_label_w = 8.0f * 8.0f * title_label_scale;  // "Swordigo" = 8 chars
         float title_label_x = fwin_w - title_label_w - 12.0f;
         float title_label_y = bar_y + (bar_h - 8.0f * title_label_scale) / 2.0f;
-        draw_string("Swordigo Desktop", title_label_x, title_label_y, title_label_scale,
+        draw_string("Swordigo", title_label_x, title_label_y, title_label_scale,
                      100, 180, 255, 200);
     }
 
@@ -696,6 +743,15 @@ GuiAction GuiRenderer::handle_click(int mouse_x, int mouse_y, int win_w, int win
     float pad = (float)BASE_PAD * gui_scale;
     float item_h = (float)BASE_ITEM_H * gui_scale;
     float s = gui_scale;
+
+    // ---- Mod panel click handling ----
+    if (show_mod_menu) {
+        return handle_mod_panel_click(mouse_x, mouse_y, win_w, win_h);
+    }
+    if (mod_pinned) {
+        GuiAction sidebar_action = handle_mod_sidebar_click(mouse_x, mouse_y, win_w, win_h);
+        if (sidebar_action != GUI_NONE) return sidebar_action;
+    }
 
     // ---- Settings panel click handling ----
     if (show_settings) {
@@ -763,15 +819,15 @@ GuiAction GuiRenderer::handle_click(int mouse_x, int mouse_y, int win_w, int win
     if (show_about) {
         float fwin_w = (float)win_w;
         float fwin_h = (float)win_h;
-        float modal_w = 640.0f;
-        float modal_h = 560.0f;
+        float modal_w = 500.0f * s;
+        float modal_h = 440.0f * s;
         float mx = (fwin_w - modal_w) / 2.0f;
         float my = (fwin_h - modal_h) / 2.0f;
 
-        float close_w = 110.0f;
-        float close_h = 30.0f;
-        float close_x = mx + modal_w - close_w - 20.0f;
-        float close_y = my + 15.0f;
+        float close_w = 88.0f * s;
+        float close_h = 24.0f * s;
+        float close_x = mx + modal_w - close_w - 16.0f * s;
+        float close_y = my + 12.0f * s;
 
         if (mouse_x >= (int)close_x && mouse_x < (int)(close_x + close_w) &&
             mouse_y >= (int)close_y && mouse_y < (int)(close_y + close_h)) {
@@ -830,6 +886,31 @@ GuiAction GuiRenderer::handle_click(int mouse_x, int mouse_y, int win_w, int win
                         init();
                         return GUI_NONE;
                     }
+                    // Mod menu actions
+                    if (action == GUI_OPEN_MOD_MENU) {
+                        show_mod_menu = true;
+                        return GUI_NONE;
+                    }
+                    if (action == GUI_MOD_PIN_TOGGLE) {
+                        mod_pinned = !mod_pinned;
+                        return GUI_NONE;
+                    }
+                    if (action == GUI_MOD_GOD_MODE) {
+                        mod_god_mode = !mod_god_mode;
+                        return GUI_NONE;
+                    }
+                    if (action == GUI_MOD_INFINITE_MANA) {
+                        mod_infinite_mana = !mod_infinite_mana;
+                        return GUI_NONE;
+                    }
+                    if (action == GUI_MOD_FLY_MODE) {
+                        mod_fly_mode = !mod_fly_mode;
+                        return GUI_NONE;
+                    }
+                    if (action == GUI_MOD_INFINITE_JUMP) {
+                        mod_infinite_jump = !mod_infinite_jump;
+                        return GUI_NONE;
+                    }
 
                     return action;
                 }
@@ -863,6 +944,463 @@ GuiAction GuiRenderer::handle_click(int mouse_x, int mouse_y, int win_w, int win
     // ---- Click elsewhere ----
     if (active_menu >= 0) {
         active_menu = -1;
+        return GUI_NONE;
+    }
+
+    return GUI_NONE;
+}
+
+// ============================================================================
+// render_mod_panel() — Draw the mod panel modal (centered)
+// ============================================================================
+
+void GuiRenderer::render_mod_panel(float fwin_w, float fwin_h, int mouse_x, int mouse_y) {
+    float s = gui_scale;
+
+    // Dim overlay
+    draw_rect(0, 0, fwin_w, fwin_h, 0, 0, 0, 160);
+
+    float pw = 520.0f * s;
+    float ph = 650.0f * s;
+    float spx = (fwin_w - pw) / 2.0f;
+    float spy = (fwin_h - ph) / 2.0f;
+
+    draw_rect(spx, spy, pw, ph, 18, 20, 32, 248);
+    draw_border(spx, spy, pw, ph, 2.0f, 70, 130, 230, 255);
+
+    float ts = 1.3f * s;
+    float rh = 26.0f * s;
+    float mg = 22.0f * s;
+    float cx = spx + mg;
+    float cy = spy + ph - 38.0f * s;
+    float cw = pw - mg * 2.0f;
+    float box_sz = 13.0f * s;
+
+    // Title
+    draw_string("Mods", cx, cy, 2.0f * s, 70, 130, 230, 255);
+    cy -= 14.0f * s;
+    draw_rect(cx, cy, cw, 1.0f, 50, 50, 70, 200);
+    cy -= rh * 0.6f;
+
+    // Helper lambdas (identical style to Settings panel)
+    auto draw_section = [&](const char* label) {
+        draw_string(label, cx, cy, ts * 0.85f, 90, 160, 240, 220);
+        cy -= rh;
+    };
+
+    auto draw_checkbox = [&](const char* label, bool checked, bool enabled) {
+        float bx = cx + 4*s, by = cy + 3*s;
+        uint8_t bc = enabled ? 120 : 55;
+        draw_border(bx, by, box_sz, box_sz, 1.5f, bc, bc, bc+20, 200);
+        if (checked) {
+            uint8_t fr = enabled ? 50 : 40, fg = enabled ? 200 : 60, fb = enabled ? 90 : 50;
+            draw_rect(bx+2.5f*s, by+2.5f*s, box_sz-5*s, box_sz-5*s, fr, fg, fb, 255);
+        }
+        uint8_t lr = enabled ? 200 : 90, lg = enabled ? 200 : 90, lb = enabled ? 220 : 100;
+        draw_string(label, bx + box_sz + 10*s, cy + 3*s, ts * 0.9f, lr, lg, lb, 255);
+        if (!enabled) {
+            draw_string("(soon)", cx + cw - 55*s, cy + 3*s, ts * 0.65f, 70, 70, 90, 140);
+        }
+        cy -= rh;
+    };
+
+    auto draw_value = [&](const char* label, const char* val, bool enabled) {
+        uint8_t lr = enabled ? 200 : 90, lg = enabled ? 200 : 90, lb = enabled ? 220 : 100;
+        draw_string(label, cx + 4*s, cy + 3*s, ts * 0.9f, lr, lg, lb, 255);
+        float vx = cx + cw * 0.55f;
+        if (enabled) {
+            draw_string("<", vx, cy + 3*s, ts * 0.9f, 70, 130, 230, 255);
+            draw_string(val, vx + 14*s, cy + 3*s, ts * 0.9f, 255, 220, 100, 255);
+            float vw2 = strlen(val) * 8.0f * ts * 0.9f;
+            draw_string(">", vx + 14*s + vw2 + 6*s, cy + 3*s, ts * 0.9f, 70, 130, 230, 255);
+        } else {
+            draw_string(val, vx, cy + 3*s, ts * 0.9f, 70, 70, 90, 140);
+            draw_string("(soon)", cx + cw - 55*s, cy + 3*s, ts * 0.65f, 70, 70, 90, 140);
+        }
+        cy -= rh;
+    };
+
+    // ── COMBAT ──
+    draw_section("COMBAT");
+    draw_checkbox("God Mode", mod_god_mode, true);
+    draw_checkbox("Infinite Mana", mod_infinite_mana, true);
+
+    // ── MOVEMENT ──
+    draw_section("MOVEMENT");
+    draw_checkbox("Fly Mode", mod_fly_mode, true);
+    draw_checkbox("Infinite Jump", mod_infinite_jump, true);
+    char ws_buf[16]; snprintf(ws_buf, 16, "%.1fx", mod_walk_speed);
+    draw_value("Walk Speed", ws_buf, true);
+    char rs_buf[16]; snprintf(rs_buf, 16, "%.1fx", mod_run_speed);
+    draw_value("Run Speed", rs_buf, true);
+    char jh_buf[16]; snprintf(jh_buf, 16, "%.1fx", mod_jump_height);
+    draw_value("Jump Height", jh_buf, true);
+
+    // ── ECONOMY ──
+    draw_section("ECONOMY");
+    draw_checkbox("Coin Limit Breaker", mod_coin_break, true);
+    char lv_buf[16]; snprintf(lv_buf, 16, "%d", mod_level);
+    draw_value("Level", lv_buf, true);
+    char xp_buf[16]; snprintf(xp_buf, 16, "%d", mod_exp);
+    draw_value("Experience", xp_buf, true);
+
+    // ── GAME ──
+    draw_section("GAME");
+    char gs_buf[16]; snprintf(gs_buf, 16, "%.1fx", g_game_speed);
+    draw_value("Game Speed", gs_buf, true);
+    draw_checkbox("Pause Game", g_game_paused, true);
+    draw_checkbox("Free Camera", g_cam_active, true);
+    draw_checkbox("Smooth Camera", g_cam_smooth, true);
+
+    // Bottom buttons
+    float btn_h = 28.0f * s;
+    float btn_y = spy + 12.0f * s;
+
+    // Pin to Screen button
+    float pin_w = 130.0f * s;
+    float pin_x = spx + mg;
+    bool pin_hov = (mouse_x >= (int)pin_x && mouse_x < (int)(pin_x+pin_w) &&
+                   mouse_y >= (int)btn_y && mouse_y < (int)(btn_y+btn_h));
+    draw_rect(pin_x, btn_y, pin_w, btn_h, pin_hov ? 50 : 30, pin_hov ? 55 : 30, pin_hov ? 80 : 45, 255);
+    draw_border(pin_x, btn_y, pin_w, btn_h, 1.0f, 70, 130, 230, 255);
+    float pin_ts = ts * 0.9f;
+    draw_string("Pin to Screen", pin_x + (pin_w - 13*8*pin_ts)/2, btn_y + (btn_h - 8*pin_ts)/2, pin_ts, 200, 200, 220, 255);
+
+    // Close button
+    float cl_w = 90.0f * s;
+    float cl_x = spx + pw - cl_w - mg;
+    bool cl_hov = (mouse_x >= (int)cl_x && mouse_x < (int)(cl_x+cl_w) &&
+                  mouse_y >= (int)btn_y && mouse_y < (int)(btn_y+btn_h));
+    draw_rect(cl_x, btn_y, cl_w, btn_h, cl_hov ? 50 : 30, cl_hov ? 55 : 30, cl_hov ? 80 : 45, 255);
+    draw_border(cl_x, btn_y, cl_w, btn_h, 1.0f, 70, 130, 230, 255);
+    float cts = ts * 0.9f;
+    draw_string("Close", cl_x + (cl_w - 5*8*cts)/2, btn_y + (btn_h - 8*cts)/2, cts, 200, 200, 220, 255);
+}
+
+// ============================================================================
+// render_mod_sidebar() — Draw the pinned sidebar on the right edge
+// ============================================================================
+
+void GuiRenderer::render_mod_sidebar(float fwin_w, float fwin_h, int mouse_x, int mouse_y) {
+    float s = gui_scale;
+    float bar_h = (float)BASE_BAR_H * s;
+
+    // Tab dimensions
+    float tab_w = 24.0f * s;
+    float tab_h = 40.0f * s;
+    float tab_x = fwin_w - tab_w;
+    float tab_y = (fwin_h - bar_h) / 2.0f - tab_h / 2.0f;
+
+    if (!mod_sidebar_open) {
+        // Draw collapsed tab
+        bool tab_hov = (mouse_x >= (int)tab_x && mouse_x < (int)(tab_x+tab_w) &&
+                        mouse_y >= (int)tab_y && mouse_y < (int)(tab_y+tab_h));
+        draw_rect(tab_x, tab_y, tab_w, tab_h, tab_hov ? 35 : 20, tab_hov ? 35 : 20, tab_hov ? 55 : 38, 220);
+        draw_border(tab_x, tab_y, tab_w, tab_h, 1.0f, 70, 130, 230, 200);
+        float ch_sc = 1.3f * s;
+        draw_string("<", tab_x + (tab_w - 8*ch_sc)/2, tab_y + (tab_h - 8*ch_sc)/2, ch_sc, 70, 130, 230, 255);
+        return;
+    }
+
+    // Expanded sidebar
+    float sb_w = 200.0f * s;
+    float sb_h = fwin_h - bar_h;
+    float sb_x = fwin_w - sb_w;
+    float sb_y = 0;
+
+    // Semi-transparent background
+    draw_rect(sb_x, sb_y, sb_w, sb_h, 18, 20, 32, 220);
+    draw_border(sb_x, sb_y, sb_w, sb_h, 1.0f, 70, 130, 230, 200);
+
+    // Close tab (> arrow at top-right corner area)
+    float ct_w = 20.0f * s;
+    float ct_h = 24.0f * s;
+    float ct_x = sb_x;
+    float ct_y = sb_h - bar_h - ct_h;
+    bool ct_hov = (mouse_x >= (int)ct_x && mouse_x < (int)(ct_x+ct_w) &&
+                  mouse_y >= (int)ct_y && mouse_y < (int)(ct_y+ct_h));
+    draw_rect(ct_x, ct_y, ct_w, ct_h, ct_hov ? 50 : 30, ct_hov ? 50 : 30, ct_hov ? 70 : 45, 220);
+    float ch_sc = 1.1f * s;
+    draw_string(">", ct_x + (ct_w - 8*ch_sc)/2, ct_y + (ct_h - 8*ch_sc)/2, ch_sc, 70, 130, 230, 255);
+
+    float ts = 1.0f * s;
+    float rh = 22.0f * s;
+    float mg = 10.0f * s;
+    float cx = sb_x + mg;
+    float cy = sb_y + sb_h - bar_h - 10.0f * s;
+    float cw = sb_w - mg * 2.0f;
+    float box_sz = 10.0f * s;
+
+    // Header
+    draw_string("MODS", cx, cy, 1.4f * s, 70, 130, 230, 255);
+    cy -= 10.0f * s;
+    draw_rect(cx, cy, cw, 1.0f, 50, 50, 70, 200);
+    cy -= rh * 0.5f;
+
+    // Compact checkbox helper
+    auto draw_cb = [&](const char* label, bool checked) {
+        float bx = cx + 2*s, by = cy + 2*s;
+        draw_border(bx, by, box_sz, box_sz, 1.0f, 120, 120, 140, 200);
+        if (checked) {
+            draw_rect(bx+2*s, by+2*s, box_sz-4*s, box_sz-4*s, 50, 200, 90, 255);
+        }
+        draw_string(label, bx + box_sz + 6*s, cy + 2*s, ts * 0.85f, 200, 200, 220, 255);
+        cy -= rh;
+    };
+
+    auto draw_val = [&](const char* label, const char* val) {
+        draw_string(label, cx + 2*s, cy + 2*s, ts * 0.85f, 200, 200, 220, 255);
+        float vx = cx + cw * 0.55f;
+        draw_string("<", vx, cy + 2*s, ts * 0.85f, 70, 130, 230, 255);
+        draw_string(val, vx + 10*s, cy + 2*s, ts * 0.85f, 255, 220, 100, 255);
+        float vw2 = strlen(val) * 8.0f * ts * 0.85f;
+        draw_string(">", vx + 10*s + vw2 + 4*s, cy + 2*s, ts * 0.85f, 70, 130, 230, 255);
+        cy -= rh;
+    };
+
+    auto draw_sec = [&](const char* label) {
+        draw_string(label, cx, cy, ts * 0.8f, 90, 160, 240, 200);
+        cy -= rh * 0.8f;
+    };
+
+    draw_sec("COMBAT");
+    draw_cb("God Mode", mod_god_mode);
+    draw_cb("Inf. Mana", mod_infinite_mana);
+
+    draw_sec("MOVEMENT");
+    draw_cb("Fly Mode", mod_fly_mode);
+    draw_cb("Inf. Jump", mod_infinite_jump);
+    char ws[16]; snprintf(ws, 16, "%.1fx", mod_walk_speed);
+    draw_val("Walk Spd", ws);
+    char rs[16]; snprintf(rs, 16, "%.1fx", mod_run_speed);
+    draw_val("Run Spd", rs);
+    char jh[16]; snprintf(jh, 16, "%.1fx", mod_jump_height);
+    draw_val("Jump Ht", jh);
+
+    draw_sec("ECONOMY");
+    draw_cb("Coin Break", mod_coin_break);
+    char lv[16]; snprintf(lv, 16, "%d", mod_level);
+    draw_val("Level", lv);
+    char xp[16]; snprintf(xp, 16, "%d", mod_exp);
+    draw_val("Exp", xp);
+
+    draw_sec("GAME");
+    char gs[16]; snprintf(gs, 16, "%.1fx", g_game_speed);
+    draw_val("Speed", gs);
+    draw_cb("Pause", g_game_paused);
+    draw_cb("Free Cam", g_cam_active);
+    draw_cb("Smooth Cam", g_cam_smooth);
+}
+
+// ============================================================================
+// handle_mod_panel_click() — Process clicks in the mod panel modal
+// ============================================================================
+
+GuiAction GuiRenderer::handle_mod_panel_click(int mouse_x, int mouse_y, int win_w, int win_h) {
+    float s = gui_scale;
+    float pw = 520.0f * s;
+    float ph = 650.0f * s;
+    float spx = ((float)win_w - pw) / 2.0f;
+    float spy = ((float)win_h - ph) / 2.0f;
+    float mg = 22.0f * s;
+    float rh = 26.0f * s;
+    float cw = pw - mg * 2.0f;
+    float btn_h = 28.0f * s;
+    float btn_y = spy + 12.0f * s;
+
+    // Close button
+    float cl_w = 90.0f * s;
+    float cl_x = spx + pw - cl_w - mg;
+    if (mouse_x >= (int)cl_x && mouse_x < (int)(cl_x+cl_w) &&
+        mouse_y >= (int)btn_y && mouse_y < (int)(btn_y+btn_h)) {
+        show_mod_menu = false;
+        return GUI_NONE;
+    }
+
+    // Pin to Screen button
+    float pin_w = 130.0f * s;
+    float pin_x = spx + mg;
+    if (mouse_x >= (int)pin_x && mouse_x < (int)(pin_x+pin_w) &&
+        mouse_y >= (int)btn_y && mouse_y < (int)(btn_y+btn_h)) {
+        mod_pinned = true;
+        show_mod_menu = false;
+        return GUI_NONE;
+    }
+
+    // Click inside panel?
+    if (mouse_x >= (int)spx && mouse_x < (int)(spx+pw) &&
+        mouse_y >= (int)spy && mouse_y < (int)(spy+ph)) {
+
+        // Compute which row was clicked
+        float first_row = spy + ph - 38.0f*s - 14.0f*s - rh*0.6f;
+        // Row layout:
+        // 0=COMBAT(hdr), 1=GodMode(cb), 2=InfMana(cb),
+        // 3=MOVEMENT(hdr), 4=Fly(cb), 5=InfJump(cb), 6=WalkSpeed(val), 7=RunSpeed(val), 8=JumpHeight(val),
+        // 9=ECONOMY(hdr), 10=CoinBreak(cb), 11=Level(val), 12=Exp(val),
+        // 13=GAME(hdr), 14=GameSpeed(val), 15=Pause(cb), 16=FreeCam(cb), 17=SmoothCam(cb)
+        int row = (int)((first_row - (float)mouse_y) / rh);
+
+        // Value row: check if click is on left (<) or right (>) arrow
+        float vx = spx + mg + cw * 0.55f;
+        bool click_left = (mouse_x < (int)(vx + 14*s));
+
+        switch (row) {
+            case 1: // God Mode
+                mod_god_mode = !mod_god_mode;
+                return GUI_NONE;
+            case 2: // Infinite Mana
+                mod_infinite_mana = !mod_infinite_mana;
+                return GUI_NONE;
+            case 4: // Fly Mode
+                mod_fly_mode = !mod_fly_mode;
+                return GUI_NONE;
+            case 5: // Infinite Jump
+                mod_infinite_jump = !mod_infinite_jump;
+                return GUI_NONE;
+            case 6: // Walk Speed
+                return click_left ? GUI_MOD_WALK_SPEED_DOWN : GUI_MOD_WALK_SPEED_UP;
+            case 7: // Run Speed
+                return click_left ? GUI_MOD_RUN_SPEED_DOWN : GUI_MOD_RUN_SPEED_UP;
+            case 8: // Jump Height
+                return click_left ? GUI_MOD_JUMP_HEIGHT_DOWN : GUI_MOD_JUMP_HEIGHT_UP;
+            case 10: // Coin Limit Breaker
+                mod_coin_break = !mod_coin_break;
+                return GUI_NONE;
+            case 11: // Level
+                return click_left ? GUI_MOD_LEVEL_DOWN : GUI_MOD_LEVEL_UP;
+            case 12: // Experience
+                return click_left ? GUI_MOD_EXP_DOWN : GUI_MOD_EXP_UP;
+            case 14: // Game Speed
+                return click_left ? GUI_GAME_SPEED_DOWN : GUI_GAME_SPEED_UP;
+            case 15: // Pause Game
+                return GUI_TOGGLE_PAUSE;
+            case 16: // Free Camera
+                return GUI_TOGGLE_CAM;
+            case 17: // Smooth Camera
+                return GUI_TOGGLE_SMOOTH_CAM;
+            default:
+                break;
+        }
+        return GUI_NONE;
+    }
+
+    // Click outside panel — close it
+    show_mod_menu = false;
+    active_menu = -1;
+    return GUI_NONE;
+}
+
+// ============================================================================
+// handle_mod_sidebar_click() — Process clicks on the pinned sidebar
+// ============================================================================
+
+GuiAction GuiRenderer::handle_mod_sidebar_click(int mouse_x, int mouse_y, int win_w, int win_h) {
+    float s = gui_scale;
+    float fwin_w = (float)win_w;
+    float fwin_h = (float)win_h;
+    float bar_h = (float)BASE_BAR_H * s;
+
+    if (!mod_sidebar_open) {
+        // Collapsed tab
+        float tab_w = 24.0f * s;
+        float tab_h = 40.0f * s;
+        float tab_x = fwin_w - tab_w;
+        float tab_y = (fwin_h - bar_h) / 2.0f - tab_h / 2.0f;
+
+        if (mouse_x >= (int)tab_x && mouse_x < (int)(tab_x+tab_w) &&
+            mouse_y >= (int)tab_y && mouse_y < (int)(tab_y+tab_h)) {
+            mod_sidebar_open = true;
+            return GUI_NONE;
+        }
+        return GUI_NONE;
+    }
+
+    // Expanded sidebar
+    float sb_w = 200.0f * s;
+    float sb_h = fwin_h - bar_h;
+    float sb_x = fwin_w - sb_w;
+
+    // Close tab (> arrow)
+    float ct_w = 20.0f * s;
+    float ct_h = 24.0f * s;
+    float ct_x = sb_x;
+    float ct_y = sb_h - bar_h - ct_h;
+    if (mouse_x >= (int)ct_x && mouse_x < (int)(ct_x+ct_w) &&
+        mouse_y >= (int)ct_y && mouse_y < (int)(ct_y+ct_h)) {
+        mod_sidebar_open = false;
+        return GUI_NONE;
+    }
+
+    // Check if click is inside sidebar area
+    if (mouse_x >= (int)sb_x && mouse_x < win_w &&
+        mouse_y >= 0 && mouse_y < (int)sb_h) {
+
+        float ts = 1.0f * s;
+        float rh = 22.0f * s;
+        float mg = 10.0f * s;
+        float cw = sb_w - mg * 2.0f;
+
+        // First row position (after header)
+        float first_row = sb_h - bar_h - 10.0f * s - 10.0f * s - rh * 0.5f;
+        // Sections with 0.8f height: sec_rh = rh * 0.8f
+        float sec_rh = rh * 0.8f;
+
+        // Row layout (mixing section headers at 0.8*rh and items at rh):
+        // Rows calculated from top:
+        // COMBAT header (sec_rh), God(rh), InfMana(rh),
+        // MOVEMENT header (sec_rh), Fly(rh), InfJump(rh), Walk(rh), Run(rh), Jump(rh),
+        // ECONOMY header (sec_rh), Coin(rh), Level(rh), Exp(rh),
+        // GAME header (sec_rh), Speed(rh), Pause(rh), FreeCam(rh), SmoothCam(rh)
+
+        // Compute y offset for each clickable item
+        float cy = first_row;
+        struct SBItem { float top; float bot; int id; }; // id: positive=checkbox index, negative=value index
+        // We track items by stepping through the layout
+        // Section = skip sec_rh, Checkbox/Value = skip rh
+
+        // COMBAT header
+        cy -= sec_rh;
+        float god_top = cy; cy -= rh;       // 0: God Mode (cb)
+        float mana_top = cy; cy -= rh;      // 1: Inf Mana (cb)
+        // MOVEMENT header
+        cy -= sec_rh;
+        float fly_top = cy; cy -= rh;       // 2: Fly (cb)
+        float ijmp_top = cy; cy -= rh;      // 3: Inf Jump (cb)
+        float walk_top = cy; cy -= rh;      // 4: Walk Speed (val)
+        float run_top = cy; cy -= rh;       // 5: Run Speed (val)
+        float jump_top = cy; cy -= rh;      // 6: Jump Height (val)
+        // ECONOMY header
+        cy -= sec_rh;
+        float coin_top = cy; cy -= rh;      // 7: Coin Break (cb)
+        float lvl_top = cy; cy -= rh;       // 8: Level (val)
+        float exp_top = cy; cy -= rh;       // 9: Exp (val)
+        // GAME header
+        cy -= sec_rh;
+        float spd_top = cy; cy -= rh;       // 10: Speed (val)
+        float pause_top = cy; cy -= rh;     // 11: Pause (cb)
+        float fcam_top = cy; cy -= rh;      // 12: Free Cam (cb)
+        float scam_top = cy; cy -= rh;      // 13: Smooth Cam (cb)
+
+        float my_f = (float)mouse_y;
+        float vx = sb_x + mg + cw * 0.55f;
+        bool click_left = (mouse_x < (int)(vx + 10*s));
+
+        // Check each item
+        if (my_f >= god_top - rh && my_f < god_top) { mod_god_mode = !mod_god_mode; return GUI_NONE; }
+        if (my_f >= mana_top - rh && my_f < mana_top) { mod_infinite_mana = !mod_infinite_mana; return GUI_NONE; }
+        if (my_f >= fly_top - rh && my_f < fly_top) { mod_fly_mode = !mod_fly_mode; return GUI_NONE; }
+        if (my_f >= ijmp_top - rh && my_f < ijmp_top) { mod_infinite_jump = !mod_infinite_jump; return GUI_NONE; }
+        if (my_f >= walk_top - rh && my_f < walk_top) { return click_left ? GUI_MOD_WALK_SPEED_DOWN : GUI_MOD_WALK_SPEED_UP; }
+        if (my_f >= run_top - rh && my_f < run_top) { return click_left ? GUI_MOD_RUN_SPEED_DOWN : GUI_MOD_RUN_SPEED_UP; }
+        if (my_f >= jump_top - rh && my_f < jump_top) { return click_left ? GUI_MOD_JUMP_HEIGHT_DOWN : GUI_MOD_JUMP_HEIGHT_UP; }
+        if (my_f >= coin_top - rh && my_f < coin_top) { mod_coin_break = !mod_coin_break; return GUI_NONE; }
+        if (my_f >= lvl_top - rh && my_f < lvl_top) { return click_left ? GUI_MOD_LEVEL_DOWN : GUI_MOD_LEVEL_UP; }
+        if (my_f >= exp_top - rh && my_f < exp_top) { return click_left ? GUI_MOD_EXP_DOWN : GUI_MOD_EXP_UP; }
+        if (my_f >= spd_top - rh && my_f < spd_top) { return click_left ? GUI_GAME_SPEED_DOWN : GUI_GAME_SPEED_UP; }
+        if (my_f >= pause_top - rh && my_f < pause_top) { return GUI_TOGGLE_PAUSE; }
+        if (my_f >= fcam_top - rh && my_f < fcam_top) { return GUI_TOGGLE_CAM; }
+        if (my_f >= scam_top - rh && my_f < scam_top) { return GUI_TOGGLE_SMOOTH_CAM; }
+
         return GUI_NONE;
     }
 

@@ -1,6 +1,7 @@
 #include "jni_bridge.h"
 #include "platform/emulator.h"
 #include "platform/io_thread.h"
+#include "platform/data_path.h"
 #include "android/asset_manager.h"
 #include <iostream>
 #include <cstring>
@@ -13,6 +14,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <sys/time.h>
+#include <vorbis/vorbisfile.h>
 #include <time.h>
 #include <unistd.h>
 #include <cerrno>
@@ -22,9 +24,16 @@
 #include <AL/al.h>
 #include <AL/alc.h>
 
+#ifdef VULKAN_BACKEND
+#include "platform/vulkan_backend.h"
+extern GraphicsAPI g_graphics_api;
+extern VulkanBackend g_vk_backend;
+#endif
+
 // When true, GL bridge functions call real OpenGL instead of no-ops
 bool g_display_active = false;
 std::string g_save_dir = "./save";  // Default; overwritten by main.cpp at startup
+int g_death_detected_countdown = 0;  // Set when gameover music loads, counted down in game loop
 
 
 // --- Frame Statistics ---
@@ -449,10 +458,74 @@ void bridge_powf(void* emu_ptr) {
 
 void bridge_pow(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
-    // double is 64-bit, but Android arm32 might use pairs of registers
-    // For now, let's just log it if we suspect it's causing NaNs.
-    std::cout << "[Math] pow(double) called - potential precision/ABI issue" << std::endl;
-    emu->set_reg(0, 0); // Placeholder
+    // ARM softfp ABI: double in R0:R1 (base), R2:R3 (exponent)
+    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
+    uint32_t r2 = emu->get_reg(2), r3 = emu->get_reg(3);
+    double base, exp_val;
+    uint64_t base_i = ((uint64_t)r1 << 32) | r0;
+    uint64_t exp_i  = ((uint64_t)r3 << 32) | r2;
+    memcpy(&base, &base_i, 8);
+    memcpy(&exp_val, &exp_i, 8);
+    double res = std::pow(base, exp_val);
+    uint64_t res_i;
+    memcpy(&res_i, &res, 8);
+    emu->set_reg(0, (uint32_t)res_i);
+    emu->set_reg(1, (uint32_t)(res_i >> 32));
+}
+
+// Double-precision math bridges (ARM softfp: double in R0:R1, result in R0:R1)
+// These are needed for 3D billboard/rotation calculations on spinning items
+
+void bridge_sin(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
+    double x;
+    uint64_t x_i = ((uint64_t)r1 << 32) | r0;
+    memcpy(&x, &x_i, 8);
+    double res = std::sin(x);
+    uint64_t res_i;
+    memcpy(&res_i, &res, 8);
+    emu->set_reg(0, (uint32_t)res_i);
+    emu->set_reg(1, (uint32_t)(res_i >> 32));
+}
+
+void bridge_cos(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
+    double x;
+    uint64_t x_i = ((uint64_t)r1 << 32) | r0;
+    memcpy(&x, &x_i, 8);
+    double res = std::cos(x);
+    uint64_t res_i;
+    memcpy(&res_i, &res, 8);
+    emu->set_reg(0, (uint32_t)res_i);
+    emu->set_reg(1, (uint32_t)(res_i >> 32));
+}
+
+void bridge_acos(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
+    double x;
+    uint64_t x_i = ((uint64_t)r1 << 32) | r0;
+    memcpy(&x, &x_i, 8);
+    double res = std::acos(x);
+    uint64_t res_i;
+    memcpy(&res_i, &res, 8);
+    emu->set_reg(0, (uint32_t)res_i);
+    emu->set_reg(1, (uint32_t)(res_i >> 32));
+}
+
+void bridge_round(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
+    double x;
+    uint64_t x_i = ((uint64_t)r1 << 32) | r0;
+    memcpy(&x, &x_i, 8);
+    double res = std::round(x);
+    uint64_t res_i;
+    memcpy(&res_i, &res, 8);
+    emu->set_reg(0, (uint32_t)res_i);
+    emu->set_reg(1, (uint32_t)(res_i >> 32));
 }
 
 void bridge_tan(void* emu_ptr) {
@@ -958,6 +1031,33 @@ static bool load_wav_to_buffer(const std::string& path, ALuint buffer) {
     return alGetError() == AL_NO_ERROR;
 }
 
+// Load OGG Vorbis file → decode to PCM → fill OpenAL buffer
+static bool load_ogg_to_buffer(const std::string& path, ALuint buffer) {
+    OggVorbis_File vf;
+    if (ov_fopen(path.c_str(), &vf) != 0) return false;
+
+    vorbis_info* info = ov_info(&vf, -1);
+    if (!info) { ov_clear(&vf); return false; }
+
+    ALenum format = (info->channels == 1) ? AL_FORMAT_MONO16 : AL_FORMAT_STEREO16;
+    ALsizei freq = info->rate;
+
+    // Decode entire OGG to PCM
+    std::vector<char> pcm;
+    char buf[8192];
+    int section = 0;
+    long bytes;
+    while ((bytes = ov_read(&vf, buf, sizeof(buf), 0, 2, 1, &section)) > 0) {
+        pcm.insert(pcm.end(), buf, buf + bytes);
+    }
+    ov_clear(&vf);
+
+    if (pcm.empty()) return false;
+
+    alBufferData(buffer, format, pcm.data(), (ALsizei)pcm.size(), freq);
+    return alGetError() == AL_NO_ERROR;
+}
+
 void bridge_CallBooleanMethodV(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
@@ -975,35 +1075,42 @@ void bridge_CallBooleanMethodV(void* emu_ptr) {
         
         std::cout << "[JNI] MusicPlayer.loadFile(\"" << fname << "\")" << std::endl;
         
+        // Death detection: flag when gameover music is loaded
+        if (fname.find("gameover") != std::string::npos) {
+            g_death_detected_countdown = 480;  // ~8 seconds at 60fps, then auto-restart
+            std::cout << "[Fix] Death detected (gameover music loaded) — auto-restart in ~8s" << std::endl;
+        }
+        
         if (g_music_source != 0) {
             alSourceStop(g_music_source);
             alSourcei(g_music_source, AL_BUFFER, 0);
         }
         
-        // Build music path — use SWORDIGO_DATA_DIR if set (AppImage), else relative
-        std::string music_base;
-        const char* data_dir = getenv("SWORDIGO_DATA_DIR");
-        if (data_dir) {
-            music_base = std::string(data_dir);
-            if (!music_base.empty() && music_base.back() != '/') music_base += "/";
-            music_base += "assets/resources/music/music_";
-        } else {
-            music_base = "assets/resources/music/music_";
-        }
-        std::string wav_path = music_base + fname;
+        // Build music path — get_data_path handles all install locations
+        // (AppImage, RPM /usr/share/swordigo/, dev ./, etc.)
+        std::string music_dir = get_data_path("assets/resources/music");
+        std::string music_base = music_dir + "/music_";
+        std::string base_path = music_base + fname;
         size_t pos;
-        while ((pos = wav_path.find('-')) != std::string::npos) {
-            wav_path.replace(pos, 1, "_");
+        while ((pos = base_path.find('-')) != std::string::npos) {
+            base_path.replace(pos, 1, "_");
         }
-        wav_path += ".wav";
         
-        std::cout << "  -> Loading host music WAV: " << wav_path << std::endl;
+        // Try OGG first (10x smaller), fall back to WAV
+        std::string ogg_path = base_path + ".ogg";
+        std::string wav_path = base_path + ".wav";
+        
+        std::cout << "  -> Trying OGG: " << ogg_path << std::endl;
         
         if (g_music_buffer == 0) {
             alGenBuffers(1, &g_music_buffer);
         }
         
-        bool loaded = load_wav_to_buffer(wav_path, g_music_buffer);
+        bool loaded = load_ogg_to_buffer(ogg_path, g_music_buffer);
+        if (!loaded) {
+            std::cout << "  -> OGG not found, trying WAV: " << wav_path << std::endl;
+            loaded = load_wav_to_buffer(wav_path, g_music_buffer);
+        }
         if (loaded) {
             if (g_music_source == 0) {
                 alGenSources(1, &g_music_source);
@@ -1011,10 +1118,10 @@ void bridge_CallBooleanMethodV(void* emu_ptr) {
             alSourcei(g_music_source, AL_BUFFER, g_music_buffer);
             alSourcei(g_music_source, AL_LOOPING, g_music_looping ? AL_TRUE : AL_FALSE);
             alSourcef(g_music_source, AL_GAIN, g_music_volume);
-            res = 1; // success
+            res = 1;
         } else {
-            std::cerr << "  ⚠ Failed to load music WAV: " << wav_path << std::endl;
-            res = 0; // fail
+            std::cerr << "  ⚠ Failed to load music (tried .ogg and .wav): " << base_path << std::endl;
+            res = 0;
         }
     } else {
         res = 0; // return 0 like Vita port
@@ -2346,6 +2453,12 @@ void bridge_glFogf(void* emu_ptr) {
     uint32_t param_bits = emu->get_reg(1);
     float param;
     memcpy(&param, &param_bits, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.fogf(pname, param);
+        return;
+    }
+#endif
     if (g_display_active) glFogf(pname, param);
 }
 
@@ -2354,6 +2467,16 @@ void bridge_glFogfv(void* emu_ptr) {
     uint8_t* memory = emu->get_memory_base();
     GLenum pname = (GLenum)emu->get_reg(0);
     uint32_t params_ptr = emu->get_reg(1);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        if (params_ptr != 0) {
+            float params[4];
+            memcpy(params, memory + params_ptr, 16);
+            g_vk_backend.fogfv(pname, params);
+        }
+        return;
+    }
+#endif
     if (g_display_active && params_ptr != 0) {
         float params[4];
         memcpy(params, memory + params_ptr, 16);
@@ -2365,6 +2488,12 @@ void bridge_glFogi(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     GLenum pname = (GLenum)emu->get_reg(0);
     GLint param = (GLint)emu->get_reg(1);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.fogi(pname, param);
+        return;
+    }
+#endif
     if (g_display_active) glFogi(pname, param);
 }
 
@@ -2376,6 +2505,12 @@ void bridge_glLightf(void* emu_ptr) {
     uint32_t param_bits = emu->get_reg(2);
     float param;
     memcpy(&param, &param_bits, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.lightf(light, pname, param);
+        return;
+    }
+#endif
     if (g_display_active) glLightf(light, pname, param);
 }
 
@@ -2385,6 +2520,16 @@ void bridge_glLightfv(void* emu_ptr) {
     GLenum light = (GLenum)emu->get_reg(0);
     GLenum pname = (GLenum)emu->get_reg(1);
     uint32_t params_ptr = emu->get_reg(2);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        if (params_ptr != 0) {
+            float params[4];
+            memcpy(params, memory + params_ptr, 16);
+            g_vk_backend.lightfv(light, pname, params);
+        }
+        return;
+    }
+#endif
     if (g_display_active && params_ptr != 0) {
         float params[4];
         memcpy(params, memory + params_ptr, 16);
@@ -2398,6 +2543,12 @@ void bridge_glLightModelf(void* emu_ptr) {
     uint32_t param_bits = emu->get_reg(1);
     float param;
     memcpy(&param, &param_bits, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.light_modelf(pname, param);
+        return;
+    }
+#endif
     if (g_display_active) glLightModelf(pname, param);
 }
 
@@ -2406,6 +2557,16 @@ void bridge_glLightModelfv(void* emu_ptr) {
     uint8_t* memory = emu->get_memory_base();
     GLenum pname = (GLenum)emu->get_reg(0);
     uint32_t params_ptr = emu->get_reg(1);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        if (params_ptr != 0) {
+            float params[4];
+            memcpy(params, memory + params_ptr, 16);
+            g_vk_backend.light_modelfv(pname, params);
+        }
+        return;
+    }
+#endif
     if (g_display_active && params_ptr != 0) {
         float params[4];
         memcpy(params, memory + params_ptr, 16);
@@ -2421,6 +2582,12 @@ void bridge_glMaterialf(void* emu_ptr) {
     uint32_t param_bits = emu->get_reg(2);
     float param;
     memcpy(&param, &param_bits, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.materialf(face, pname, param);
+        return;
+    }
+#endif
     if (g_display_active) glMaterialf(face, pname, param);
 }
 
@@ -2430,6 +2597,16 @@ void bridge_glMaterialfv(void* emu_ptr) {
     GLenum face = (GLenum)emu->get_reg(0);
     GLenum pname = (GLenum)emu->get_reg(1);
     uint32_t params_ptr = emu->get_reg(2);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        if (params_ptr != 0) {
+            float params[4];
+            memcpy(params, memory + params_ptr, 16);
+            g_vk_backend.materialfv(face, pname, params);
+        }
+        return;
+    }
+#endif
     if (g_display_active && params_ptr != 0) {
         float params[4];
         memcpy(params, memory + params_ptr, 16);
@@ -2444,6 +2621,12 @@ void bridge_glColor4ub(void* emu_ptr) {
     GLubyte g = (GLubyte)emu->get_reg(1);
     GLubyte b = (GLubyte)emu->get_reg(2);
     GLubyte a = (GLubyte)emu->get_reg(3);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.color4ub((uint8_t)r, (uint8_t)g, (uint8_t)b, (uint8_t)a);
+        return;
+    }
+#endif
     if (g_display_active) glColor4ub(r, g, b, a);
 }
 
@@ -2453,6 +2636,12 @@ void bridge_glTexEnvi(void* emu_ptr) {
     GLenum target = (GLenum)emu->get_reg(0);
     GLenum pname = (GLenum)emu->get_reg(1);
     GLint param = (GLint)emu->get_reg(2);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.tex_envi(target, pname, param);
+        return;
+    }
+#endif
     if (g_display_active) glTexEnvi(target, pname, param);
 }
 
@@ -2462,6 +2651,16 @@ void bridge_glTexEnvfv(void* emu_ptr) {
     GLenum target = (GLenum)emu->get_reg(0);
     GLenum pname = (GLenum)emu->get_reg(1);
     uint32_t params_ptr = emu->get_reg(2);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        if (params_ptr != 0) {
+            float params[4];
+            memcpy(params, memory + params_ptr, 16);
+            g_vk_backend.tex_envfv(target, pname, params);
+        }
+        return;
+    }
+#endif
     if (g_display_active && params_ptr != 0) {
         float params[4];
         memcpy(params, memory + params_ptr, 16);
@@ -2473,6 +2672,12 @@ void bridge_glTexEnvfv(void* emu_ptr) {
 void bridge_glCullFace(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     GLenum mode = (GLenum)emu->get_reg(0);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.cull_face(mode);
+        return;
+    }
+#endif
     if (g_display_active) glCullFace(mode);
 }
 
@@ -2480,6 +2685,12 @@ void bridge_glHint(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     GLenum target = (GLenum)emu->get_reg(0);
     GLenum mode = (GLenum)emu->get_reg(1);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.hint(target, mode);
+        return;
+    }
+#endif
     if (g_display_active) glHint(target, mode);
 }
 
@@ -2488,6 +2699,12 @@ void bridge_glPointSize(void* emu_ptr) {
     uint32_t size_bits = emu->get_reg(0);
     float size;
     memcpy(&size, &size_bits, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.point_size(size);
+        return;
+    }
+#endif
     if (g_display_active) glPointSize(size);
 }
 
@@ -2497,12 +2714,24 @@ void bridge_glStencilFunc(void* emu_ptr) {
     GLenum func = (GLenum)emu->get_reg(0);
     GLint ref = (GLint)emu->get_reg(1);
     GLuint mask = (GLuint)emu->get_reg(2);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.stencil_func(func, ref, mask);
+        return;
+    }
+#endif
     if (g_display_active) glStencilFunc(func, ref, mask);
 }
 
 void bridge_glStencilMask(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     GLuint mask = (GLuint)emu->get_reg(0);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.stencil_mask(mask);
+        return;
+    }
+#endif
     if (g_display_active) glStencilMask(mask);
 }
 
@@ -2511,6 +2740,12 @@ void bridge_glStencilOp(void* emu_ptr) {
     GLenum sfail = (GLenum)emu->get_reg(0);
     GLenum dpfail = (GLenum)emu->get_reg(1);
     GLenum dppass = (GLenum)emu->get_reg(2);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.stencil_op(sfail, dpfail, dppass);
+        return;
+    }
+#endif
     if (g_display_active) glStencilOp(sfail, dpfail, dppass);
 }
 
@@ -2527,6 +2762,12 @@ void bridge_gl_clear(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.clear_calls++;
     GL_DIAG("glClear(0x%x)", emu->get_reg(0));
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.clear(emu->get_reg(0));
+        return;
+    }
+#endif
     if (g_display_active) {
         glClear(emu->get_reg(0));
     }
@@ -2535,14 +2776,18 @@ void bridge_gl_clear(void* emu_ptr) {
 void bridge_gl_clear_color(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+    uint32_t r = emu->get_reg(0), g = emu->get_reg(1);
+    uint32_t b = emu->get_reg(2), a = emu->get_reg(3);
+    float fr, fg, fb, fa;
+    memcpy(&fr, &r, 4); memcpy(&fg, &g, 4);
+    memcpy(&fb, &b, 4); memcpy(&fa, &a, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.clear_color(fr, fg, fb, fa);
+        return;
+    }
+#endif
     if (g_display_active) {
-        uint8_t* mem = emu->get_memory_base();
-        // Soft-float ABI: floats passed in R0-R3 as uint32_t
-        uint32_t r = emu->get_reg(0), g = emu->get_reg(1);
-        uint32_t b = emu->get_reg(2), a = emu->get_reg(3);
-        float fr, fg, fb, fa;
-        memcpy(&fr, &r, 4); memcpy(&fg, &g, 4);
-        memcpy(&fb, &b, 4); memcpy(&fa, &a, 4);
         GL_DIAG("glClearColor(%f, %f, %f, %f)", fr, fg, fb, fa);
         glClearColor(fr, fg, fb, fa);
     }
@@ -2555,6 +2800,12 @@ int g_win_h = 1080;
 void bridge_gl_viewport(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.viewport_calls++;
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.viewport(emu->get_reg(0), emu->get_reg(1), emu->get_reg(2), emu->get_reg(3));
+        return;
+    }
+#endif
     if (g_display_active) {
         // Pass viewport through unchanged — the FBO captures at game resolution,
         // fbo_end_game_and_blit() handles all scaling to window via GLSL shaders.
@@ -2570,6 +2821,12 @@ void bridge_gl_matrix_mode(void* emu_ptr) {
     g_frame_stats.matrix_ops++;
     g_current_matrix_mode = (GLenum)emu->get_reg(0);
     GL_DIAG("glMatrixMode(0x%x) %s", emu->get_reg(0), emu->get_reg(0)==0x1701?"PROJECTION":emu->get_reg(0)==0x1700?"MODELVIEW":"OTHER");
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.matrix_mode(emu->get_reg(0));
+        return;
+    }
+#endif
     if (g_display_active) {
         glMatrixMode(emu->get_reg(0));
     }
@@ -2579,6 +2836,12 @@ void bridge_gl_load_identity(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     GL_DIAG("glLoadIdentity()");
     g_frame_stats.matrix_ops++;
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.load_identity();
+        return;
+    }
+#endif
     if (g_display_active) glLoadIdentity();
 }
 
@@ -2605,6 +2868,19 @@ void bridge_gl_load_matrixf(void* emu_ptr) {
         }
     }
     
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        if (is_zero || has_bad) {
+            // Use identity as fallback for bad matrices
+            float identity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+            g_vk_backend.load_matrixf(identity);
+        } else {
+            g_vk_backend.load_matrixf(m);
+        }
+        return;
+    }
+#endif
+
     // Silently fix zero matrices - they happen during projection setup before
     // the engine's tanf-based projection is fully computed.
     // Log only NaN/Inf (real bugs), not zero (expected during boot).
@@ -2668,6 +2944,15 @@ void bridge_gl_mult_matrixf(void* emu_ptr) {
         }
     }
     
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        if (!has_bad) {
+            g_vk_backend.mult_matrixf(m);
+        }
+        return;
+    }
+#endif
+
     if (has_bad || (g_gl_diag_enabled && g_gl_diag_frame < 3)) {
         std::cout << "[MATRIX] glMultMatrixf" << (has_bad ? " BAD!" : "") << " at LR=0x" << std::hex << emu->get_lr() << std::dec << std::endl;
         std::cout << "  [" << m[0] << " " << m[4] << " " << m[8] << " " << m[12] << " / "
@@ -2688,6 +2973,12 @@ void bridge_gl_push_matrix(void* emu_ptr) {
     g_gl_matrix_stack_depth++;
     GL_DIAG("glPushMatrix() depth=%d", g_gl_matrix_stack_depth);
     g_frame_stats.matrix_ops++;
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.push_matrix();
+        return;
+    }
+#endif
     if (g_display_active) glPushMatrix();
 }
 
@@ -2696,6 +2987,12 @@ void bridge_gl_pop_matrix(void* emu_ptr) {
     g_gl_matrix_stack_depth--;
     GL_DIAG("glPopMatrix() depth=%d", g_gl_matrix_stack_depth);
     g_frame_stats.matrix_ops++;
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.pop_matrix();
+        return;
+    }
+#endif
     if (g_display_active) glPopMatrix();
 }
 
@@ -2715,6 +3012,12 @@ void bridge_gl_orthof(void* emu_ptr) {
     memcpy(&n, memory + sp, 4);
     memcpy(&f, memory + sp + 4, 4);
     GL_DIAG("glOrthof(l=%f, r=%f, b=%f, t=%f, n=%f, f=%f)", l, r_, b, t, n, f);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.orthof(l, r_, b, t, n, f);
+        return;
+    }
+#endif
     if (l == r_ || b == t || n == f) {
         std::cout << "[GL] glOrthof with zero range detected! l=" << l << " r=" << r_ << " b=" << b << " t=" << t << " n=" << n << " f=" << f << std::endl;
     }
@@ -2727,10 +3030,16 @@ void bridge_gl_orthof(void* emu_ptr) {
 void bridge_gl_translatef(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.matrix_ops++;
+    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1), r2 = emu->get_reg(2);
+    float x, y, z;
+    memcpy(&x, &r0, 4); memcpy(&y, &r1, 4); memcpy(&z, &r2, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.translatef(x, y, z);
+        return;
+    }
+#endif
     if (g_display_active) {
-        uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1), r2 = emu->get_reg(2);
-        float x, y, z;
-        memcpy(&x, &r0, 4); memcpy(&y, &r1, 4); memcpy(&z, &r2, 4);
         glTranslatef(x, y, z);
     }
 }
@@ -2738,12 +3047,18 @@ void bridge_gl_translatef(void* emu_ptr) {
 void bridge_gl_rotatef(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.matrix_ops++;
+    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
+    uint32_t r2 = emu->get_reg(2), r3 = emu->get_reg(3);
+    float angle, x, y, z;
+    memcpy(&angle, &r0, 4); memcpy(&x, &r1, 4);
+    memcpy(&y, &r2, 4); memcpy(&z, &r3, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.rotatef(angle, x, y, z);
+        return;
+    }
+#endif
     if (g_display_active) {
-        uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
-        uint32_t r2 = emu->get_reg(2), r3 = emu->get_reg(3);
-        float angle, x, y, z;
-        memcpy(&angle, &r0, 4); memcpy(&x, &r1, 4);
-        memcpy(&y, &r2, 4); memcpy(&z, &r3, 4);
         glRotatef(angle, x, y, z);
     }
 }
@@ -2751,10 +3066,16 @@ void bridge_gl_rotatef(void* emu_ptr) {
 void bridge_gl_scalef(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.matrix_ops++;
+    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1), r2 = emu->get_reg(2);
+    float x, y, z;
+    memcpy(&x, &r0, 4); memcpy(&y, &r1, 4); memcpy(&z, &r2, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.scalef(x, y, z);
+        return;
+    }
+#endif
     if (g_display_active) {
-        uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1), r2 = emu->get_reg(2);
-        float x, y, z;
-        memcpy(&x, &r0, 4); memcpy(&y, &r1, 4); memcpy(&z, &r2, 4);
         glScalef(x, y, z);
     }
 }
@@ -2762,17 +3083,23 @@ void bridge_gl_scalef(void* emu_ptr) {
 void bridge_gl_frustumf(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.matrix_ops++;
+    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
+    uint32_t r2 = emu->get_reg(2), r3 = emu->get_reg(3);
+    float l, r_, b, t;
+    memcpy(&l, &r0, 4); memcpy(&r_, &r1, 4);
+    memcpy(&b, &r2, 4); memcpy(&t, &r3, 4);
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t sp = emu->get_reg(13);
+    float n, f;
+    memcpy(&n, memory + sp, 4);
+    memcpy(&f, memory + sp + 4, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.frustumf(l, r_, b, t, n, f);
+        return;
+    }
+#endif
     if (g_display_active) {
-        uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
-        uint32_t r2 = emu->get_reg(2), r3 = emu->get_reg(3);
-        float l, r_, b, t;
-        memcpy(&l, &r0, 4); memcpy(&r_, &r1, 4);
-        memcpy(&b, &r2, 4); memcpy(&t, &r3, 4);
-        uint8_t* memory = emu->get_memory_base();
-        uint32_t sp = emu->get_reg(13);
-        float n, f;
-        memcpy(&n, memory + sp, 4);
-        memcpy(&f, memory + sp + 4, 4);
         glFrustum(l, r_, b, t, n, f);
     }
 }
@@ -2798,6 +3125,78 @@ struct {
 
 bool g_gl_force_white = false;
 bool g_gl_force_identity = false;
+bool g_gl_hide_hud = false;  // When true, swap controls atlas with modified copy
+static GLuint g_controls_atlas_tex_id = 0;    // Original atlas texture ID
+static GLuint g_controls_hidden_tex = 0;       // Modified copy with controls zeroed out
+
+// From asset_manager.c — tracks last opened asset filename
+extern "C" { extern char g_last_opened_asset[256]; }
+
+// Control regions in 1024x1024 pixel space (parsed from ui_game_atlas_2x.atlas)
+// Format: {x, y, w, h} — these are the touch button sprite regions to zero out
+struct ControlRect { int x, y, w, h; };
+static const ControlRect CONTROL_RECTS[] = {
+    {197, 751,  56,  56},  // ui_controls_button
+    {140, 751,  56,  56},  // ui_controls_button_pressed
+    {483, 518,  82,  80},  // ui_controls_jump
+    {838, 802,  96,  50},  // ui_controls_left
+    {741, 805,  96,  50},  // ui_controls_right
+    {417, 751, 104,  62},  // ui_controls_swing
+    {166, 613,  74,  68},  // ui_controls_handle
+};
+static const int NUM_CONTROL_RECTS = sizeof(CONTROL_RECTS) / sizeof(CONTROL_RECTS[0]);
+
+// Create a modified copy of the controls atlas with control regions zeroed out
+static void create_hidden_controls_atlas(GLenum target, GLint level, GLint ifmt,
+                                          int w, int h, GLint border,
+                                          GLenum fmt, GLenum type, const void* pixels) {
+    if (!pixels || w < 512 || h < 512) return;
+    
+    // Determine bytes per pixel
+    int bpp = 4;  // Assume RGBA
+    if (fmt == GL_RGB) bpp = 3;
+    
+    // Copy the pixel data
+    size_t data_size = (size_t)w * h * bpp;
+    uint8_t* modified = (uint8_t*)malloc(data_size);
+    if (!modified) return;
+    memcpy(modified, pixels, data_size);
+    
+    // Zero out control regions (with 2px padding for safety)
+    for (int r = 0; r < NUM_CONTROL_RECTS; r++) {
+        int rx = CONTROL_RECTS[r].x - 2;
+        int ry = CONTROL_RECTS[r].y - 2;
+        int rw = CONTROL_RECTS[r].w + 4;
+        int rh = CONTROL_RECTS[r].h + 4;
+        
+        // Clamp to texture bounds
+        if (rx < 0) rx = 0;
+        if (ry < 0) ry = 0;
+        if (rx + rw > w) rw = w - rx;
+        if (ry + rh > h) rh = h - ry;
+        
+        // Zero out each row of this rectangle
+        for (int row = ry; row < ry + rh; row++) {
+            memset(modified + (row * w + rx) * bpp, 0, rw * bpp);
+        }
+    }
+    
+    // Create a new GL texture with the modified data
+    glGenTextures(1, &g_controls_hidden_tex);
+    glBindTexture(GL_TEXTURE_2D, g_controls_hidden_tex);
+    glTexImage2D(target, level, ifmt, w, h, border, fmt, type, modified);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    
+    // Rebind the original texture (the caller expects it still bound)
+    glBindTexture(GL_TEXTURE_2D, g_controls_atlas_tex_id);
+    
+    free(modified);
+    printf("[HUD] Created controls-hidden atlas copy (id=%u) — %d control regions zeroed\n",
+           g_controls_hidden_tex, NUM_CONTROL_RECTS);
+}
 
 void bridge_gl_draw_arrays(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
@@ -2807,6 +3206,13 @@ void bridge_gl_draw_arrays(void* emu_ptr) {
     g_frame_stats.draw_calls++;
     g_frame_stats.vertices_submitted += count;
     
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.draw_arrays(mode, first, count, emu->get_memory_base());
+        return;
+    }
+#endif
+
     if (g_gl_diag_enabled && g_gl_diag_frame < 3) {
         printf("[GL F%d] glDrawArrays(mode=0x%x, first=%d, count=%d)\n", g_gl_diag_frame, mode, first, count);
         uint8_t* memory = emu->get_memory_base();
@@ -2830,6 +3236,13 @@ void bridge_gl_draw_elements(void* emu_ptr) {
     g_frame_stats.draw_calls++;
     g_frame_stats.vertices_submitted += count;
     
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.draw_elements(mode, count, type, indices_ptr, emu->get_memory_base());
+        return;
+    }
+#endif
+
     if (g_gl_diag_enabled && g_gl_diag_frame < 3) {
         printf("[GL F%d] glDrawElements(mode=0x%x, count=%d, type=0x%x, indices=@0x%x)\n", g_gl_diag_frame, mode, count, type, indices_ptr);
         uint8_t* memory = emu->get_memory_base();
@@ -2861,6 +3274,13 @@ void bridge_gl_vertex_pointer(void* emu_ptr) {
     g_gl_state.vptr_type = type;
     g_gl_state.vptr_stride = stride;
 
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.vertex_pointer(size, type, stride, ptr);
+        return;
+    }
+#endif
+
     log_vertex_sample(emu, ptr, size, type, stride, "glVertexPointer");
     if (g_display_active) {
         uint8_t* memory = emu->get_memory_base();
@@ -2884,6 +3304,13 @@ void bridge_gl_texcoord_pointer(void* emu_ptr) {
     g_gl_state.tptr_type = type;
     g_gl_state.tptr_stride = stride;
 
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.texcoord_pointer(size, type, stride, ptr);
+        return;
+    }
+#endif
+
     log_vertex_sample(emu, ptr, size, type, stride, "glTexCoordPointer");
     if (g_display_active) {
         uint8_t* memory = emu->get_memory_base();
@@ -2895,12 +3322,18 @@ void bridge_gl_texcoord_pointer(void* emu_ptr) {
 void bridge_gl_color_pointer(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.color_pointer_calls++;
+    uint32_t size = emu->get_reg(0);
+    uint32_t type = emu->get_reg(1);
+    uint32_t stride = emu->get_reg(2);
+    uint32_t ptr = emu->get_reg(3);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.color_pointer(size, type, stride, ptr);
+        return;
+    }
+#endif
     if (g_display_active) {
         uint8_t* memory = emu->get_memory_base();
-        uint32_t size = emu->get_reg(0);
-        uint32_t type = emu->get_reg(1);
-        uint32_t stride = emu->get_reg(2);
-        uint32_t ptr = emu->get_reg(3);
         GL_DIAG("glColorPointer(size=%d, type=0x%x, stride=%d, ptr=0x%x -> host=%p)", size, type, stride, ptr, (void*)(memory + ptr));
         glColorPointer(size, type, stride, (const void*)(memory + ptr));
     }
@@ -2918,6 +3351,13 @@ void bridge_gl_normal_pointer(void* emu_ptr) {
     g_gl_state.nptr_type = type;
     g_gl_state.nptr_stride = stride;
 
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.normal_pointer(type, stride, ptr);
+        return;
+    }
+#endif
+
     if (g_display_active) {
         uint8_t* memory = emu->get_memory_base();
         glNormalPointer(type, stride, (const void*)(memory + ptr));
@@ -2928,6 +3368,12 @@ void bridge_gl_enable_client_state(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
     GL_DIAG("glEnableClientState(0x%x) %s", emu->get_reg(0), emu->get_reg(0)==0x8074?"VERTEX_ARRAY":emu->get_reg(0)==0x8078?"TEXTURE_COORD_ARRAY":"OTHER");
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.enable_client_state(emu->get_reg(0));
+        return;
+    }
+#endif
     if (g_display_active) glEnableClientState(emu->get_reg(0));
 }
 
@@ -2935,6 +3381,12 @@ void bridge_gl_disable_client_state(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
     GL_DIAG("glDisableClientState(0x%x)", emu->get_reg(0));
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.disable_client_state(emu->get_reg(0));
+        return;
+    }
+#endif
     if (g_display_active) glDisableClientState(emu->get_reg(0));
 }
 
@@ -2956,7 +3408,25 @@ void bridge_gl_bind_texture(void* emu_ptr) {
     }
     GL_DIAG("glBindTexture(target=0x%x, id=%d)", target, tex_id);
     TEX_LOG("glBindTexture(target=0x%x, id=%u)", target, tex_id);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.bind_texture(target, tex_id);
+        return;
+    }
+#endif
     if (g_display_active) {
+        // Controls hiding: swap the controls atlas with our modified copy
+        // that has only the touch button regions zeroed out.
+        // Health bars, mana, coins, settings icons etc. stay visible.
+        if (g_gl_hide_hud && tex_id != 0 && g_controls_hidden_tex
+            && g_controls_atlas_tex_id != 0 && tex_id == g_controls_atlas_tex_id) {
+            glBindTexture(target, g_controls_hidden_tex);
+            if (g_gl_force_white) {
+                glEnable(GL_TEXTURE_2D);
+                glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+            }
+            return;
+        }
         glBindTexture(target, tex_id);
         if (g_gl_force_white) {
             if (tex_id == 0) {
@@ -2988,9 +3458,27 @@ void bridge_gl_tex_image_2d(void* emu_ptr) {
     uint32_t pixels_ptr = *(uint32_t*)(memory + sp + 16);
     TEX_LOG("glTexImage2D(%ux%u level=%u ifmt=0x%x fmt=0x%x type=0x%x pixels=0x%x)",
             width, height, level, internalformat, format, type, pixels_ptr);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        const void* pixels = pixels_ptr ? (const void*)(memory + pixels_ptr) : nullptr;
+        g_vk_backend.tex_image_2d(target, level, internalformat, width, height, border, format, type, pixels);
+        return;
+    }
+#endif
     if (g_display_active) {
         const void* pixels = pixels_ptr ? (const void*)(memory + pixels_ptr) : nullptr;
         glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
+        
+        // Tag the controls atlas texture and create a modified copy
+        if (width >= 512 && height >= 512 && strstr(g_last_opened_asset, "ui_game_atlas") != nullptr
+            && strstr(g_last_opened_asset, "ui_game2") == nullptr) {
+            g_controls_atlas_tex_id = g_frame_stats.last_bound_texture;
+            printf("[HUD] Tagged controls atlas: texture ID=%u (from %s, %ux%u)\n",
+                   g_controls_atlas_tex_id, g_last_opened_asset, width, height);
+            // Create the modified copy with control regions zeroed out
+            create_hidden_controls_atlas(target, level, internalformat,
+                                          width, height, border, format, type, pixels);
+        }
     }
 }
 
@@ -3010,6 +3498,13 @@ void bridge_gl_tex_sub_image_2d(void* emu_ptr) {
     uint32_t pixels_ptr = *(uint32_t*)(memory + sp + 16);
     TEX_LOG("glTexSubImage2D(%ux%u @%u,%u level=%u fmt=0x%x type=0x%x pixels=0x%x)",
             width, height, xoff, yoff, level, format, type, pixels_ptr);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        const void* pixels = pixels_ptr ? (const void*)(memory + pixels_ptr) : nullptr;
+        g_vk_backend.tex_sub_image_2d(target, level, xoff, yoff, width, height, format, type, pixels);
+        return;
+    }
+#endif
     if (g_display_active) {
         const void* pixels = pixels_ptr ? (const void*)(memory + pixels_ptr) : nullptr;
         glTexSubImage2D(target, level, xoff, yoff, width, height, format, type, pixels);
@@ -3145,6 +3640,12 @@ void bridge_gl_compressed_tex_image_2d(void* emu_ptr) {
 void bridge_gl_tex_parameteri(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.tex_parameteri(emu->get_reg(0), emu->get_reg(1), emu->get_reg(2));
+        return;
+    }
+#endif
     if (g_display_active) {
         glTexParameteri(emu->get_reg(0), emu->get_reg(1), emu->get_reg(2));
     }
@@ -3153,9 +3654,15 @@ void bridge_gl_tex_parameteri(void* emu_ptr) {
 void bridge_gl_tex_parameterf(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+    uint32_t r2 = emu->get_reg(2);
+    float val; memcpy(&val, &r2, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.tex_parameterf(emu->get_reg(0), emu->get_reg(1), val);
+        return;
+    }
+#endif
     if (g_display_active) {
-        uint32_t r2 = emu->get_reg(2);
-        float val; memcpy(&val, &r2, 4);
         glTexParameterf(emu->get_reg(0), emu->get_reg(1), val);
     }
 }
@@ -3166,6 +3673,12 @@ void bridge_gl_enable(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
     GL_DIAG("glEnable(0x%x)", emu->get_reg(0));
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.enable(emu->get_reg(0));
+        return;
+    }
+#endif
     if (g_display_active) glEnable(emu->get_reg(0));
 }
 
@@ -3173,36 +3686,66 @@ void bridge_gl_disable(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
     GL_DIAG("glDisable(0x%x)", emu->get_reg(0));
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.disable(emu->get_reg(0));
+        return;
+    }
+#endif
     if (g_display_active) glDisable(emu->get_reg(0));
 }
 
 void bridge_gl_blend_func(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.blend_func(emu->get_reg(0), emu->get_reg(1));
+        return;
+    }
+#endif
     if (g_display_active) glBlendFunc(emu->get_reg(0), emu->get_reg(1));
 }
 
 void bridge_gl_depth_func(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.depth_func(emu->get_reg(0));
+        return;
+    }
+#endif
     if (g_display_active) glDepthFunc(emu->get_reg(0));
 }
 
 void bridge_gl_depth_mask(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.depth_mask(emu->get_reg(0) != 0);
+        return;
+    }
+#endif
     if (g_display_active) glDepthMask(emu->get_reg(0));
 }
 
 void bridge_gl_color4f(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
+    uint32_t r2 = emu->get_reg(2), r3 = emu->get_reg(3);
+    float r, g, b, a;
+    memcpy(&r, &r0, 4); memcpy(&g, &r1, 4);
+    memcpy(&b, &r2, 4); memcpy(&a, &r3, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.color4f(r, g, b, a);
+        return;
+    }
+#endif
     if (g_display_active) {
-        uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
-        uint32_t r2 = emu->get_reg(2), r3 = emu->get_reg(3);
-        float r, g, b, a;
-        memcpy(&r, &r0, 4); memcpy(&g, &r1, 4);
-        memcpy(&b, &r2, 4); memcpy(&a, &r3, 4);
         GL_DIAG("glColor4f(%f, %f, %f, %f)", r, g, b, a);
         glColor4f(r, g, b, a);
     }
@@ -3211,27 +3754,51 @@ void bridge_gl_color4f(void* emu_ptr) {
 void bridge_gl_scissor(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.scissor(emu->get_reg(0), emu->get_reg(1), emu->get_reg(2), emu->get_reg(3));
+        return;
+    }
+#endif
     if (g_display_active) glScissor(emu->get_reg(0), emu->get_reg(1), emu->get_reg(2), emu->get_reg(3));
 }
 
 void bridge_gl_color_mask(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.color_mask(emu->get_reg(0) != 0, emu->get_reg(1) != 0, emu->get_reg(2) != 0, emu->get_reg(3) != 0);
+        return;
+    }
+#endif
     if (g_display_active) glColorMask(emu->get_reg(0), emu->get_reg(1), emu->get_reg(2), emu->get_reg(3));
 }
 
 void bridge_gl_pixel_storei(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.pixel_storei(emu->get_reg(0), emu->get_reg(1));
+        return;
+    }
+#endif
     if (g_display_active) glPixelStorei(emu->get_reg(0), emu->get_reg(1));
 }
 
 void bridge_gl_alpha_func(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+    uint32_t r1 = emu->get_reg(1);
+    float ref; memcpy(&ref, &r1, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.alpha_func(emu->get_reg(0), ref);
+        return;
+    }
+#endif
     if (g_display_active) {
-        uint32_t r1 = emu->get_reg(1);
-        float ref; memcpy(&ref, &r1, 4);
         glAlphaFunc(emu->get_reg(0), ref);
     }
 }
@@ -3239,15 +3806,27 @@ void bridge_gl_alpha_func(void* emu_ptr) {
 void bridge_gl_shade_model(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.shade_model(emu->get_reg(0));
+        return;
+    }
+#endif
     if (g_display_active) glShadeModel(emu->get_reg(0));
 }
 
 void bridge_gl_clear_depthf(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+    uint32_t r0 = emu->get_reg(0);
+    float d; memcpy(&d, &r0, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.clear_depthf(d);
+        return;
+    }
+#endif
     if (g_display_active) {
-        uint32_t r0 = emu->get_reg(0);
-        float d; memcpy(&d, &r0, 4);
         glClearDepth(d);
     }
 }
@@ -3255,9 +3834,15 @@ void bridge_gl_clear_depthf(void* emu_ptr) {
 void bridge_gl_line_width(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+    uint32_t r0 = emu->get_reg(0);
+    float w; memcpy(&w, &r0, 4);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.line_width(w);
+        return;
+    }
+#endif
     if (g_display_active) {
-        uint32_t r0 = emu->get_reg(0);
-        float w; memcpy(&w, &r0, 4);
         glLineWidth(w);
     }
 }
@@ -3265,7 +3850,26 @@ void bridge_gl_line_width(void* emu_ptr) {
 void bridge_gl_active_texture(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.state_changes++;
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.active_texture(emu->get_reg(0));
+        return;
+    }
+#endif
     if (g_display_active) glActiveTexture(emu->get_reg(0));
+}
+
+void bridge_gl_client_active_texture(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    g_frame_stats.state_changes++;
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.client_active_texture(emu->get_reg(0));
+        return;
+    }
+#endif
+    // On desktop GL, glClientActiveTexture is a separate function
+    if (g_display_active) glClientActiveTexture(emu->get_reg(0));
 }
 
 // --- Queries & Gen ---
@@ -3313,6 +3917,17 @@ void bridge_glGenTextures(void* emu_ptr) {
     uint32_t textures_ptr = emu->get_reg(1);
     GL_DIAG("glGenTextures(n=%d)", n);
     TEX_LOG("glGenTextures(n=%u out=0x%x)", n, textures_ptr);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        if (n > 64) n = 64;
+        uint32_t textures[64];
+        g_vk_backend.gen_textures(n, textures);
+        for (uint32_t i = 0; i < n; i++) {
+            *(uint32_t*)(memory + textures_ptr + i * 4) = textures[i];
+        }
+        return;
+    }
+#endif
     if (g_display_active) {
         // Generate real GL texture IDs
         GLuint textures[64];
@@ -3367,6 +3982,27 @@ void bridge_glGetIntegerv(void* emu_ptr) {
     }
 }
 
+void bridge_glGetFloatv(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t pname = emu->get_reg(0);
+    uint32_t params_ptr = emu->get_reg(1);
+    if (g_display_active) {
+        glGetFloatv(pname, (GLfloat*)(memory + params_ptr));
+        GLfloat* vals = (GLfloat*)(memory + params_ptr);
+        GL_DIAG("glGetFloatv(pname=0x%x) -> [%.3f, %.3f, %.3f, %.3f]", pname, vals[0], vals[1], vals[2], vals[3]);
+    } else {
+        // Return identity matrix for matrix queries, zero otherwise
+        if (pname == 0x0BA6 || pname == 0x0BA7 || pname == 0x0C56) {
+            // GL_MODELVIEW_MATRIX, GL_PROJECTION_MATRIX, GL_TEXTURE_MATRIX
+            GLfloat identity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+            memcpy(memory + params_ptr, identity, 64);
+        } else {
+            *(float*)(memory + params_ptr) = 0.0f;
+        }
+    }
+}
+
 void bridge_glGetString(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     static bool initialized = false;
@@ -3374,8 +4010,8 @@ void bridge_glGetString(void* emu_ptr) {
     if (!initialized) {
         strcpy((char*)(memory + 0x40000), "OpenGL ES 2.0 (Swordigo Desktop)");
         strcpy((char*)(memory + 0x40100), "Swordigo Desktop Emulator");
-        // Advertise ETC1 support — we decode it in software via bridge_gl_compressed_tex_image_2d
-        strcpy((char*)(memory + 0x40200), "GL_OES_texture_npot GL_OES_compressed_ETC1_RGB8_texture");
+        // Don't advertise ETC1 — forces game to use uncompressed textures (faster, no CPU decode)
+        strcpy((char*)(memory + 0x40200), "GL_OES_texture_npot");
         initialized = true;
     }
     uint32_t name = emu->get_reg(0);
@@ -3393,10 +4029,16 @@ void bridge_glGetString(void* emu_ptr) {
 
 void bridge_gl_delete_textures(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t n = emu->get_reg(0);
+    uint32_t textures_ptr = emu->get_reg(1);
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.delete_textures(n, (const uint32_t*)(memory + textures_ptr));
+        return;
+    }
+#endif
     if (g_display_active) {
-        uint8_t* memory = emu->get_memory_base();
-        uint32_t n = emu->get_reg(0);
-        uint32_t textures_ptr = emu->get_reg(1);
         glDeleteTextures(n, (const GLuint*)(memory + textures_ptr));
     }
 }
@@ -3432,10 +4074,22 @@ void bridge_gl_buffer_data(void* emu_ptr) {
 }
 
 void bridge_gl_flush(void* emu_ptr) {
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.flush();
+        return;
+    }
+#endif
     if (g_display_active) glFlush();
 }
 
 void bridge_gl_finish(void* emu_ptr) {
+#ifdef VULKAN_BACKEND
+    if (g_graphics_api == GraphicsAPI::VULKAN) {
+        g_vk_backend.finish();
+        return;
+    }
+#endif
     if (g_display_active) glFinish();
 }
 
@@ -3729,6 +4383,10 @@ void JniBridge::init_standard_bridges() {
     register_handler("ceilf", bridge_ceilf);
     register_handler("fmodf", bridge_fmodf);
     register_handler("roundf", bridge_roundf);
+    register_handler("round", bridge_round);
+    register_handler("sin", bridge_sin);
+    register_handler("cos", bridge_cos);
+    register_handler("acos", bridge_acos);
 
     register_handler("powf", bridge_powf);
     register_handler("pow", bridge_pow);
@@ -3930,7 +4588,7 @@ void JniBridge::init_standard_bridges() {
     register_handler("glStencilMask", bridge_glStencilMask);
     register_handler("glStencilOp", bridge_glStencilOp);
     register_handler("glActiveTexture", bridge_gl_active_texture);
-    register_handler("glClientActiveTexture", bridge_gl_active_texture);
+    register_handler("glClientActiveTexture", bridge_gl_client_active_texture);
     register_handler("glPixelStorei", bridge_gl_pixel_storei);
     register_handler("glVertexAttribPointer", bridge_gl_noop);
     register_handler("glEnableVertexAttribArray", bridge_gl_noop);
@@ -3950,6 +4608,7 @@ void JniBridge::init_standard_bridges() {
     register_handler("glGenBuffers", bridge_glGenBuffers);
     register_handler("glGetError", bridge_glGetError);
     register_handler("glGetIntegerv", bridge_glGetIntegerv);
+    register_handler("glGetFloatv", bridge_glGetFloatv);
     register_handler("glGetString", bridge_glGetString);
     register_handler("glAlphaFunc", bridge_gl_alpha_func);
     register_handler("glShadeModel", bridge_gl_shade_model);

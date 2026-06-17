@@ -6,6 +6,9 @@
 
 static struct AAssetManager g_mgr;
 
+// Exposed to jni_bridge.cpp so we can tag which GL texture ID corresponds to which asset
+char g_last_opened_asset[256] = {0};
+
 void asset_manager_init(const char* base_path) {
     strncpy(g_mgr.base_path, base_path, sizeof(g_mgr.base_path));
 }
@@ -16,6 +19,10 @@ AAssetManager* AAssetManager_fromJava(void* env, void* assetManager) {
 
 AAsset* AAssetManager_open(AAssetManager* mgr, const char* filename, int mode) {
     char full_path[512];
+    
+    // Track last opened filename for texture identification in jni_bridge
+    strncpy(g_last_opened_asset, filename, sizeof(g_last_opened_asset) - 1);
+    g_last_opened_asset[sizeof(g_last_opened_asset) - 1] = '\0';
     
     // If filename starts with ./, don't prepend base_path
     if (filename[0] == '.' && filename[1] == '/') {

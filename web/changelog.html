@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Changelog — Swordigo Desktop v1 Beta</title>
-  <meta name="description" content="Full changelog and release notes for Swordigo Desktop v1 Beta — the first public Linux release.">
+  <title>Changelog — Swordigo Desktop v2.0r</title>
+  <meta name="description" content="Full changelog and release notes for Swordigo Desktop — v2.0r with advanced rendering pipeline, SSAO, God Rays, and more.">
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📝</text></svg>">
   <style>
@@ -97,14 +97,16 @@
       margin-bottom: 4px;
     }
 
-    .milestone-card h4 {
+    .milestone-card h4,
+    .milestone-card__title {
       font-family: var(--font-display);
       font-size: 0.95rem;
       margin-bottom: 4px;
       color: var(--clr-text);
     }
 
-    .milestone-card p {
+    .milestone-card p,
+    .milestone-card__desc {
       font-size: 0.82rem;
       color: var(--clr-text-muted);
       line-height: 1.5;
@@ -143,7 +145,7 @@
     <h1 class="section-title"><span class="grad">Changelog</span></h1>
     <p class="section-desc">Complete release notes and development history for Swordigo Desktop.</p>
     <div class="mt-lg" style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
-      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v1_beta" target="_blank" rel="noopener"
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v2.0r" target="_blank" rel="noopener"
          class="btn btn--secondary" id="changelog-github-btn">
         View Full Commit History on GitHub →
       </a>
@@ -151,8 +153,63 @@
   </div>
 </div>
 
-<section class="section" id="v1-beta">
+<section class="section" id="releases">
   <div class="container container--narrow">
+
+    <!-- V2.0R RELEASE BLOCK -->
+    <div class="release-block reveal">
+      <div class="release-header">
+        <div>
+          <div class="release-version">v2.0r</div>
+          <div class="release-date">June 17, 2026</div>
+        </div>
+      </div>
+
+      <div class="release-section">
+        <h3 class="working">🎨 Advanced Rendering Pipeline</h3>
+        <div class="milestone-grid">
+          <div class="milestone-card"><div class="milestone-card__title">SSAO</div><div class="milestone-card__desc">Screen Space Ambient Occlusion — 16-sample hemisphere with bilateral blur at half resolution</div></div>
+          <div class="milestone-card"><div class="milestone-card__title">God Rays</div><div class="milestone-card__desc">64-sample screen-space radial blur from configurable sun position with depth masking</div></div>
+          <div class="milestone-card"><div class="milestone-card__title">Volumetric Light</div><div class="milestone-card__desc">Depth-masked crepuscular light shafts with warm golden tint</div></div>
+          <div class="milestone-card"><div class="milestone-card__title">7 Visual Presets</div><div class="milestone-card__desc">Off, Cinematic, Retro, Fantasy, Noir, Ethereal, Atmospheric — cycle with F6</div></div>
+          <div class="milestone-card"><div class="milestone-card__title">Color PostFX</div><div class="milestone-card__desc">Vignette, Film Grain, Chromatic Aberration, Color Grading, Sharpen</div></div>
+          <div class="milestone-card"><div class="milestone-card__title">Depth Texture</div><div class="milestone-card__desc">Depth buffer converted from renderbuffer to texture for shader sampling</div></div>
+        </div>
+      </div>
+
+      <div class="release-section">
+        <h3 class="working">🚀 Boot & Binary System</h3>
+        <div class="milestone-grid">
+          <div class="milestone-card"><div class="milestone-card__title">Unified Launcher</div><div class="milestone-card__desc">Pre-launch GUI with binary selection and graphics API picker</div></div>
+          <div class="milestone-card"><div class="milestone-card__title">Binary Selector</div><div class="milestone-card__desc">SHA-256 validated multi-binary support with auto-detection</div></div>
+          <div class="milestone-card"><div class="milestone-card__title">JSON Registry</div><div class="milestone-card__desc">Persistent version tracking with tested/untested status per binary</div></div>
+        </div>
+      </div>
+
+      <div class="release-section">
+        <h3 class="technical">⚡ Engine Improvements</h3>
+        <ul class="text-muted">
+          <li>5-pass rendering pipeline: SSAO → God Rays → Composite → Color FX → Upscale</li>
+          <li>Half-resolution FBOs for SSAO and God Rays (performance optimization)</li>
+          <li>8 GLSL shader programs compiled at init</li>
+          <li>GUI click detection fix (1px sidebar offset corrected)</li>
+          <li>glGetFloatv JNI bridge handler added</li>
+          <li>Dropdown menus now properly block game input (has_modal_open fix)</li>
+          <li>Vulkan backend wiring (ifdef'd, experimental)</li>
+          <li>Window title updated to "Swordigo Desktop v2.0r"</li>
+        </ul>
+      </div>
+
+      <div class="release-section">
+        <h3 class="notes">📦 Packaging</h3>
+        <ul class="text-muted">
+          <li>.deb package: swordigo-desktop_2.0.0_amd64.deb (~48 MB)</li>
+          <li>.rpm package: swordigo-desktop-2.0.0-1.fc44.x86_64.rpm (~51 MB)</li>
+          <li>Binary selector installs all libswordigo*.so variants</li>
+          <li>Makefile install target updated for multi-binary support</li>
+        </ul>
+      </div>
+    </div>
 
     <!-- V1 BETA RELEASE BLOCK -->
     <div class="release-block reveal">
@@ -160,7 +217,6 @@
         <div>
           <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:4px;">
             <span class="release-version">v1 Beta</span>
-            <span class="badge badge--working">Latest</span>
             <span class="badge badge--wip">Beta</span>
           </div>
           <div class="release-date">June 2026 • First Public Release</div>
@@ -398,16 +454,16 @@
       <div class="footer__col">
         <h5>Release</h5>
         <ul class="footer__links">
-          <li><a href="#v1-beta">v1 Beta Notes</a></li>
+          <li><a href="#releases">v2.0r Notes</a></li>
           <li><a href="#milestones">Dev Milestones</a></li>
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v1_beta" target="_blank" rel="noopener">GitHub Commits</a></li>
+          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v2.0r" target="_blank" rel="noopener">GitHub Commits</a></li>
         </ul>
       </div>
       <div class="footer__col">
         <h5>Links</h5>
         <ul class="footer__links">
           <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener">GitHub Repository</a></li>
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v1_beta/Swordigo-x86_64_v1beta.AppImage">Direct Download</a></li>
+          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2.0r/swordigo-desktop_2.0.0_amd64.deb">Direct Download</a></li>
         </ul>
       </div>
     </div>

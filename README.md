@@ -1,8 +1,8 @@
-# ⚔️ Swordigo Desktop
+# ⚔️ Swordigo Desktop v2.0r
 
 > *The classic action-adventure brought to Linux — no emulator required.*
 
-**Swordigo Desktop** is a native Linux port of the beloved 2012 mobile action-adventure platformer by Touch Foo. Instead of running through Android emulation layers, this project uses a surgical **ARM ELF loader** with **Unicorn Engine** to execute the game's original native code directly, bridging it with host-native **OpenGL**, **OpenAL**, and **SDL2** for a true desktop experience.
+**Swordigo Desktop** is a native Linux port of the beloved 2012 mobile action-adventure platformer by Touch Foo. Instead of running through Android emulation layers, this project uses a surgical **ARM ELF loader** with **Unicorn Engine** to execute the game's original native code directly, bridging it with host-native **OpenGL**, **OpenAL**, and **SDL2** for a true desktop experience. v2.0r brings a multi-pass rendering pipeline with SSAO, God Rays, and 7 visual presets.
 
 ---
 
@@ -14,21 +14,35 @@
 - Full audio: music tracks + sound effects through OpenAL
 
 ### 🖥️ Desktop-Native Experience
-- **1920×1080 internal rendering** with FBO-based scaling (Sharp Bilinear, Nearest, CRT Scanline)
+- **1920×1080 internal rendering** with FBO-based scaling (Sharp Bilinear, Nearest, CRT Scanline) + multi-pass post-processing pipeline
 - **Keyboard controls** — fully remappable via the in-game Controls Editor (F2)
 - **Gamepad support** — Xbox/PlayStation controllers with analog stick + D-pad
 - **Multi-touch support** — 10 independent touch inputs for touchscreen laptops
 - **FWKeyboard API** — direct integration with the Caver engine's native keyboard system
 
+### 🎨 Advanced Rendering Pipeline (NEW in v2.0r)
+- **Post-Processing Presets** (F6) — Cinematic, Retro, Fantasy, Noir, Ethereal, Atmospheric
+- **SSAO** — Screen Space Ambient Occlusion with 16-sample hemisphere + bilateral blur
+- **God Rays** — 64-sample radial blur from configurable sun position
+- **Volumetric Light Shafts** — Depth-masked crepuscular rays
+- **Color Effects** — Vignette, Film Grain, Chromatic Aberration, Color Grading, Sharpen
+- **Depth Buffer as Texture** — Enables all depth-based shader effects
+
 ### 🛠️ Engine Features
-- **F1** — Toggle GUI menu bar (File/Emulation/Config/Help)
+- **F1** — Toggle GUI menu bar (File/Emulation/Config/Misc/Help)
 - **F2** — Controls Editor (drag to reposition buttons)
-- **F3** — Debug overlay (FPS, draw calls, vertices, textures, timing)
+- **F3** — Debug overlay (FPS, draw calls, vertices, textures, binary info, PostFX)
 - **F4** — Cycle scaling modes (Sharp Bilinear → Nearest → CRT Scanline)
 - **F5** — Camera override toggle
+- **F6** — Cycle PostFX presets (Off → Cinematic → Retro → Fantasy → Noir → Ethereal → Atmospheric)
 - **F7** — Typing mode (keyboard → FWKeyboard events for text input)
 - **F10** — Toggle game's native on-screen controls
 - **F12** — Fullscreen toggle
+
+### 🚀 Boot & Binary Management (NEW in v2.0r)
+- **Unified Launcher GUI** — Pre-launch configuration with binary selection + graphics API picker
+- **Multi-Binary Support** — SHA-256 validated, auto-detect v1.4.6 and v1.4.12 game binaries
+- **Binary Registry** — JSON-based version tracking with tested/untested status
 
 ### 🧪 Advanced
 - Custom camera system with 6-axis control + zoom + smooth interpolation
@@ -65,12 +79,8 @@ sudo apt install libunicorn-dev libsdl2-dev libopenal-dev libgl-dev zlib1g-dev
 ### Build & Run
 ```bash
 make clean && make
-./swordigo_boot
-```
-
-### Headless Mode (no display)
-```bash
-./swordigo_headless
+./swordigo_boot          # Main build with launcher
+./swordigo_headless      # No display (testing)
 ```
 
 ---
@@ -101,6 +111,18 @@ make clean && make
 | Back / Select | Pause |
 
 All controls are fully remappable — press **F2** to open the Controls Editor and drag buttons to reposition them. Config is saved to `controls.ini`.
+
+---
+
+## 📦 v2.0r Packages
+
+| Format | Platform | Size |
+|--------|----------|------|
+| `.deb` | Debian/Ubuntu x86_64 | ~48 MB |
+| `.rpm` | Fedora/RHEL x86_64 | ~51 MB |
+| Binary | Raw executable | ~1 MB |
+
+Packages available in the `build/v2/` directory.
 
 ---
 

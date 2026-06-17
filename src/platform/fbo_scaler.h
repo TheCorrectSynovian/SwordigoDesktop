@@ -1,18 +1,7 @@
 // ============================================================
-//  SwordigoDesktop — FBO + GLSL Upscaling Renderer
-//  Renders game to a native 960×544 FBO, then scales to window
-//  using a sharp-bilinear shader (no blur, perfect pixel grid).
-//
-//  Usage (called from display.cpp):
-//    fbo_init(960, 544);          — once at startup
-//    fbo_begin_game();            — before ARM drawApp call
-//    fbo_end_game_and_blit(win_w, win_h, mode);  — after drawApp
-//    fbo_destroy();               — on shutdown
-//
-//  Upscale modes (selectable with F4 key):
-//    0 = Sharp-bilinear (default) — integer scale + gentle smooth edge
-//    1 = Nearest-neighbor         — raw pixels, maximum sharpness
-//    2 = CRT scanline             — adds scanline emulation
+//  SwordigoDesktop — FBO + GLSL Rendering Pipeline
+//  Game renders to FBO, then through optional post-processing
+//  passes (SSAO, God Rays, Color FX), then upscaled to window.
 // ============================================================
 
 #pragma once
@@ -20,22 +9,70 @@
 
 // Upscale filter modes
 enum class FBOScale : int {
-    SHARP_BILINEAR = 0,  // Best for 2.5D games
-    NEAREST        = 1,  // Raw pixels
-    CRT_SCANLINE   = 2,  // Retro CRT look
+    SHARP_BILINEAR = 0,
+    NEAREST        = 1,
+    CRT_SCANLINE   = 2,
 };
+
+// Post-processing effects state
+struct PostFXState {
+    bool enabled = false;
+    
+    // --- Tier 1: Color effects ---
+    bool vignette = false;
+    float vignette_intensity = 0.3f;
+    
+    bool film_grain = false;
+    float grain_intensity = 0.06f;
+    
+    bool chromatic_aberration = false;
+    float ca_offset = 0.002f;
+    
+    bool color_adjust = false;
+    float saturation = 1.0f;
+    float contrast = 1.0f;
+    float brightness = 0.0f;
+    float warmth = 0.0f;
+    
+    bool sharpen = false;
+    float sharpen_strength = 0.4f;
+    
+    // --- Tier 2: Advanced effects ---
+    bool god_rays = false;
+    float god_rays_intensity = 0.4f;    // 0.0-1.0
+    float god_rays_decay = 0.96f;       // per-sample falloff
+    float sun_x = 0.5f;                 // sun position in UV (0-1)
+    float sun_y = 0.85f;                // top of screen
+    
+    bool ssao = false;
+    float ssao_radius = 0.02f;          // sample radius in UV
+    float ssao_intensity = 1.2f;        // darkening strength
+    
+    bool volumetric_light = false;
+    float volumetric_intensity = 0.3f;
+    
+    // Preset name (for display)
+    const char* preset_name = "Off";
+};
+
+enum class PostFXPreset : int {
+    OFF = 0,
+    CINEMATIC,
+    RETRO,
+    FANTASY,
+    NOIR,
+    ETHEREAL,       // God rays + warm glow
+    ATMOSPHERIC,    // SSAO + volumetric + vignette
+    CUSTOM,
+    COUNT
+};
+
+void postfx_apply_preset(PostFXState& state, PostFXPreset preset);
+const char* postfx_preset_name(PostFXPreset p);
 
 bool fbo_init(int game_w, int game_h);
 void fbo_destroy();
-
-// Bind FBO so ARM GL calls render into it
 void fbo_begin_game();
-
-// Unbind FBO and blit to window using the upscaling shader
-void fbo_end_game_and_blit(int win_w, int win_h, FBOScale mode = FBOScale::SHARP_BILINEAR);
-
-// Get the FBO texture ID (for debug screenshots etc)
+void fbo_end_game_and_blit(int win_w, int win_h, FBOScale mode = FBOScale::SHARP_BILINEAR, const PostFXState* postfx = nullptr);
 unsigned int fbo_get_texture();
-
-// Returns true if FBO was successfully initialised
 bool fbo_is_active();
