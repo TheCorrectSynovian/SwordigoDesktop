@@ -3,7 +3,7 @@
 // Window-space conversion is done only at render time.
 
 #include "platform/input_config.h"
-#include <GL/gl.h>
+#include "platform/gl_inc.h"
 #include <cmath>
 #include <iostream>
 #include <fstream>

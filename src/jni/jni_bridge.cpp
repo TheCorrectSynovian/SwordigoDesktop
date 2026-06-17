@@ -12,14 +12,18 @@
 #include <unordered_set>
 #include <mutex>
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <dirent.h>
+#endif
 #include <sys/time.h>
+#include <filesystem>
+namespace fs = std::filesystem;
 #include <vorbis/vorbisfile.h>
 #include <time.h>
 #include <unistd.h>
 #include <cerrno>
 #define GL_GLEXT_PROTOTYPES
-#include <GL/gl.h>
+#include "platform/gl_inc.h"
 #include <GL/glext.h>
 #include <AL/al.h>
 #include <AL/alc.h>
@@ -1085,31 +1089,49 @@ void bridge_CallBooleanMethodV(void* emu_ptr) {
             alSourceStop(g_music_source);
             alSourcei(g_music_source, AL_BUFFER, 0);
         }
-        
         // Build music path — get_data_path handles all install locations
         // (AppImage, RPM /usr/share/swordigo/, dev ./, etc.)
-        std::string music_dir = get_data_path("assets/resources/music");
-        std::string music_base = music_dir + "/music_";
-        std::string base_path = music_base + fname;
+        extern std::string g_assets_dir;
+        std::string music_dir = get_data_path(g_assets_dir + "/resources/music");
+        // RL mod stores music at rl_assets/music/ (not resources/music/)
+        std::string music_dir_alt = get_data_path(g_assets_dir + "/music");
+        
+        // Build filename — replace dashes with underscores
+        std::string safe_fname = fname;
         size_t pos;
-        while ((pos = base_path.find('-')) != std::string::npos) {
-            base_path.replace(pos, 1, "_");
+        while ((pos = safe_fname.find('-')) != std::string::npos) {
+            safe_fname.replace(pos, 1, "_");
         }
         
-        // Try OGG first (10x smaller), fall back to WAV
-        std::string ogg_path = base_path + ".ogg";
-        std::string wav_path = base_path + ".wav";
+        // Try OGG: prefixed (vanilla), plain (RL in resources/music), alt dir (RL in music/)
+        std::string ogg_prefixed = music_dir + "/music_" + safe_fname + ".ogg";
+        std::string ogg_plain    = music_dir + "/" + safe_fname + ".ogg";
+        std::string ogg_alt      = music_dir_alt + "/" + safe_fname + ".ogg";
+        std::string ogg_alt_pre  = music_dir_alt + "/music_" + safe_fname + ".ogg";
+        std::string wav_prefixed = music_dir + "/music_" + safe_fname + ".wav";
         
-        std::cout << "  -> Trying OGG: " << ogg_path << std::endl;
+        std::cout << "  -> Trying OGG: " << ogg_prefixed << std::endl;
         
         if (g_music_buffer == 0) {
             alGenBuffers(1, &g_music_buffer);
         }
         
-        bool loaded = load_ogg_to_buffer(ogg_path, g_music_buffer);
+        bool loaded = load_ogg_to_buffer(ogg_prefixed, g_music_buffer);
         if (!loaded) {
-            std::cout << "  -> OGG not found, trying WAV: " << wav_path << std::endl;
-            loaded = load_wav_to_buffer(wav_path, g_music_buffer);
+            std::cout << "  -> Trying OGG (no prefix): " << ogg_plain << std::endl;
+            loaded = load_ogg_to_buffer(ogg_plain, g_music_buffer);
+        }
+        if (!loaded) {
+            std::cout << "  -> Trying OGG (alt dir): " << ogg_alt << std::endl;
+            loaded = load_ogg_to_buffer(ogg_alt, g_music_buffer);
+        }
+        if (!loaded) {
+            std::cout << "  -> Trying OGG (alt dir prefixed): " << ogg_alt_pre << std::endl;
+            loaded = load_ogg_to_buffer(ogg_alt_pre, g_music_buffer);
+        }
+        if (!loaded) {
+            std::cout << "  -> Trying WAV: " << wav_prefixed << std::endl;
+            loaded = load_wav_to_buffer(wav_prefixed, g_music_buffer);
         }
         if (loaded) {
             if (g_music_source == 0) {
@@ -1120,7 +1142,7 @@ void bridge_CallBooleanMethodV(void* emu_ptr) {
             alSourcef(g_music_source, AL_GAIN, g_music_volume);
             res = 1;
         } else {
-            std::cerr << "  ⚠ Failed to load music (tried .ogg and .wav): " << base_path << std::endl;
+            std::cerr << "  ⚠ Failed to load music: " << safe_fname << std::endl;
             res = 0;
         }
     } else {
@@ -2022,8 +2044,14 @@ void bridge_stat(void* emu_ptr) {
     uint32_t stat_buf_ptr = emu->get_reg(1);
     const char* path = (const char*)(memory + path_ptr);
     
+#ifdef _WIN32
+    struct __stat64 st;
+    int result = _stat64(path, &st);
+#else
     struct stat st;
     int result = stat(path, &st);
+#endif
+
     if (result == 0 && stat_buf_ptr != 0) {
         // Android Bionic ARM32 struct stat layout (exactly 104 bytes)
         *(uint64_t*)(memory + stat_buf_ptr + 0) = st.st_dev;     // st_dev (8 bytes)
@@ -2037,6 +2065,17 @@ void bridge_stat(void* emu_ptr) {
         *(uint32_t*)(memory + stat_buf_ptr + 40) = 0;            // __pad3 (4 bytes)
         *(uint32_t*)(memory + stat_buf_ptr + 44) = 0;            // padding before st_size (4 bytes)
         *(uint64_t*)(memory + stat_buf_ptr + 48) = st.st_size;   // st_size (8-byte aligned, 8 bytes)
+#ifdef _WIN32
+        *(uint32_t*)(memory + stat_buf_ptr + 56) = 4096;         // st_blksize (4 bytes)
+        *(uint32_t*)(memory + stat_buf_ptr + 60) = 0;            // padding before st_blocks (4 bytes)
+        *(uint64_t*)(memory + stat_buf_ptr + 64) = (st.st_size + 511) / 512; // st_blocks (8-byte aligned, 8 bytes)
+        *(uint32_t*)(memory + stat_buf_ptr + 72) = (uint32_t)st.st_atime;
+        *(uint32_t*)(memory + stat_buf_ptr + 76) = 0;
+        *(uint32_t*)(memory + stat_buf_ptr + 80) = (uint32_t)st.st_mtime;
+        *(uint32_t*)(memory + stat_buf_ptr + 84) = 0;
+        *(uint32_t*)(memory + stat_buf_ptr + 88) = (uint32_t)st.st_ctime;
+        *(uint32_t*)(memory + stat_buf_ptr + 92) = 0;
+#else
         *(uint32_t*)(memory + stat_buf_ptr + 56) = st.st_blksize;// st_blksize (4 bytes)
         *(uint32_t*)(memory + stat_buf_ptr + 60) = 0;            // padding before st_blocks (4 bytes)
         *(uint64_t*)(memory + stat_buf_ptr + 64) = st.st_blocks; // st_blocks (8-byte aligned, 8 bytes)
@@ -2046,6 +2085,7 @@ void bridge_stat(void* emu_ptr) {
         *(uint32_t*)(memory + stat_buf_ptr + 84) = st.st_mtim.tv_nsec;
         *(uint32_t*)(memory + stat_buf_ptr + 88) = st.st_ctim.tv_sec;
         *(uint32_t*)(memory + stat_buf_ptr + 92) = st.st_ctim.tv_nsec;
+#endif
         *(uint64_t*)(memory + stat_buf_ptr + 96) = st.st_ino;    // st_ino (8-byte aligned, 8 bytes)
     }
     
@@ -2058,7 +2098,8 @@ void bridge_stat(void* emu_ptr) {
 }
 
 struct GuestDir {
-    DIR* host_dir;
+    std::vector<std::pair<std::string, uint8_t>> entries;
+    size_t index = 0;
     uint32_t guest_dirent_addr;
 };
 
@@ -2077,16 +2118,23 @@ void bridge_opendir(void* emu_ptr) {
         std::cout << "[File] opendir(\"" << path << "\")" << std::endl;
     }
     
-    DIR* d = opendir(path);
-    if (!d) {
+    if (!fs::exists(path) || !fs::is_directory(path)) {
         emu->set_reg(0, 0); // null
         return;
     }
     
     GuestDir* gd = new GuestDir();
-    gd->host_dir = d;
     gd->guest_dirent_addr = g_guest_heap_ptr;
     g_guest_heap_ptr += (280 + 7) & ~7; // allocate 280 bytes in guest heap for dirent struct
+    
+    for (const auto& entry : fs::directory_iterator(path)) {
+        std::string name = entry.path().filename().string();
+        uint8_t type = 8; // DT_REG default
+        if (entry.is_directory()) {
+            type = 4; // DT_DIR
+        }
+        gd->entries.push_back({name, type});
+    }
     
     uint32_t handle = g_next_handle++;
     g_handle_to_ptr[handle] = gd;
@@ -2105,18 +2153,18 @@ void bridge_readdir(void* emu_ptr) {
     }
     
     GuestDir* gd = (GuestDir*)g_handle_to_ptr[handle];
-    struct dirent* de = readdir(gd->host_dir);
-    if (!de) {
+    if (gd->index >= gd->entries.size()) {
         emu->set_reg(0, 0); // null
         return;
     }
     
+    const auto& de = gd->entries[gd->index++];
     uint32_t addr = gd->guest_dirent_addr;
-    *(uint64_t*)(memory + addr + 0) = de->d_ino;
-    *(uint64_t*)(memory + addr + 8) = de->d_off;
-    *(uint16_t*)(memory + addr + 16) = de->d_reclen;
-    *(uint8_t*)(memory + addr + 18) = de->d_type;
-    std::strncpy((char*)(memory + addr + 19), de->d_name, 256);
+    *(uint64_t*)(memory + addr + 0) = gd->index; // dummy inode
+    *(uint64_t*)(memory + addr + 8) = gd->index; // dummy offset
+    *(uint16_t*)(memory + addr + 16) = 280;      // reclen
+    *(uint8_t*)(memory + addr + 18) = de.second;  // type
+    std::strncpy((char*)(memory + addr + 19), de.first.c_str(), 256);
     
     emu->set_reg(0, addr);
 }
@@ -2131,12 +2179,10 @@ void bridge_closedir(void* emu_ptr) {
     }
     
     GuestDir* gd = (GuestDir*)g_handle_to_ptr[handle];
-    int res = closedir(gd->host_dir);
-    
     delete gd;
     g_handle_to_ptr.erase(handle);
     
-    emu->set_reg(0, res);
+    emu->set_reg(0, 0);
 }
 
 // --- printf / logging ---

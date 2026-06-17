@@ -1,6 +1,6 @@
 #define GL_GLEXT_PROTOTYPES
 #include "fbo_scaler.h"
-#include <GL/gl.h>
+#include "platform/gl_inc.h"
 #include <GL/glext.h>
 #include <iostream>
 #include <cstring>

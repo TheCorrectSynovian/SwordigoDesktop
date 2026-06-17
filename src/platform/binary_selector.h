@@ -19,6 +19,9 @@ struct BinaryInfo {
     BinaryStatus status;
     size_t file_size;           // bytes
     bool is_default;
+    std::string game_type;      // "Swordigo" or "RLSwordigo"
+    std::string assets_dir;     // "assets" or "rl_assets"
+    std::vector<std::string> dependencies;  // extra .so files needed (e.g. rl_libmini.so)
 };
 
 // Manages binary detection, hashing, and selection
@@ -26,8 +29,11 @@ class BinarySelector {
 public:
     BinarySelector();
 
-    // Scan a directory for libswordigo*.so files
+    // Scan a directory for libswordigo*.so and rl_libswordigo*.so files
     void scan_directory(const std::string& dir_path);
+
+    // Scan a directory specifically for rl_*.so mod binaries
+    void scan_rl_directory(const std::string& dir_path);
 
     // Load/save the binary registry JSON
     void load_registry(const std::string& json_path);

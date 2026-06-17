@@ -2,9 +2,11 @@
 // Borderless SDL2 + OpenGL window: Graphics API + Binary selection
 
 #include "platform/launcher.h"
+#include "platform/data_path.h"
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
 #define GL_GLEXT_PROTOTYPES
-#include <GL/gl.h>
+#include "platform/gl_inc.h"
 #include <iostream>
 #include <cstring>
 #include <cstdio>
@@ -164,6 +166,63 @@ static bool hit(int mx, int my, float x, float y, float w, float h) {
     return mx >= (int)x && mx < (int)(x+w) && my >= (int)y && my < (int)(y+h);
 }
 
+// Load a PNG file as an OpenGL texture. Returns texture ID (0 on failure).
+static GLuint load_texture(const char* path) {
+    SDL_Surface* surf = IMG_Load(path);
+    if (!surf) {
+        std::cerr << "[Launcher] Cannot load texture: " << path << std::endl;
+        return 0;
+    }
+    // Convert to RGBA
+    SDL_Surface* rgba = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ABGR8888, 0);
+    SDL_FreeSurface(surf);
+    if (!rgba) return 0;
+
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba->w, rgba->h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, rgba->pixels);
+    SDL_FreeSurface(rgba);
+    std::cout << "[Launcher] Loaded texture: " << path << " -> " << tex << std::endl;
+    return tex;
+}
+
+// Draw a textured quad (full texture, tinted white)
+static void texquad(GLuint tex, float x, float y, float w, float h, uint8_t a = 255) {
+    if (!tex) return;
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glColor4ub(255, 255, 255, a);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 1); glVertex2f(x,   y);
+    glTexCoord2f(1, 1); glVertex2f(x+w, y);
+    glTexCoord2f(1, 0); glVertex2f(x+w, y+h);
+    glTexCoord2f(0, 0); glVertex2f(x,   y+h);
+    glEnd();
+    glDisable(GL_TEXTURE_2D);
+}
+
+// Draw a sub-region of a texture atlas as a stretched quad
+static void texquad_region(GLuint tex, float x, float y, float w, float h,
+                           float u0, float v0, float u1, float v1, uint8_t a = 255) {
+    if (!tex) return;
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glColor4ub(255, 255, 255, a);
+    glBegin(GL_QUADS);
+    glTexCoord2f(u0, v1); glVertex2f(x,   y);
+    glTexCoord2f(u1, v1); glVertex2f(x+w, y);
+    glTexCoord2f(u1, v0); glVertex2f(x+w, y+h);
+    glTexCoord2f(u0, v0); glVertex2f(x,   y+h);
+    glEnd();
+    glDisable(GL_TEXTURE_2D);
+}
+
 } // namespace lgfx
 
 // ============================================================================
@@ -185,10 +244,10 @@ LaunchConfig show_launcher(BinarySelector& selector) {
         if (bins[i].is_default) bin_sel = (int)i;
     }
 
-    // Window size — 50% bigger than original 600x420
-    const int WIN_W = 900;
-    int bin_section_h = has_bins ? (int)(bins.size() * 65 + 50) : 0;
-    const int WIN_H = 630 + bin_section_h;
+    // Window size — enlarged for Minecraft-style launcher feel
+    const int WIN_W = 1100;
+    int bin_section_h = has_bins ? (int)(bins.size() * 80 + 60) : 0;
+    const int WIN_H = 700 + bin_section_h;
 
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         std::cerr << "[Launcher] SDL_Init failed: " << SDL_GetError() << std::endl;
@@ -212,18 +271,28 @@ LaunchConfig show_launcher(BinarySelector& selector) {
     if (!ctx) { SDL_DestroyWindow(win); return cfg; }
     SDL_GL_SetSwapInterval(1);
 
+    // Load launcher textures from src/assets/ (game assets repurposed for UI)
+    IMG_Init(IMG_INIT_PNG);
+    std::string assets_base = get_data_path("src/assets");
+    GLuint tex_bg       = load_texture((assets_base + "/launcher_bg.png").c_str());
+    GLuint tex_ui_atlas = load_texture((assets_base + "/ui_atlas.png").c_str());
+    GLuint tex_panel    = load_texture((assets_base + "/ui_panel.png").c_str());
+    GLuint tex_button   = load_texture((assets_base + "/ui_button_wide.png").c_str());
+    GLuint tex_bar      = load_texture((assets_base + "/ui_bar.png").c_str());
+    GLuint tex_grove    = load_texture((assets_base + "/grove_bg.png").c_str());
+
     // State
     bool running = true;
     int api_sel = 0; // 0=OpenGL, 1=Vulkan
     int mouse_x = 0, mouse_y = 0;
     bool dragging = false;
 
-    // Auto-launch timer (8s countdown if bins > 1)
+    // Auto-launch disabled per user request
     auto start_time = std::chrono::steady_clock::now();
-    const int AUTO_LAUNCH_SEC = has_bins ? 10 : 0;
+    const int AUTO_LAUNCH_SEC = 0;
 
     // Layout
-    const float PAD = 32.0f;
+    const float PAD = 40.0f;
     const float W = (float)WIN_W;
     const float H = (float)WIN_H;
 
@@ -251,30 +320,32 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                         start_time = std::chrono::steady_clock::now(); // Reset countdown on click
 
                         // Close button (top-right)
-                        if (hit(mouse_x, mouse_y, W - 44, H - 44, 36, 36)) {
+                        if (hit(mouse_x, mouse_y, W - 50, H - 50, 40, 40)) {
                             cfg.should_launch = false;
                             running = false;
                             break;
                         }
 
                         // --- Graphics API radio buttons ---
-                        float gfx_base = H - 200.0f;
+                        float gfx_base = H - 245.0f;
                         float opt_w = W - PAD * 2 - 20.0f;
                         // OpenGL option
-                        if (hit(mouse_x, mouse_y, PAD + 10, gfx_base - 5, opt_w, 62)) {
+                        if (hit(mouse_x, mouse_y, PAD + 10, gfx_base - 5, opt_w, 72)) {
                             api_sel = 0; break;
                         }
                         // Vulkan option
-                        if (hit(mouse_x, mouse_y, PAD + 10, gfx_base - 80, opt_w, 62)) {
+                        if (hit(mouse_x, mouse_y, PAD + 10, gfx_base - 90 - 5, opt_w, 72)) {
                             api_sel = 1; break;
                         }
 
                         // --- Binary list clicks ---
                         if (has_bins) {
-                            float bin_base = gfx_base - 80 - 62 - 50;
+                            float oy2 = gfx_base - 90;
+                            float sep2_y = oy2 - 95;
+                            float bin_top = sep2_y - 20;
                             for (size_t i = 0; i < bins.size(); i++) {
-                                float ey = bin_base - (float)i * 65.0f;
-                                if (hit(mouse_x, mouse_y, PAD + 10, ey - 5, opt_w, 58)) {
+                                float ey = bin_top - (float)i * 80.0f;
+                                if (hit(mouse_x, mouse_y, PAD + 10, ey - 5, opt_w, 72)) {
                                     bin_sel = (int)i;
                                     break;
                                 }
@@ -282,13 +353,16 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                         }
 
                         // --- Launch button ---
-                        float btn_w = 260.0f, btn_h = 56.0f;
+                        float btn_w = 320.0f, btn_h = 64.0f;
                         float btn_x = (W - btn_w) / 2.0f;
                         float btn_y = 40.0f;
                         if (hit(mouse_x, mouse_y, btn_x, btn_y, btn_w, btn_h)) {
                             cfg.graphics_api = (api_sel == 0) ? GraphicsAPI::OPENGL : GraphicsAPI::VULKAN;
-                            if (has_bins && bin_sel >= 0 && bin_sel < (int)bins.size())
+                            if (has_bins && bin_sel >= 0 && bin_sel < (int)bins.size()) {
                                 cfg.selected_binary = bins[bin_sel].filename;
+                                cfg.assets_dir = bins[bin_sel].assets_dir;
+                                cfg.game_type = bins[bin_sel].game_type;
+                            }
                             cfg.should_launch = true;
                             running = false;
                             break;
@@ -308,8 +382,11 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                     }
                     if (ev.key.keysym.sym == SDLK_RETURN || ev.key.keysym.sym == SDLK_KP_ENTER) {
                         cfg.graphics_api = (api_sel == 0) ? GraphicsAPI::OPENGL : GraphicsAPI::VULKAN;
-                        if (has_bins && bin_sel >= 0 && bin_sel < (int)bins.size())
+                        if (has_bins && bin_sel >= 0 && bin_sel < (int)bins.size()) {
                             cfg.selected_binary = bins[bin_sel].filename;
+                            cfg.assets_dir = bins[bin_sel].assets_dir;
+                            cfg.game_type = bins[bin_sel].game_type;
+                        }
                         cfg.should_launch = true; running = false;
                     }
                     if (has_bins) {
@@ -332,8 +409,11 @@ LaunchConfig show_launcher(BinarySelector& selector) {
             secs_left = AUTO_LAUNCH_SEC - (int)std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
             if (secs_left <= 0) {
                 cfg.graphics_api = (api_sel == 0) ? GraphicsAPI::OPENGL : GraphicsAPI::VULKAN;
-                if (has_bins && bin_sel >= 0 && bin_sel < (int)bins.size())
+                if (has_bins && bin_sel >= 0 && bin_sel < (int)bins.size()) {
                     cfg.selected_binary = bins[bin_sel].filename;
+                    cfg.assets_dir = bins[bin_sel].assets_dir;
+                    cfg.game_type = bins[bin_sel].game_type;
+                }
                 cfg.should_launch = true;
                 running = false;
             }
@@ -349,165 +429,193 @@ LaunchConfig show_launcher(BinarySelector& selector) {
         glDisable(GL_TEXTURE_2D); glDisable(GL_DEPTH_TEST); glDisable(GL_LIGHTING);
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-        glClearColor(0.06f, 0.07f, 0.11f, 1.0f);
+        glClearColor(0.04f, 0.05f, 0.08f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
+
+        // ── Starry sky background (from game's menu_back texture) ──
+        texquad(tex_bg, 0, 0, W, H);
 
         // ── Outer border glow ──
         border(0, 0, W, H, 2.0f, 70, 130, 230, 180);
         border(1, 1, W-2, H-2, 1.0f, 35, 65, 115, 80);
 
-        // ── Top bar (drag area) ──
-        rect(0, H - 50, W, 50, 12, 14, 22, 255);
-        rect(0, H - 52, W, 2, 70, 130, 230, 100);
-        text("Swordigo", 18, H - 36, 1.8f, 70, 130, 230, 255);
-        text("Launcher", 18 + tw("Swordigo ", 1.8f), H - 36, 1.8f, 120, 120, 140, 180);
+        // ── Top bar: game's brown bar texture ──
+        texquad(tex_bar, 0, H - 56, W, 56, 220);
+        rect(0, H - 56, W, 56, 10, 12, 20, 160); // dark overlay
+        rect(0, H - 58, W, 2, 70, 130, 230, 100);
+        text("Swordigo", 22, H - 40, 2.5f, 70, 130, 230, 255);
+        text("Desktop Launcher", 22 + tw("Swordigo ", 2.5f), H - 40, 2.5f, 100, 100, 120, 180);
 
         // Close [X]
-        float cx_x = W - 44, cx_y = H - 44;
-        bool cx_h = hit(mouse_x, mouse_y, cx_x, cx_y, 36, 36);
-        rect(cx_x, cx_y, 36, 36, cx_h ? (uint8_t)180 : (uint8_t)60, 30, 30, cx_h ? (uint8_t)255 : (uint8_t)160);
-        text("X", cx_x + 12, cx_y + 10, 1.8f, 255, 255, 255, 255);
+        float cx_x = W - 50, cx_y = H - 50;
+        bool cx_h = hit(mouse_x, mouse_y, cx_x, cx_y, 40, 40);
+        rect(cx_x, cx_y, 40, 40, cx_h ? (uint8_t)180 : (uint8_t)60, 30, 30, cx_h ? (uint8_t)255 : (uint8_t)160);
+        text("X", cx_x + 14, cx_y + 12, 2.0f, 255, 255, 255, 255);
 
-        // ── Title ──
-        float ty = H - 105;
-        text("SWORDIGO", 50, ty, 4.0f, 70, 130, 230, 255);
-        text("v2.0r - Release", 54, ty - 30, 1.5f, 120, 120, 140, 180);
+        // ── Title with game panel backdrop ──
+        float ty = H - 120;
+        // Game UI panel behind title
+        texquad(tex_panel, 30, ty - 50, W - 60, 100, 180);
+        rect(30, ty - 50, W - 60, 100, 8, 10, 18, 120); // dark overlay for readability
+        text("SWORDIGO", 60, ty, 5.0f, 90, 165, 255, 255);
+        text("DESKTOP", 60 + tw("SWORDIGO ", 5.0f), ty, 5.0f, 60, 110, 200, 180);
+        text("v2.0r - Release Build", 64, ty - 36, 1.8f, 140, 140, 160, 200);
 
         // Separator
-        rect(PAD, ty - 48, W - PAD*2, 1, 70, 130, 230, 60);
+        rect(PAD, ty - 56, W - PAD*2, 1, 70, 130, 230, 60);
 
-        // ── GRAPHICS API section ──
-        float gfx_label_y = H - 195;
-        text("GRAPHICS API", PAD + 6, gfx_label_y, 1.6f, 160, 190, 255, 220);
+        // ── GRAPHICS API section (panel backdrop) ──
+        float gfx_label_y = H - 215;
+        texquad(tex_panel, PAD - 5, gfx_label_y - 180, W - PAD*2 + 10, 200, 60);
+        text("GRAPHICS API", PAD + 6, gfx_label_y, 2.0f, 160, 190, 255, 220);
 
         float opt_w = W - PAD * 2 - 20;
-        float gfx_base = H - 220;
+        float gfx_base = H - 245;
 
         // Option 1: OpenGL
         float oy1 = gfx_base;
-        bool h1 = hit(mouse_x, mouse_y, PAD+10, oy1 - 5, opt_w, 62);
-        rect(PAD+10, oy1-5, opt_w, 62,
+        bool h1 = hit(mouse_x, mouse_y, PAD+10, oy1 - 5, opt_w, 72);
+        rect(PAD+10, oy1-5, opt_w, 72,
              api_sel==0 ? (uint8_t)28 : (h1 ? (uint8_t)22 : (uint8_t)18),
              api_sel==0 ? (uint8_t)32 : (h1 ? (uint8_t)25 : (uint8_t)20),
              api_sel==0 ? (uint8_t)52 : (h1 ? (uint8_t)40 : (uint8_t)30), 240);
-        if (api_sel==0) border(PAD+10, oy1-5, opt_w, 62, 1.5f, 70, 130, 230, 200);
-        else if (h1) border(PAD+10, oy1-5, opt_w, 62, 1.0f, 50, 50, 70, 100);
+        if (api_sel==0) border(PAD+10, oy1-5, opt_w, 72, 1.5f, 70, 130, 230, 200);
+        else if (h1) border(PAD+10, oy1-5, opt_w, 72, 1.0f, 50, 50, 70, 100);
 
-        float rx = PAD + 28, ry = oy1 + 18;
-        border(rx, ry, 16, 16, 1.5f, api_sel==0 ? (uint8_t)70 : (uint8_t)70, api_sel==0 ? (uint8_t)130 : (uint8_t)70, api_sel==0 ? (uint8_t)230 : (uint8_t)90, 200);
-        if (api_sel==0) rect(rx+4, ry+4, 8, 8, 70, 130, 230, 255);
-        text("OpenGL", rx+30, oy1+32, 1.8f, 210, 210, 225, 255);
-        text("(Default)", rx+30+tw("OpenGL ",1.8f), oy1+32, 1.4f, 80, 200, 120, 200);
-        text("Stable - Recommended for most systems", rx+30, oy1+6, 1.2f, 110, 110, 130, 170);
+        float rx = PAD + 30, ry = oy1 + 22;
+        border(rx, ry, 18, 18, 1.5f, api_sel==0 ? (uint8_t)70 : (uint8_t)70, api_sel==0 ? (uint8_t)130 : (uint8_t)70, api_sel==0 ? (uint8_t)230 : (uint8_t)90, 200);
+        if (api_sel==0) rect(rx+4, ry+4, 10, 10, 70, 130, 230, 255);
+        text("OpenGL", rx+32, oy1+38, 2.2f, 210, 210, 225, 255);
+        text("(Default)", rx+32+tw("OpenGL ",2.2f), oy1+40, 1.8f, 80, 200, 120, 200);
+        text("Stable - Recommended for most systems", rx+32, oy1+8, 1.5f, 110, 110, 130, 170);
 
         // Option 2: Vulkan
-        float oy2 = gfx_base - 80;
-        bool h2 = hit(mouse_x, mouse_y, PAD+10, oy2 - 5, opt_w, 62);
-        rect(PAD+10, oy2-5, opt_w, 62,
+        float oy2 = gfx_base - 90;
+        bool h2 = hit(mouse_x, mouse_y, PAD+10, oy2 - 5, opt_w, 72);
+        rect(PAD+10, oy2-5, opt_w, 72,
              api_sel==1 ? (uint8_t)28 : (h2 ? (uint8_t)22 : (uint8_t)18),
              api_sel==1 ? (uint8_t)28 : (h2 ? (uint8_t)22 : (uint8_t)18),
              api_sel==1 ? (uint8_t)48 : (h2 ? (uint8_t)38 : (uint8_t)28), 240);
-        if (api_sel==1) border(PAD+10, oy2-5, opt_w, 62, 1.5f, 130, 90, 255, 200);
-        else if (h2) border(PAD+10, oy2-5, opt_w, 62, 1.0f, 50, 50, 70, 100);
+        if (api_sel==1) border(PAD+10, oy2-5, opt_w, 72, 1.5f, 130, 90, 255, 200);
+        else if (h2) border(PAD+10, oy2-5, opt_w, 72, 1.0f, 50, 50, 70, 100);
 
-        float rx2 = PAD + 28, ry2 = oy2 + 18;
-        border(rx2, ry2, 16, 16, 1.5f, api_sel==1 ? (uint8_t)130 : (uint8_t)70, api_sel==1 ? (uint8_t)90 : (uint8_t)70, api_sel==1 ? (uint8_t)255 : (uint8_t)90, 200);
-        if (api_sel==1) rect(rx2+4, ry2+4, 8, 8, 130, 90, 255, 255);
-        text("Vulkan", rx2+30, oy2+32, 1.8f, 210, 210, 225, 255);
-        text("(WIP)", rx2+30+tw("Vulkan ",1.8f), oy2+32, 1.4f, 255, 180, 60, 200);
-        text("Experimental - Better performance potential", rx2+30, oy2+6, 1.2f, 110, 110, 130, 170);
+        float rx2 = PAD + 30, ry2 = oy2 + 22;
+        border(rx2, ry2, 18, 18, 1.5f, api_sel==1 ? (uint8_t)130 : (uint8_t)70, api_sel==1 ? (uint8_t)90 : (uint8_t)70, api_sel==1 ? (uint8_t)255 : (uint8_t)90, 200);
+        if (api_sel==1) rect(rx2+4, ry2+4, 10, 10, 130, 90, 255, 255);
+        text("Vulkan", rx2+32, oy2+38, 2.2f, 210, 210, 225, 255);
+        text("(WIP)", rx2+32+tw("Vulkan ",2.2f), oy2+40, 1.8f, 255, 180, 60, 200);
+        text("Experimental - Better performance potential", rx2+32, oy2+8, 1.5f, 110, 110, 130, 170);
 
-        // ── BINARY SELECTION section (only if >1 binary) ──
+        // ── INSTALLED INSTANCES section ──
         if (has_bins) {
-            float sep2_y = oy2 - 80;
-            rect(PAD, sep2_y + 20, W - PAD*2, 1, 70, 130, 230, 60);
+            float sep2_y = oy2 - 95;
+            // Panel backdrop for instance list
+            float bin_panel_h = (float)bins.size() * 80.0f + 60.0f;
+            texquad(tex_panel, PAD - 5, sep2_y - bin_panel_h + 25, W - PAD*2 + 10, bin_panel_h + 20, 50);
+            rect(PAD, sep2_y + 25, W - PAD*2, 1, 70, 130, 230, 60);
 
-            text("GAME BINARY", PAD + 6, sep2_y + 5, 1.6f, 160, 190, 255, 220);
+            text("INSTALLED INSTANCES", PAD + 6, sep2_y + 5, 2.4f, 160, 190, 255, 240);
 
-            if (AUTO_LAUNCH_SEC > 0 && secs_left > 0) {
-                char cdown[64];
-                snprintf(cdown, 64, "Auto-launching in %ds...", secs_left);
-                text(cdown, W - PAD - tw(cdown, 1.1f), sep2_y + 8, 1.1f, 150, 150, 170, 180);
-            }
-
-            float bin_top = sep2_y - 15;
+            float bin_top = sep2_y - 20;
             for (size_t i = 0; i < bins.size(); i++) {
                 const auto& b = bins[i];
                 bool sel = ((int)i == bin_sel);
-                float ey = bin_top - (float)i * 65.0f;
-                bool ehov = hit(mouse_x, mouse_y, PAD+10, ey - 5, opt_w, 58);
+                float ey = bin_top - (float)i * 80.0f;
+                bool ehov = hit(mouse_x, mouse_y, PAD+10, ey - 5, opt_w, 72);
 
-                // Entry bg
-                rect(PAD+10, ey-5, opt_w, 58,
-                     sel ? (uint8_t)35 : (ehov ? (uint8_t)22 : (uint8_t)16),
-                     sel ? (uint8_t)42 : (ehov ? (uint8_t)25 : (uint8_t)18),
-                     sel ? (uint8_t)68 : (ehov ? (uint8_t)38 : (uint8_t)28), 240);
+                // Entry bg — orange tint for RL, blue for vanilla
+                bool is_rl = (b.game_type == "RLSwordigo");
+                rect(PAD+10, ey-5, opt_w, 72,
+                     sel ? (is_rl ? (uint8_t)40 : (uint8_t)35) : (ehov ? (uint8_t)22 : (uint8_t)16),
+                     sel ? (is_rl ? (uint8_t)32 : (uint8_t)42) : (ehov ? (uint8_t)25 : (uint8_t)18),
+                     sel ? (is_rl ? (uint8_t)25 : (uint8_t)68) : (ehov ? (uint8_t)38 : (uint8_t)28), 240);
                 if (sel) {
-                    border(PAD+10, ey-5, opt_w, 58, 1.5f, 70, 130, 230, 180);
-                    // Selection bar
-                    rect(PAD+10, ey-5, 3, 58, 70, 180, 255, 255);
+                    uint8_t bdr = is_rl ? (uint8_t)230 : (uint8_t)70;
+                    uint8_t bdg = is_rl ? (uint8_t)140 : (uint8_t)130;
+                    uint8_t bdb = is_rl ? (uint8_t)50 : (uint8_t)230;
+                    border(PAD+10, ey-5, opt_w, 72, 2.0f, bdr, bdg, bdb, 200);
+                    rect(PAD+10, ey-5, 5, 72, bdr, bdg, bdb, 255);
                 }
 
-                // Radio
-                float brx = PAD + 28, bry = ey + 15;
-                border(brx, bry, 14, 14, 1.5f, sel ? (uint8_t)70 : (uint8_t)60, sel ? (uint8_t)180 : (uint8_t)60, sel ? (uint8_t)255 : (uint8_t)80, 200);
-                if (sel) rect(brx+3, bry+3, 8, 8, 70, 180, 255, 255);
+                // > Arrow selector (game-style) instead of radio button
+                float arrow_x = PAD + 20;
+                if (sel) {
+                    text(">", arrow_x, ey + 22, 3.0f,
+                         is_rl ? (uint8_t)255 : (uint8_t)100,
+                         is_rl ? (uint8_t)180 : (uint8_t)200,
+                         is_rl ? (uint8_t)50 : (uint8_t)255, 255);
+                } else if (ehov) {
+                    text(">", arrow_x, ey + 22, 2.5f, 120, 120, 140, 120);
+                }
 
-                // Filename
-                text(b.filename.c_str(), brx + 28, ey + 32, 1.5f, 220, 220, 240, 255);
+                // Game type badge + Filename
+                float name_x = PAD + 52;
+                if (is_rl) {
+                    rect(name_x, ey + 48, tw("[RL MOD]", 1.6f) + 10, 20, 230, 120, 30, 220);
+                    text("[RL MOD]", name_x + 5, ey + 50, 1.6f, 255, 255, 255, 255);
+                    name_x += tw("[RL MOD]", 1.6f) + 18;
+                }
+                text(b.filename.c_str(), name_x, ey + 46, 2.2f, 230, 230, 250, 255);
 
                 // Default badge
                 if (b.is_default) {
-                    float badge_x = brx + 28 + tw(b.filename.c_str(), 1.5f) + 12;
-                    text("[DEFAULT]", badge_x, ey + 34, 1.0f, 70, 200, 130, 220);
+                    float badge_x = name_x + tw(b.filename.c_str(), 2.2f) + 14;
+                    rect(badge_x, ey + 50, tw("DEFAULT", 1.3f) + 10, 16, 50, 160, 90, 200);
+                    text("DEFAULT", badge_x + 5, ey + 51, 1.3f, 220, 255, 220, 255);
                 }
 
                 // Detail line: version | status | size
-                char detail[128];
+                char detail[192];
                 const char* st = (b.status == BinaryStatus::TESTED) ? "STABLE" :
                                  (b.status == BinaryStatus::TESTING) ? "TESTING" : "UNKNOWN";
-                snprintf(detail, 128, "%s  |  %s  |  %.1f MB",
-                         b.label.c_str(), st, (float)b.file_size / 1048576.0f);
-                uint8_t dr = (b.status == BinaryStatus::TESTED) ? (uint8_t)100 : (b.status == BinaryStatus::TESTING) ? (uint8_t)255 : (uint8_t)160;
-                uint8_t dg = (b.status == BinaryStatus::TESTED) ? (uint8_t)220 : (b.status == BinaryStatus::TESTING) ? (uint8_t)200 : (uint8_t)160;
-                uint8_t db = (b.status == BinaryStatus::TESTED) ? (uint8_t)140 : (b.status == BinaryStatus::TESTING) ? (uint8_t)80 : (uint8_t)180;
-                text(detail, brx + 28, ey + 10, 1.1f, dr, dg, db, 200);
+                snprintf(detail, 192, "%s  |  %s  |  %.1f MB  |  %s",
+                         b.label.c_str(), st, (float)b.file_size / 1048576.0f, b.game_type.c_str());
+                uint8_t dr = (b.status == BinaryStatus::TESTED) ? (uint8_t)110 : (b.status == BinaryStatus::TESTING) ? (uint8_t)255 : (uint8_t)160;
+                uint8_t dg = (b.status == BinaryStatus::TESTED) ? (uint8_t)230 : (b.status == BinaryStatus::TESTING) ? (uint8_t)200 : (uint8_t)160;
+                uint8_t db = (b.status == BinaryStatus::TESTED) ? (uint8_t)150 : (b.status == BinaryStatus::TESTING) ? (uint8_t)80 : (uint8_t)180;
+                text(detail, PAD + 52, ey + 22, 1.5f, dr, dg, db, 210);
 
-                // SHA preview
+                // SHA256 (full hash, smaller)
                 if (!b.sha256.empty()) {
-                    std::string sha = "SHA256: " + b.sha256.substr(0, 20) + "...";
-                    text(sha.c_str(), brx + 28, ey - 5, 0.95f, 80, 80, 100, 140);
+                    std::string sha = "SHA: " + b.sha256;
+                    text(sha.c_str(), PAD + 52, ey + 2, 1.2f, 80, 80, 100, 140);
                 }
             }
         }
 
         // ── Separator above button ──
-        rect(PAD, 108, W - PAD*2, 1, 40, 40, 55, 80);
+        rect(PAD, 120, W - PAD*2, 1, 40, 40, 55, 80);
 
-        // ── LAUNCH button ──
-        float btn_w = 260, btn_h = 56;
+        // ── LAUNCH button (game's brown button texture) ──
+        float btn_w = 320, btn_h = 64;
         float btn_x = (W - btn_w) / 2.0f;
         float btn_y = 40;
         bool btn_h_ = hit(mouse_x, mouse_y, btn_x, btn_y, btn_w, btn_h);
 
-        rect(btn_x, btn_y, btn_w, btn_h,
-             btn_h_ ? (uint8_t)90 : (uint8_t)70,
-             btn_h_ ? (uint8_t)160 : (uint8_t)130,
-             btn_h_ ? (uint8_t)255 : (uint8_t)230,
-             btn_h_ ? (uint8_t)255 : (uint8_t)220);
-        rect(btn_x, btn_y + btn_h - 2, btn_w, 2, 255, 255, 255, btn_h_ ? (uint8_t)50 : (uint8_t)25);
-        text("LAUNCH", btn_x + (btn_w - tw("LAUNCH", 2.5f))/2, btn_y + 17, 2.5f, 255, 255, 255, 255);
+        texquad(tex_button, btn_x, btn_y, btn_w, btn_h, btn_h_ ? (uint8_t)255 : (uint8_t)200);
+        if (btn_h_) {
+            rect(btn_x, btn_y, btn_w, btn_h, 70, 130, 230, 40); // blue hover tint
+        }
+        border(btn_x, btn_y, btn_w, btn_h, 1.5f, 70, 130, 230, btn_h_ ? (uint8_t)200 : (uint8_t)100);
+        text("LAUNCH", btn_x + (btn_w - tw("LAUNCH", 3.0f))/2, btn_y + 20, 3.0f, 255, 255, 255, 255);
 
-        // ── Footer ──
-        text("v2.0r - Release", PAD, 14, 1.1f, 50, 50, 65, 140);
-        const char* hint = "ESC cancel  |  ENTER launch  |  TAB toggle API";
-        text(hint, W - PAD - tw(hint, 1.0f), 14, 1.0f, 50, 50, 65, 140);
+        // ── Footer bar (game's brown bar) ──
+        texquad(tex_bar, 0, 0, W, 36, 140);
+        rect(0, 0, W, 36, 8, 10, 16, 140); // dark overlay
+        text("v2.0r - Release", PAD, 12, 1.4f, 60, 60, 80, 160);
+        const char* hint = "ESC cancel  |  ENTER launch  |  TAB toggle API  |  UP/DOWN select";
+        text(hint, W - PAD - tw(hint, 1.2f), 14, 1.2f, 60, 60, 80, 160);
 
         SDL_GL_SwapWindow(win);
         SDL_Delay(16);
     }
 
-    // Cleanup
+    // Cleanup textures
+    GLuint textures[] = {tex_bg, tex_ui_atlas, tex_panel, tex_button, tex_bar, tex_grove};
+    glDeleteTextures(6, textures);
+    IMG_Quit();
+
+    // Cleanup SDL
     SDL_GL_DeleteContext(ctx);
     SDL_DestroyWindow(win);
 

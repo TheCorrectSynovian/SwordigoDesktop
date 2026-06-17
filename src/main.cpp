@@ -1,7 +1,14 @@
+#ifndef _WIN32
 #include <unistd.h>
+#else
+#include <process.h>
+#include <windows.h>
+#endif
 #include <iostream>
 #include <vector>
 #include <stdint.h>
+#include <filesystem>
+namespace fs = std::filesystem;
 #include "loader/elf_loader.h"
 #include "jni/jni_layer.h"
 #include "jni/jni_bridge.h"
@@ -14,7 +21,7 @@
 #include <cstring>
 #include <chrono>
 #define GL_GLEXT_PROTOTYPES
-#include <GL/gl.h>
+#include "platform/gl_inc.h"
 #include <GL/glext.h>
 #include <sys/stat.h>
 
@@ -40,7 +47,8 @@ static const int GAME_H = 1080;
 static const float TOUCH_SCALE_X = (float)GAME_W / 960.0f;
 
 // Which game binary to load (switchable via --test-lib flag)
-static std::string g_lib_name = "libswordigo.so";
+static std::string g_lib_name = "libswordigo_nx.so";
+std::string g_assets_dir = "assets";  // "assets" for vanilla, "rl_assets" for RLSwordigo
 static const float TOUCH_SCALE_Y = (float)GAME_H / 544.0f;   // ~1.985
 
 // Add a specific area for guest-side global variables (libc stuff)
@@ -189,7 +197,7 @@ void init_all() {
     g_guest_memory = new uint8_t[GUEST_MEM_SIZE];
     g_loader = new ElfLoader(g_guest_memory, GUEST_MEM_SIZE);
     g_bridge.init_standard_bridges();
-    asset_manager_init(get_data_path("assets").c_str());
+    asset_manager_init(get_data_path(g_assets_dir).c_str());
     g_gui.init();
     g_input_config.load(g_save_dir + "/controls.ini");
     std::cout << "[Input] Loaded controls config (" << g_input_config.button_count() << " buttons)" << std::endl;
@@ -616,18 +624,26 @@ void load_and_boot() {
                     std::vector<char*> args;
                     for (int i = 0; i < g_saved_argc; i++) {
                         std::string a = g_saved_argv[i];
-                        // Skip old --lib and its value
-                        if (a == "--lib" && i + 1 < g_saved_argc) { i++; continue; }
+                        // Skip old --lib/--assets and their values
+                        if ((a == "--lib" || a == "--assets") && i + 1 < g_saved_argc) { i++; continue; }
                         arg_strs.push_back(a);
                     }
                     arg_strs.push_back("--lib");
                     arg_strs.push_back(g_lib_name);
+                    arg_strs.push_back("--assets");
+                    arg_strs.push_back(g_assets_dir);
                     for (auto& s : arg_strs) args.push_back(&s[0]);
                     args.push_back(nullptr);
+#ifdef _WIN32
+                    char exe_path[MAX_PATH];
+                    GetModuleFileNameA(NULL, exe_path, MAX_PATH);
+                    _spawnv(_P_NOWAIT, exe_path, args.data());
+#else
                     execv("/proc/self/exe", args.data());
+#endif
                     
-                    // If execv fails, just exit
-                    std::cerr << "[Fix] execv failed, please restart manually." << std::endl;
+                    // If restart fails, just exit
+                    std::cerr << "[Fix] Restart failed, please start manually." << std::endl;
                     exit(1);
                 }
             }
@@ -1406,26 +1422,33 @@ int main(int argc, char* argv[]) {
         if (strcmp(argv[i], "--vulkan") == 0) g_graphics_api = GraphicsAPI::VULKAN;
 #endif
         if (strcmp(argv[i], "--test-lib") == 0) {
-            g_lib_name = "libswordigo_test.so";
-            std::cout << "[Main] TEST MODE: Using libswordigo_test.so" << std::endl;
+            g_lib_name = "libswordigo_nx.so";
+            std::cout << "[Main] Using libswordigo_nx.so" << std::endl;
         }
         if (strcmp(argv[i], "--lib") == 0 && i + 1 < argc) {
             g_lib_name = argv[++i];
             std::cout << "[Main] Custom lib: " << g_lib_name << std::endl;
         }
+        if (strcmp(argv[i], "--assets") == 0 && i + 1 < argc) {
+            g_assets_dir = argv[++i];
+            std::cout << "[Main] Custom assets: " << g_assets_dir << std::endl;
+        }
     }
     
-    // Set up user-writable directory paths (XDG Base Directory standard)
+    // Set up user-writable directory paths
+#ifdef _WIN32
+    std::string appdata = getenv("LOCALAPPDATA") ? getenv("LOCALAPPDATA") : ".";
+    std::string base_dir = appdata + "/swordigo-desktop";
+#else
     std::string home_dir = getenv("HOME") ? getenv("HOME") : ".";
     std::string xdg_data = getenv("XDG_DATA_HOME") ? getenv("XDG_DATA_HOME") : (home_dir + "/.local/share");
     std::string base_dir = xdg_data + "/swordigo-desktop";
-    mkdir(xdg_data.c_str(), 0755);
-    mkdir(base_dir.c_str(), 0755);
-    
+#endif
+
+    fs::create_directories(base_dir + "/save");
+    fs::create_directories(base_dir + "/cache");
     g_save_dir = base_dir + "/save";
     g_cache_dir = base_dir + "/cache";
-    mkdir(g_save_dir.c_str(), 0755);
-    mkdir(g_cache_dir.c_str(), 0755);
     std::cout << "[Main] Save directory: " << g_save_dir << std::endl;
     std::cout << "[Main] Cache directory: " << g_cache_dir << std::endl;
     
@@ -1447,12 +1470,13 @@ int main(int argc, char* argv[]) {
     if (!headless) {
         bool skip_launcher = false;
         for (int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "--vulkan") == 0 || strcmp(argv[i], "--no-launcher") == 0) {
+            if (strcmp(argv[i], "--vulkan") == 0 || strcmp(argv[i], "--no-launcher") == 0 ||
+                strcmp(argv[i], "--lib") == 0) {
                 skip_launcher = true;
                 break;
             }
         }
-        if (!skip_launcher && g_lib_name == "libswordigo.so") {
+        if (!skip_launcher) {
             LaunchConfig lconf = show_launcher(g_binary_selector);
             if (!lconf.should_launch) {
                 std::cout << "[Main] Launch cancelled by user" << std::endl;
@@ -1460,10 +1484,12 @@ int main(int argc, char* argv[]) {
             }
             g_graphics_api = lconf.graphics_api;
             g_lib_name = lconf.selected_binary;
+            g_assets_dir = lconf.assets_dir;
             g_binary_selector.set_loaded(g_lib_name);
             std::cout << "[Main] Launcher: " 
                       << (g_graphics_api == GraphicsAPI::VULKAN ? "Vulkan" : "OpenGL")
-                      << " | Binary: " << g_lib_name << std::endl;
+                      << " | Binary: " << g_lib_name
+                      << " | Assets: " << g_assets_dir << std::endl;
         }
     }
 

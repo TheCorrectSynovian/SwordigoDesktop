@@ -3,11 +3,12 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
-#include <dirent.h>
-#include <sys/stat.h>
+#include <filesystem>
 #include <cstring>
 #include <iomanip>
 #include <algorithm>
+
+namespace fs = std::filesystem;
 
 // ============================================================================
 // Minimal SHA-256 implementation (no OpenSSL dependency)
@@ -99,54 +100,72 @@ std::string BinarySelector::compute_sha256(const std::string& filepath) {
 // ============================================================================
 
 const std::map<std::string, std::pair<std::string, BinaryStatus>> BinarySelector::KNOWN_HASHES = {
+    // Vanilla
     {"cee15dd2730746269ce5db97d150371ebbad1f41371c6a728f1bb7d045632138",
         {"1.4.6", BinaryStatus::TESTED}},
     {"08d49dd6f7f8639a4c59f290ff2bb79254accf710f530bf53c2fce1659191c9e",
-        {"1.4.12", BinaryStatus::TESTING}},
+        {"NX", BinaryStatus::TESTED}},
+    {"5ae524abc08d4a1c8304d5faa8d55340bea1b191c5dcb0e68b35faeeae011368",
+        {"1.4.6-patched", BinaryStatus::TESTING}},
+    // RLSwordigo
+    {"a7c00ff6f3ed0d5b3221158d6e214bba03288c1e6782be3dc2c736ae80eb19df",
+        {"6.1-rl", BinaryStatus::TESTED}},
 };
 
 // ============================================================================
 // Constructor
 // ============================================================================
 
-BinarySelector::BinarySelector() : default_binary("libswordigo.so") {}
+BinarySelector::BinarySelector() : default_binary("libswordigo_nx.so") {}
 
 // ============================================================================
-// Scan directory for libswordigo*.so files
+// Scan directory for libswordigo*.so and rl_libswordigo*.so files
 // ============================================================================
 
 void BinarySelector::scan_directory(const std::string& dir_path) {
     binaries.clear();
 
-    DIR* dir = opendir(dir_path.c_str());
-    if (!dir) {
+    if (!fs::exists(dir_path) || !fs::is_directory(dir_path)) {
         std::cerr << "[BinSel] Cannot open directory: " << dir_path << std::endl;
         return;
     }
 
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        std::string name = entry->d_name;
-        // Match libswordigo*.so (but not .so.1 etc.)
-        if (name.find("libswordigo") == 0 && name.length() > 3 &&
+    for (const auto& entry : fs::directory_iterator(dir_path)) {
+        if (!entry.is_regular_file()) continue;
+
+        std::string name = entry.path().filename().string();
+
+        // Determine if this is a vanilla or RL binary
+        bool is_vanilla = (name.find("libswordigo") == 0);
+        bool is_rl = (name.find("rl_libswordigo") == 0);
+
+        // Match libswordigo*.so or rl_libswordigo*.so (but not .so.1 etc.)
+        if ((is_vanilla || is_rl) && name.length() > 3 &&
             name.substr(name.length() - 3) == ".so") {
 
-            std::string full_path = dir_path;
-            if (!full_path.empty() && full_path.back() != '/') full_path += "/";
-            full_path += name;
+            // Skip RL dependency .so files — they're not selectable game binaries
+            if (name == "rl_libmini.so" || name == "rl_libGlossHook.so") continue;
+
+            std::string full_path = entry.path().string();
 
             // Skip arm64 binary (we only support arm32)
             if (name.find("64") != std::string::npos) continue;
-            // Skip patched binaries unless they're explicitly named
-            // Actually include everything — let the user decide
-
-            struct stat st;
-            if (stat(full_path.c_str(), &st) != 0) continue;
 
             BinaryInfo info;
             info.filename = name;
-            info.file_size = st.st_size;
+            info.file_size = fs::file_size(entry.path());
             info.is_default = (name == default_binary);
+
+            // Set game type, assets directory, and dependencies
+            if (is_rl) {
+                info.game_type = "RLSwordigo";
+                info.assets_dir = "rl_assets";
+                info.dependencies = {"rl_libmini.so", "rl_libGlossHook.so"};
+            } else {
+                info.game_type = "Swordigo";
+                info.assets_dir = "assets";
+                info.dependencies = {};
+            }
 
             // Compute hash
             std::cout << "[BinSel] Hashing " << name << "..." << std::flush;
@@ -167,11 +186,11 @@ void BinarySelector::scan_directory(const std::string& dir_path) {
             const char* status_str = (info.status == BinaryStatus::TESTED) ? "Stable" :
                                      (info.status == BinaryStatus::TESTING) ? "Testing" : "Unknown";
             info.label = "v" + info.version + " (" + status_str + ")";
+            if (is_rl) info.label = "[RL] " + info.label;
 
             binaries.push_back(info);
         }
     }
-    closedir(dir);
 
     // Sort: default first, then tested, then testing, then unknown
     std::sort(binaries.begin(), binaries.end(), [](const BinaryInfo& a, const BinaryInfo& b) {
@@ -181,6 +200,81 @@ void BinarySelector::scan_directory(const std::string& dir_path) {
     });
 
     std::cout << "[BinSel] Found " << binaries.size() << " game binaries" << std::endl;
+}
+
+// ============================================================================
+// Scan directory specifically for rl_*.so mod binaries
+// ============================================================================
+
+void BinarySelector::scan_rl_directory(const std::string& dir_path) {
+    if (!fs::exists(dir_path) || !fs::is_directory(dir_path)) {
+        std::cerr << "[BinSel] Cannot open RL directory: " << dir_path << std::endl;
+        return;
+    }
+
+    for (const auto& entry : fs::directory_iterator(dir_path)) {
+        if (!entry.is_regular_file()) continue;
+
+        std::string name = entry.path().filename().string();
+
+        // Only match rl_libswordigo*.so
+        if (name.find("rl_libswordigo") != 0) continue;
+        if (name.length() <= 3 || name.substr(name.length() - 3) != ".so") continue;
+
+        // Skip RL dependency .so files
+        if (name == "rl_libmini.so" || name == "rl_libGlossHook.so") continue;
+
+        std::string full_path = entry.path().string();
+
+        // Skip arm64 binary (we only support arm32)
+        if (name.find("64") != std::string::npos) continue;
+
+        // Check if already present (from a prior scan_directory call)
+        bool already_found = false;
+        for (const auto& b : binaries) {
+            if (b.filename == name) { already_found = true; break; }
+        }
+        if (already_found) continue;
+
+        BinaryInfo info;
+        info.filename = name;
+        info.file_size = fs::file_size(entry.path());
+        info.is_default = (name == default_binary);
+        info.game_type = "RLSwordigo";
+        info.assets_dir = "rl_assets";
+        info.dependencies = {"rl_libmini.so", "rl_libGlossHook.so"};
+
+        // Compute hash
+        std::cout << "[BinSel] Hashing RL binary " << name << "..." << std::flush;
+        info.sha256 = compute_sha256(full_path);
+        std::cout << " " << info.sha256.substr(0, 16) << "..." << std::endl;
+
+        // Look up in known hashes
+        auto it = KNOWN_HASHES.find(info.sha256);
+        if (it != KNOWN_HASHES.end()) {
+            info.version = it->second.first;
+            info.status = it->second.second;
+        } else {
+            info.version = "Unknown";
+            info.status = BinaryStatus::UNKNOWN;
+        }
+
+        // Build label
+        const char* status_str = (info.status == BinaryStatus::TESTED) ? "Stable" :
+                                 (info.status == BinaryStatus::TESTING) ? "Testing" : "Unknown";
+        info.label = "[RL] v" + info.version + " (" + status_str + ")";
+
+        binaries.push_back(info);
+    }
+
+    // Re-sort after adding RL binaries
+    std::sort(binaries.begin(), binaries.end(), [](const BinaryInfo& a, const BinaryInfo& b) {
+        if (a.is_default != b.is_default) return a.is_default;
+        if (a.status != b.status) return (int)a.status < (int)b.status;
+        return a.filename < b.filename;
+    });
+
+    std::cout << "[BinSel] Total binaries after RL scan: " << binaries.size() << std::endl;
 }
 
 // ============================================================================

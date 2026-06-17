@@ -1,6 +1,10 @@
 #include "loader/elf_loader.h"
 #include <iostream>
 #include <vector>
+#include <string>
+
+// Globals needed by jni_bridge (normally in main.cpp)
+std::string g_assets_dir = "assets";
 
 int main() {
     uint32_t guest_size = 0x10000000; // 256MB

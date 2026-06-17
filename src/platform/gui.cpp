@@ -1,5 +1,5 @@
 #include "platform/gui.h"
-#include <GL/gl.h>
+#include "platform/gl_inc.h"
 #include <iostream>
 #include <cstring>
 #include <cstdio>

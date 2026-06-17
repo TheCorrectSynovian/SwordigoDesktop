@@ -18,6 +18,10 @@ struct AAsset {
 typedef struct AAssetManager AAssetManager;
 typedef struct AAsset AAsset;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Simplified AAssetManager APIs
 AAssetManager* AAssetManager_fromJava(void* env, void* assetManager);
 AAsset* AAssetManager_open(AAssetManager* mgr, const char* filename, int mode);
@@ -28,5 +32,9 @@ int AAsset_openFileDescriptor(AAsset* asset, off_t* outStart, off_t* outLength);
 
 // Internal setup
 void asset_manager_init(const char* base_path);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

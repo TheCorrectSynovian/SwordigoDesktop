@@ -1,7 +1,7 @@
 #include "platform/display.h"
 #include "platform/data_path.h"
 #include <iostream>
-#include <GL/gl.h>
+#include "platform/gl_inc.h"
 #include <SDL2/SDL_image.h>
 
 Display::Display() {}

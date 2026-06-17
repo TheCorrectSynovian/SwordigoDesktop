@@ -46,6 +46,10 @@ libswordigo.so
 libswordigo_patched.so
 libswordigo64.so
 libswordigo*.so
+rl_libswordigo.so
+rl_libmini.so
+rl_libGlossHook.so
+rl_*.so
 
 # -------- TRACES / SYMBOLS --------
 symbols_*.txt
@@ -62,6 +66,7 @@ reference/**
 # -------- EXTRACTED GAME ASSETS --------
 # Commercial game assets extracted from the APK
 assets/resources/
+rl_assets/
 assets/dexopt/
 dexopt/
 *.wav

@@ -15,7 +15,15 @@ typedef enum android_LogPriority {
     ANDROID_LOG_SILENT,
 } android_LogPriority;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int __android_log_print(int prio, const char *tag, const char *fmt, ...);
 int __android_log_vprint(int prio, const char *tag, const char *fmt, va_list ap);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
