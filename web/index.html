@@ -3,54 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Swordigo Desktop — Linux Native Port | Swordigo Runtime Environment v2.0r</title>
-  <meta name="description" content="Swordigo Desktop is a Linux-native port of the classic action-adventure game, powered by the Swordigo Runtime Environment (SRE) — a custom ARM compatibility runtime with SSAO, God Rays, and 7 visual presets.">
-  <meta name="keywords" content="Swordigo, Linux, desktop port, ARM emulation, SRE, Swordigo Runtime Environment, game preservation, Caver engine, Unicorn Engine, open source, action adventure, mobile game port">
-  <meta name="author" content="QuantumCreeper Labs">
-  <meta name="robots" content="index, follow">
-  <link rel="canonical" href="https://thecorrectsynovian.github.io/SwordigoDesktop/web/index.html">
-
-  <!-- Open Graph -->
-  <meta property="og:title" content="Swordigo Desktop — Swordigo Runtime Environment v2.0r">
-  <meta property="og:description" content="Play Swordigo natively on Linux. Powered by the SRE — custom ARM runtime, OpenGL desktop renderer, advanced PostFX pipeline. No Android required.">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="https://thecorrectsynovian.github.io/SwordigoDesktop/web/index.html">
-  <meta property="og:image" content="https://thecorrectsynovian.github.io/SwordigoDesktop/web/assets/og-image.png">
-  <meta property="og:site_name" content="Swordigo Desktop — SRE">
-
-  <!-- Twitter / X Card -->
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Swordigo Desktop — SRE v2.0r">
-  <meta name="twitter:description" content="The classic action-adventure running natively on Linux via the Swordigo Runtime Environment.">
-  <meta name="twitter:image" content="https://thecorrectsynovian.github.io/SwordigoDesktop/web/assets/og-image.png">
-
-  <!-- JSON-LD Structured Data -->
-  <script type="application/ld+json">
-  {
-    "@context": "https://schema.org",
-    "@type": "SoftwareApplication",
-    "name": "Swordigo Desktop",
-    "alternateName": "Swordigo Runtime Environment",
-    "applicationCategory": "GameApplication",
-    "operatingSystem": "Linux",
-    "softwareVersion": "2.0r",
-    "description": "A Linux-native port of the classic mobile action-adventure game Swordigo, powered by the Swordigo Runtime Environment (SRE) — a custom ARM compatibility runtime.",
-    "offers": {
-      "@type": "Offer",
-      "price": "0",
-      "priceCurrency": "USD"
-    },
-    "author": {
-      "@type": "Organization",
-      "name": "QuantumCreeper Labs",
-      "url": "https://github.com/TheCorrectSynovian"
-    },
-    "downloadUrl": "https://github.com/TheCorrectSynovian/SwordigoDesktop/releases",
-    "screenshot": "https://thecorrectsynovian.github.io/SwordigoDesktop/web/assets/hero.png",
-    "license": "https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/LICENSE"
-  }
-  </script>
-
+  <title>Swordigo Desktop — Linux Native Port</title>
+  <meta name="description" content="Swordigo Desktop is a Linux-native port of the classic action-adventure game, powered by the Swordigo Runtime Environment (SRE).">
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚔️</text></svg>">
 </head>
@@ -58,614 +12,85 @@
 
 <canvas id="stars-canvas"></canvas>
 
-<!-- ===================== NAVBAR ===================== -->
-<nav class="navbar" id="navbar">
+<nav class="navbar">
   <div class="container">
     <div class="navbar__inner">
       <a href="index.html" class="navbar__logo">
-        <span class="navbar__logo-icon">⚔️</span>
-        <div class="navbar__logo-text"><span>Swordigo</span> Desktop</div>
+        <span>⚔️</span> Swordigo Desktop
       </a>
-
-      <ul class="navbar__nav" id="main-nav">
-        <li><a href="index.html">Home</a></li>
+      <ul class="navbar__nav">
+        <li><a href="index.html" class="active">Home</a></li>
         <li><a href="download.html">Download</a></li>
         <li><a href="technical.html">Technical</a></li>
         <li><a href="research.html">Research</a></li>
         <li><a href="changelog.html">Changelog</a></li>
       </ul>
-
-      <div class="navbar__cta" id="nav-cta">
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener" class="btn btn--secondary btn--sm" aria-label="View on GitHub">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" role="img" aria-label="GitHub"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
-          GitHub
-        </a>
-        <a href="download.html" class="btn btn--primary btn--sm">⬇ Download</a>
+      <div class="navbar__cta">
+        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" class="btn btn--secondary btn--sm">GitHub</a>
+        <a href="download.html" class="btn btn--primary btn--sm">Download</a>
       </div>
-
-      <button class="hamburger" id="hamburger" aria-label="Toggle menu">
-        <span></span><span></span><span></span>
-      </button>
     </div>
   </div>
 </nav>
 
 <main>
-
-<!-- ===================== HERO ===================== -->
-<section class="hero" id="hero">
-  <div class="hero__bg"></div>
-
-  <div class="container">
-    <div class="hero__content">
-      <div class="hero__badge">
-        <span class="hero__badge-dot"></span>
-        v2.0r — Swordigo Runtime Environment
-      </div>
-
-      <h1 class="hero__title" style="display: none;">
-        <span class="grad">Swordigo</span><br>
-        Desktop<span class="hero__version">SRE v2.0r</span>
-      </h1>
-
-      <p class="hero__desc" style="font-family: var(--font-mono); font-size: 0.95rem; color: var(--clr-text-muted); border-left: 2px solid var(--clr-teal); padding-left: var(--space-md); margin-top: var(--space-lg);">
-        // Native Linux port of Touch Foo's classic action-platformer.
-        // Emulated CPU: Unicorn Engine ARMv7-A
-        // Renderer: Native desktop OpenGL & SSAO/Volumetric FX.
+  <section class="hero">
+    <div class="container">
+      <h1 class="hero__title">Swordigo <span class="grad">Desktop</span></h1>
+      <p class="hero__subtitle">
+        A professional Linux-native port of the classic action-adventure. 
+        Powered by the <strong>Swordigo Runtime Environment (SRE)</strong> — a high-performance ARM compatibility layer.
       </p>
-
-      <div class="hero__actions" style="margin-top: var(--space-lg);">
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop_2.0.0_amd64.deb"
-           class="btn btn--primary btn--lg" id="hero-download-btn">
-          ⬇ Download .deb
-        </a>
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop-2.0.0-1.fc44.x86_64.rpm"
-           class="btn btn--secondary btn--lg" id="hero-download-rpm-btn">
-          ⬇ Download .rpm
-        </a>
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener"
-           class="btn btn--outline btn--lg" id="hero-github-btn">
-          GitHub Repository
-        </a>
-      </div>
-
-      <div class="hero__stats" style="margin-top: var(--space-xl); border-top: 1px dashed var(--clr-border2); padding-top: var(--space-md);">
-        <div class="hero__stat">
-          <span class="hero__stat-num" data-counter="62141206">0</span>
-          <span class="hero__stat-label">ARM Instructions Executed</span>
-        </div>
-        <div class="hero__stat">
-          <span class="hero__stat-num" data-counter="254">0</span>
-          <span class="hero__stat-label">SRE Bridge Symbols</span>
-        </div>
-        <div class="hero__stat">
-          <span class="hero__stat-num" data-counter="30">0</span>
-          <span class="hero__stat-label">Research Documents</span>
-        </div>
+      <div class="navbar__cta" style="justify-content: center;">
+        <a href="download.html" class="btn btn--primary">Get Started</a>
+        <a href="technical.html" class="btn btn--secondary">Read the Docs</a>
       </div>
     </div>
-  </div>
+  </section>
 
-  <div class="scroll-indicator">
-    <span style="font-family: var(--font-retro); font-size: 0.6rem;">Scroll</span>
-    <span class="scroll-arrow">↓</span>
-  </div>
-</section>
-
-<!-- ===================== DOCUMENTATION CONTAINER ===================== -->
-<div class="container">
-  <div class="doc-layout">
-    <!-- Sidebar navigation -->
-    <aside class="doc-sidebar reveal">
-      <div class="doc-sidebar__title">SRE Reference Manual</div>
-      <ul>
-        <li><a href="#status" class="active">Release Status</a></li>
-        <li><a href="#features">Capabilities</a></li>
-        <li><a href="#architecture">Architecture</a></li>
-        <li><a href="#controls">Key Bindings</a></li>
-        <li><a href="#credits">Team &amp; Credits</a></li>
-        <li><a href="#notes">Release Notes</a></li>
-      </ul>
-    </aside>
-
-    <!-- Main documentation content -->
-    <div class="doc-main">
-
-<!-- ===================== STATUS OVERVIEW ===================== -->
-<section class="section" id="status" style="border-radius: var(--radius-md); border: 1px solid var(--clr-border); padding: var(--space-lg); margin-bottom: var(--space-lg);">
-  <div class="container">
-    <div class="section-header reveal">
-      <span class="section-label">Release Status</span>
-      <h2 class="section-title">What's <span class="grad">Working</span></h2>
-      <p class="section-desc">Swordigo Desktop v2.0r is fully playable with an advanced rendering pipeline. Here's the current state of the SRE.</p>
-    </div>
-
-    <div class="grid grid--3" style="margin-bottom: var(--space-xl);">
-      <div class="card reveal" style="transition-delay:0.0s">
-        <span class="card__icon">🎮</span>
-        <div class="card__title">Core Gameplay</div>
-        <ul class="feature-list mt-sm">
-          <li class="check">Full game loop — explore, fight, defeat bosses</li>
-          <li class="check">Save system with persistent progress</li>
-          <li class="check">In-game level rendering</li>
-          <li class="check">Asset &amp; scene loading</li>
-          <li class="check">Lua scripting engine</li>
-        </ul>
+  <section class="container" style="padding: var(--space-12) 0;">
+    <div class="grid grid--3">
+      <div class="card reveal">
+        <div class="card__icon">⚙️</div>
+        <h3 class="card__title">SRE Core</h3>
+        <p class="card__desc">Custom ARMv7 emulator bridge with zero-overhead syscall translation and native GLES mapping.</p>
       </div>
-
-      <div class="card reveal" style="transition-delay:0.1s">
-        <span class="card__icon">🖥️</span>
-        <div class="card__title">Desktop Experience</div>
-        <ul class="feature-list mt-sm">
-          <li class="check">Keyboard &amp; gamepad controls</li>
-          <li class="check">SRE PostFX pipeline (SSAO, God Rays, 7 presets)</li>
-          <li class="check">1920×1080 FBO-based scaling</li>
-          <li class="check">Sound effects (OpenAL)</li>
-          <li class="check">SDL2 windowing + fullscreen</li>
-        </ul>
+      <div class="card reveal">
+        <div class="card__icon">🎨</div>
+        <h3 class="card__title">Enhanced Visuals</h3>
+        <p class="card__desc">Integrated PostFX pipeline featuring SSAO, God Rays, and high-fidelity texture filtering.</p>
       </div>
-
-      <div class="card reveal" style="transition-delay:0.2s">
-        <span class="card__icon">⚠️</span>
-        <div class="card__title">Known Issues</div>
-        <ul class="feature-list mt-sm">
-          <li class="warn">Background music unreliable</li>
-          <li class="warn">Music worse in AppImage build</li>
-          <li class="warn">Minor graphical artifacts</li>
-          <li class="warn">Some Android stubs partial</li>
-          <li class="warn">Multi-touch experimental</li>
-        </ul>
+      <div class="card reveal">
+        <div class="card__icon">🐧</div>
+        <h3 class="card__title">Linux Native</h3>
+        <p class="card__desc">First-class support for Wayland/X11, SDL3 input, and native PulseAudio/PipeWire integration.</p>
       </div>
     </div>
+  </section>
 
-    <!-- Big download CTA -->
-    <div class="download-card reveal">
-      <div class="download-card__version">v2.0r • SRE • DEB / RPM • x86_64</div>
-      <div class="download-card__title">⬇ Download Now</div>
-      <div class="download-card__meta">Linux x86_64 • Powered by the Swordigo Runtime Environment • ~48 MB</div>
-      <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop_2.0.0_amd64.deb"
-           class="btn btn--primary btn--lg" id="main-download-btn">
-          ⬇ Download .deb (Debian/Ubuntu)
-        </a>
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop-2.0.0-1.fc44.x86_64.rpm"
-           class="btn btn--secondary btn--lg" id="main-download-rpm-btn">
-          ⬇ Download .rpm (Fedora/RHEL)
-        </a>
+  <section class="container" style="padding-bottom: var(--space-16);">
+    <div class="card reveal" style="background: var(--bg-subtle);">
+      <h2 class="mt-0">Quick Start</h2>
+      <p>Clone the repository and run the bootstrap script to get started with the development environment.</p>
+      <pre><code>git clone https://github.com/TheCorrectSynovian/SwordigoDesktop.git
+cd SwordigoDesktop
+./instx.sh --bootstrap
+./run_swordigo.sh</code></pre>
+      <div style="display: flex; gap: var(--space-4); margin-top: var(--space-4);">
+        <a href="download.html" class="btn btn--secondary btn--sm">View Installation Guide →</a>
       </div>
     </div>
-  </div>
-</section>
-
-<!-- ===================== FEATURES SHOWCASE ===================== -->
-<section class="section" id="features" style="border-radius: var(--radius-md); border: 1px solid var(--clr-border); padding: var(--space-lg); margin-bottom: var(--space-lg);">
-  <div class="container">
-    <div class="section-header reveal">
-      <span class="section-label">Capabilities</span>
-      <h2 class="section-title">SRE <span class="grad">Features</span></h2>
-      <p class="section-desc">Everything the Swordigo Runtime Environment brings to the desktop experience.</p>
-    </div>
-
-    <div class="feature-showcase reveal">
-      <div class="feature-block">
-        <span class="feature-block__icon">🎮</span>
-        <div class="feature-block__subtitle">Input System</div>
-        <div class="feature-block__title">Desktop-Native Controls</div>
-        <ul class="feature-list mt-sm">
-          <li class="check">Fully remappable keyboard (F2 editor)</li>
-          <li class="check">Xbox / PlayStation gamepad</li>
-          <li class="check">Analog stick + D-pad support</li>
-          <li class="check">Multi-touch (10 inputs)</li>
-          <li class="check">FWKeyboard API integration</li>
-        </ul>
-      </div>
-
-      <div class="feature-block">
-        <span class="feature-block__icon">⚡</span>
-        <div class="feature-block__subtitle">Engine Power</div>
-        <div class="feature-block__title">Debug &amp; Dev Tools</div>
-        <ul class="feature-list mt-sm">
-          <li><strong style="color:var(--clr-cyan)">F1</strong> — GUI menu bar</li>
-          <li><strong style="color:var(--clr-cyan)">F3</strong> — Debug overlay (FPS, draw calls)</li>
-          <li><strong style="color:var(--clr-cyan)">F5</strong> — Camera override (6-axis)</li>
-          <li><strong style="color:var(--clr-cyan)">F7</strong> — Typing mode</li>
-          <li>Speed control (0.25× to 4×)</li>
-        </ul>
-      </div>
-
-      <div class="feature-block">
-        <span class="feature-block__icon">🎨</span>
-        <div class="feature-block__subtitle">SRE PostFX</div>
-        <div class="feature-block__title">Advanced Rendering</div>
-        <ul class="feature-list mt-sm">
-          <li class="check">SSAO (16-sample hemisphere)</li>
-          <li class="check">God Rays (64-sample radial blur)</li>
-          <li class="check">Volumetric Light Shafts</li>
-          <li class="check">Vignette, Film Grain, Chromatic Ab.</li>
-          <li><strong style="color:var(--clr-cyan)">F6</strong> — Cycle 7 visual presets</li>
-        </ul>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ===================== ARCHITECTURE ===================== -->
-<section class="section" id="architecture" style="border-radius: var(--radius-md); border: 1px solid var(--clr-border); padding: var(--space-lg); margin-bottom: var(--space-lg);">
-  <div class="container">
-    <div class="section-header reveal">
-      <span class="section-label">Architecture</span>
-      <h2 class="section-title">How the <span class="grad">SRE</span> Works</h2>
-      <p class="section-desc">A custom compatibility stack bridges the original ARM Android game engine to your Linux desktop.</p>
-    </div>
-
-    <div class="grid grid--2" style="gap: var(--space-xl); align-items: center;">
-      <div class="reveal">
-        <div class="arch-layer">
-          <span class="arch-layer__icon">🎮</span>
-          <div>
-            <div class="arch-layer__name">Your Linux Desktop</div>
-            <div class="arch-layer__desc">SDL2 window, OpenGL context, OpenAL audio, native input</div>
-          </div>
-        </div>
-        <div class="arch-arrow">↕</div>
-        <div class="arch-layer">
-          <span class="arch-layer__icon">🔧</span>
-          <div>
-            <div class="arch-layer__name">SRE Bridge <span class="sre-label sre-label--bridge">SRE Bridge</span></div>
-            <div class="arch-layer__desc">JNI compatibility layer, Android API shims, asset manager, 200+ bridged functions</div>
-          </div>
-        </div>
-        <div class="arch-arrow">↕</div>
-        <div class="arch-layer">
-          <span class="arch-layer__icon">⚙️</span>
-          <div>
-            <div class="arch-layer__name">SRE Core <span class="sre-label sre-label--core">SRE Core</span></div>
-            <div class="arch-layer__desc">Unicorn Engine — high-performance ARMv7 instruction execution</div>
-          </div>
-        </div>
-        <div class="arch-arrow">↕</div>
-        <div class="arch-layer">
-          <span class="arch-layer__icon">📦</span>
-          <div>
-            <div class="arch-layer__name">libswordigo.so (ARM)</div>
-            <div class="arch-layer__desc">Original game engine binary — Caver engine, Lua scripting, protobuf data</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="reveal" style="transition-delay:0.15s;">
-        <h3 style="font-family:var(--font-display); font-size:1.4rem; margin-bottom:var(--space-md);">SRE Technical Highlights</h3>
-        <ul class="feature-list">
-          <li>Runs original ARM Android game library — no recompilation</li>
-          <li>SRE Loader: custom ELF parser with full relocation support</li>
-          <li>SRE Bridge: 254 external symbols resolved via trampolines</li>
-          <li>Fake JNI environment with 40+ implemented functions</li>
-          <li>OpenGL ES 1.x → Desktop OpenGL translation</li>
-          <li>Android AAssetManager → filesystem shim</li>
-          <li>OpenAL for positional audio &amp; sound effects</li>
-          <li>Lua 5.1 scripting engine embedded in the game</li>
-          <li>Protobuf scene / game data parsing</li>
-          <li>Based on research from PS Vita port architecture</li>
-        </ul>
-        <div class="mt-lg">
-          <a href="technical.html" class="btn btn--outline" id="home-tech-link">Explore Technical Docs →</a>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ===================== CONTROLS ===================== -->
-<section class="section" id="controls" style="border-radius: var(--radius-md); border: 1px solid var(--clr-border); padding: var(--space-lg); margin-bottom: var(--space-lg);">
-  <div class="container">
-    <div class="section-header reveal">
-      <span class="section-label">Input</span>
-      <h2 class="section-title"><span class="grad">Controls</span></h2>
-      <p class="section-desc">Fully remappable keyboard and gamepad support. Press <strong>F2</strong> to open the Controls Editor.</p>
-    </div>
-
-    <div class="controls-grid reveal">
-      <!-- Keyboard -->
-      <div>
-        <h3 style="font-family:var(--font-display); font-size:1.1rem; margin-bottom:var(--space-md); color:var(--clr-text);">⌨️ Keyboard Layout</h3>
-        <div class="key-mapping">
-          <span class="key-mapping__key">← / A</span>
-          <span class="key-mapping__action">Move Left</span>
-        </div>
-        <div class="key-mapping">
-          <span class="key-mapping__key">→ / D</span>
-          <span class="key-mapping__action">Move Right</span>
-        </div>
-        <div class="key-mapping">
-          <span class="key-mapping__key">Space / W</span>
-          <span class="key-mapping__action">Jump</span>
-        </div>
-        <div class="key-mapping">
-          <span class="key-mapping__key">J / Z</span>
-          <span class="key-mapping__action">Attack</span>
-        </div>
-        <div class="key-mapping">
-          <span class="key-mapping__key">K / X</span>
-          <span class="key-mapping__action">Magic</span>
-        </div>
-        <div class="key-mapping">
-          <span class="key-mapping__key">I</span>
-          <span class="key-mapping__action">Use Item</span>
-        </div>
-        <div class="key-mapping">
-          <span class="key-mapping__key">Escape</span>
-          <span class="key-mapping__action">Menu / Settings</span>
-        </div>
-        <div class="key-mapping">
-          <span class="key-mapping__key">P</span>
-          <span class="key-mapping__action">Pause</span>
-        </div>
-        <div style="margin-top:16px; padding:14px; background:rgba(0,229,255,0.06); border:1px solid rgba(0,229,255,0.2); border-radius:8px;">
-          <strong style="color:var(--clr-cyan)">💡 Tip:</strong>
-          <span class="text-muted"> Press <strong style="color:var(--clr-text)">F2</strong> to open the Controls Editor. Drag buttons to reposition. Config saved to <code style="font-family:var(--font-mono); color:var(--clr-cyan)">controls.ini</code></span>
-        </div>
-      </div>
-
-      <!-- Gamepad -->
-      <div>
-        <h3 style="font-family:var(--font-display); font-size:1.1rem; margin-bottom:var(--space-md); color:var(--clr-text);">🎮 Gamepad Mapping</h3>
-        <table class="gamepad-table">
-          <thead>
-            <tr>
-              <th>Button</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td>D-Pad / Left Stick</td><td>Movement</td></tr>
-            <tr><td>A / Cross</td><td>Jump</td></tr>
-            <tr><td>X / Square</td><td>Attack</td></tr>
-            <tr><td>Y / Triangle</td><td>Magic</td></tr>
-            <tr><td>B / Circle</td><td>Use Item</td></tr>
-            <tr><td>Start</td><td>Menu</td></tr>
-            <tr><td>Back / Select</td><td>Pause</td></tr>
-          </tbody>
-        </table>
-        <div style="margin-top:var(--space-md);">
-          <span class="badge badge--working">Xbox</span>
-          <span class="badge badge--working">PlayStation</span>
-          <span class="badge badge--info">Analog + D-Pad</span>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ===================== RESEARCH HIGHLIGHTS ===================== -->
-<section class="section" id="research-highlight">
-  <div class="container">
-    <div class="section-header reveal">
-      <span class="section-label">Research</span>
-      <h2 class="section-title">Engineering <span class="grad">Research</span></h2>
-      <p class="section-desc">30 detailed research documents covering every layer of the SRE — from ELF loading to protobuf asset schemas.</p>
-    </div>
-
-    <div class="grid grid--auto reveal">
-      <div class="paper-card">
-        <div class="paper-card__type">📐 Architecture</div>
-        <div class="paper-card__title">Linux Loader Design</div>
-        <div class="paper-card__desc">Complete blueprint for the SRE Loader — segments, relocations, JNI surface, Android compat layer.</div>
-        <div class="paper-card__footer">
-          <span class="paper-card__size">3.3 KB</span>
-          <a href="research.html#linux-loader" class="btn btn--outline btn--sm" id="home-paper-loader">Read →</a>
-        </div>
-      </div>
-
-      <div class="paper-card">
-        <div class="paper-card__type">🔬 Analysis</div>
-        <div class="paper-card__title">Core Research Findings</div>
-        <div class="paper-card__desc">Comprehensive findings: Vita loader internals, startup sequence, JNI requirements, asset formats, symbol facts.</div>
-        <div class="paper-card__footer">
-          <span class="paper-card__size">13.6 KB</span>
-          <a href="research.html#findings" class="btn btn--outline btn--sm" id="home-paper-findings">Read →</a>
-        </div>
-      </div>
-
-      <div class="paper-card">
-        <div class="paper-card__type">💥 Debugging</div>
-        <div class="paper-card__title">Mission 7A — Root Cause</div>
-        <div class="paper-card__desc">Deep crash investigation — UC_ERR_FETCH_UNMAPPED at 0x10000000, .bss initialization bug and fixes.</div>
-        <div class="paper-card__footer">
-          <span class="paper-card__size">5.2 KB</span>
-          <a href="research.html#mission7a" class="btn btn--outline btn--sm" id="home-paper-m7a">Read →</a>
-        </div>
-      </div>
-
-      <div class="paper-card">
-        <div class="paper-card__type">⚙️ Feasibility</div>
-        <div class="paper-card__title">ARM Execution Options</div>
-        <div class="paper-card__desc">QEMU vs Unicorn vs Dynarmic — comparative analysis of ARM emulation approaches for the SRE Core.</div>
-        <div class="paper-card__footer">
-          <span class="paper-card__size">4.8 KB</span>
-          <a href="research.html#arm-exec" class="btn btn--outline btn--sm" id="home-paper-arm">Read →</a>
-        </div>
-      </div>
-
-      <div class="paper-card">
-        <div class="paper-card__type">📊 Data Formats</div>
-        <div class="paper-card__title">Protobuf Schema</div>
-        <div class="paper-card__desc">Decoded .gdata, .scene, .gstate, .scl formats with field mappings and Lua script embedding.</div>
-        <div class="paper-card__footer">
-          <span class="paper-card__size">4.6 KB</span>
-          <a href="research.html#protobuf" class="btn btn--outline btn--sm" id="home-paper-proto">Read →</a>
-        </div>
-      </div>
-
-      <div class="paper-card">
-        <div class="paper-card__type">🗺️ Engine Map</div>
-        <div class="paper-card__title">Native Engine Map</div>
-        <div class="paper-card__desc">Full Caver namespace breakdown — CaverShell, Scene Graph, Lua integration, GameData, PODLoader.</div>
-        <div class="paper-card__footer">
-          <span class="paper-card__size">1.2 KB</span>
-          <a href="research.html#engine-map" class="btn btn--outline btn--sm" id="home-paper-engine">Read →</a>
-        </div>
-      </div>
-    </div>
-
-    <div class="text-center mt-xl reveal">
-      <a href="research.html" class="btn btn--primary btn--lg" id="home-all-research-btn">View All 30 Research Documents →</a>
-    </div>
-  </div>
-</section>
-
-<!-- ===================== CREDITS ===================== -->
-<section class="section" id="credits" style="border-radius: var(--radius-md); border: 1px solid var(--clr-border); padding: var(--space-lg); margin-bottom: var(--space-lg);">
-  <div class="container">
-    <div class="section-header reveal">
-      <span class="section-label">Team</span>
-      <h2 class="section-title"><span class="grad">Credits</span></h2>
-      <p class="section-desc">The people behind the Swordigo Runtime Environment.</p>
-    </div>
-
-    <!-- Core Team -->
-    <div class="team-grid reveal" style="margin-bottom:var(--space-xl);">
-      <div class="team-card">
-        <div class="team-card__avatar">🧠</div>
-        <div class="team-card__name">TheMegineBraine</div>
-        <div class="team-card__role">Lead Developer</div>
-        <div class="team-card__desc">SRE architecture, Unicorn integration, JNI bridge, PostFX pipeline</div>
-        <a href="https://github.com/TheMegineBraine" target="_blank" rel="noopener" class="team-card__link">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" role="img" aria-label="GitHub"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
-          @TheMegineBraine
-        </a>
-      </div>
-
-      <div class="team-card">
-        <div class="team-card__avatar">⚔️</div>
-        <div class="team-card__name">TheCorrectSynovian</div>
-        <div class="team-card__role">Developer</div>
-        <div class="team-card__desc">Build system, packaging, website, research documentation</div>
-        <a href="https://github.com/TheCorrectSynovian" target="_blank" rel="noopener" class="team-card__link">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" role="img" aria-label="GitHub"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
-          @TheCorrectSynovian
-        </a>
-      </div>
-    </div>
-
-    <!-- Acknowledgments -->
-    <h3 style="font-family:var(--font-display); font-size:1.2rem; text-align:center; margin-bottom:var(--space-lg); color:var(--clr-text);" class="reveal">Acknowledgments</h3>
-    <div class="ack-grid reveal">
-      <div class="ack-card">
-        <span class="ack-card__icon">🔬</span>
-        <div>
-          <div class="ack-card__title">ItsJustSomeDude &amp; Kiziyon</div>
-          <div class="ack-card__desc">SwMini Mod Loader — incredible reverse engineering work on the Caver engine, Lua scripting, and virtual filesystem.</div>
-        </div>
-      </div>
-      <div class="ack-card">
-        <span class="ack-card__icon">🎮</span>
-        <div>
-          <div class="ack-card__title">Rinnegatamante</div>
-          <div class="ack-card__desc">Swordigo PS Vita port — crucial insights into the engine's JNI interface, touch events, and native symbol layout.</div>
-        </div>
-      </div>
-      <div class="ack-card">
-        <span class="ack-card__icon">⚔️</span>
-        <div>
-          <div class="ack-card__title">SwordiForge Community</div>
-          <div class="ack-card__desc">The Swordigo modding community for keeping this 2012 gem alive and well-documented.</div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ===================== NOTES ===================== -->
-<section class="section" id="notes" style="border-radius: var(--radius-md); border: 1px solid var(--clr-border); padding: var(--space-lg); margin-bottom: var(--space-lg);">
-  <div class="container container--narrow">
-    <div class="section-header reveal">
-      <span class="section-label">Release Notes</span>
-      <h2 class="section-title">From the <span class="grad">Developer</span></h2>
-    </div>
-
-    <div class="card reveal" style="text-align:center; padding: var(--space-xl);">
-      <p style="font-size:1.05rem; color: var(--clr-text-muted); line-height:1.9; margin-bottom:var(--space-lg);">
-        v2.0r brings the <strong style="color:var(--clr-text)">SRE PostFX pipeline</strong>,
-        <strong style="color:var(--clr-text)">gamepad support</strong>,
-        <strong style="color:var(--clr-text)">persistent save system</strong>,
-        and <strong style="color:var(--clr-text)">the SRE Launcher</strong>.
-        Future releases will focus on <strong style="color:var(--clr-text)">audio stability</strong>
-        and general polish.
-      </p>
-      <p style="font-size:1.1rem; color: var(--clr-text); margin-bottom:var(--space-lg);">
-        Thanks to everyone who tested and helped debug this project. ⚔️
-      </p>
-      <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v2" target="_blank" rel="noopener"
-           class="btn btn--secondary" id="home-changelog-btn">📝 Full Changelog</a>
-        <a href="changelog.html" class="btn btn--outline" id="home-changelog-page-btn">Changelog Page →</a>
-      </div>
-    </div>
-  </div>
-</section>
-
-    </div> <!-- .doc-main -->
-  </div> <!-- .doc-layout -->
-</div> <!-- .container -->
-
+  </section>
 </main>
 
-<!-- ===================== FOOTER ===================== -->
 <footer class="footer">
   <div class="container">
-    <div class="footer__grid">
-      <div class="footer__brand">
-        <div class="navbar__logo" style="margin-bottom:12px; text-decoration:none; display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:700; color:var(--clr-text);">
-          <span style="font-size:1.5rem; filter:drop-shadow(0 0 8px var(--clr-purple))">⚔️</span>
-          <span style="background:var(--grad-text); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">Swordigo Desktop</span>
-        </div>
-        <p>Powered by the <strong>Swordigo Runtime Environment (SRE)</strong> — a custom ARM compatibility runtime for Linux.</p>
-        <div class="mt-md" style="display:flex; gap:8px; flex-wrap:wrap;">
-          <span class="badge badge--info">Linux</span>
-          <span class="badge badge--working">Open Source</span>
-          <span class="badge badge--wip">SRE v2.0r</span>
-        </div>
-      </div>
-
-      <div class="footer__col">
-        <h3>Navigation</h3>
-        <ul class="footer__links">
-          <li><a href="index.html">Home</a></li>
-          <li><a href="download.html">Download</a></li>
-          <li><a href="technical.html">Technical Docs</a></li>
-          <li><a href="research.html">Research Papers</a></li>
-          <li><a href="changelog.html">Changelog</a></li>
-        </ul>
-      </div>
-
-      <div class="footer__col">
-        <h3>Research</h3>
-        <ul class="footer__links">
-          <li><a href="research.html#findings">Core Findings</a></li>
-          <li><a href="research.html#linux-loader">SRE Loader Design</a></li>
-          <li><a href="research.html#arm-exec">SRE Core Analysis</a></li>
-          <li><a href="research.html#protobuf">Protobuf Schema</a></li>
-          <li><a href="research.html#engine-map">Engine Map</a></li>
-        </ul>
-      </div>
-
-      <div class="footer__col">
-        <h3>Links</h3>
-        <ul class="footer__links">
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener">GitHub Repository</a></li>
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop_2.0.0_amd64.deb">Direct Download</a></li>
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v2" target="_blank" rel="noopener">Commit History</a></li>
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases" target="_blank" rel="noopener">All Releases</a></li>
-        </ul>
-      </div>
-    </div>
-
-    <div class="footer__bottom">
-      <span>© 2026 SwordigoDesktop Project · Powered by the Swordigo Runtime Environment</span>
-      <span>
-        Swordigo © Touch Foo &nbsp;|&nbsp;
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/LICENSE" target="_blank" rel="noopener">License</a>
-      </span>
+    <div class="footer__inner">
+      <p>&copy; 2026 QuantumCreeper Labs. All rights reserved.</p>
+      <ul class="navbar__nav">
+        <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop">GitHub</a></li>
+        <li><a href="sitemap.xml">Sitemap</a></li>
+      </ul>
     </div>
   </div>
 </footer>

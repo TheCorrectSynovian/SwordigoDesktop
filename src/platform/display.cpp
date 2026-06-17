@@ -22,6 +22,10 @@ bool Display::init(int w, int h, const std::string& title) {
     width = w;
     height = h;
     
+    // Set app ID so Wayland/GNOME matches this window to Swordigo.desktop
+    // (SDL_SetWindowIcon doesn't work on Wayland — icon comes from .desktop file)
+    SDL_SetHint(SDL_HINT_APP_ID, "Swordigo");
+    
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::cerr << "[Display] SDL_Init failed: " << SDL_GetError() << std::endl;
         return false;
@@ -38,7 +42,7 @@ bool Display::init(int w, int h, const std::string& title) {
     window = SDL_CreateWindow(
         title.c_str(),
         width, height,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE
+        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY
     );
     
     if (!window) {
@@ -55,7 +59,11 @@ bool Display::init(int w, int h, const std::string& title) {
     SDL_GL_MakeCurrent(window, gl_context);
     SDL_GL_SetSwapInterval(1); // VSync
     
-    std::cout << "[Display] Window created: " << width << "x" << height << std::endl;
+    // Log both logical and physical pixel dimensions for HiDPI awareness
+    int phys_w, phys_h;
+    SDL_GetWindowSizeInPixels(window, &phys_w, &phys_h);
+    std::cout << "[Display] Window created: " << width << "x" << height
+              << " (drawable: " << phys_w << "x" << phys_h << ")" << std::endl;
     std::cout << "[Display] GL Vendor:   " << glGetString(GL_VENDOR) << std::endl;
     std::cout << "[Display] GL Renderer: " << glGetString(GL_RENDERER) << std::endl;
     std::cout << "[Display] GL Version:  " << glGetString(GL_VERSION) << std::endl;

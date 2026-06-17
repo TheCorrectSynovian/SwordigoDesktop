@@ -5,6 +5,7 @@
 #include <windows.h>
 #endif
 #include <iostream>
+#include <iomanip>
 #include <vector>
 #include <stdint.h>
 #include <filesystem>
@@ -35,21 +36,24 @@ namespace fs = std::filesystem;
 extern bool g_display_active;
 extern int g_win_w;
 extern int g_win_h;
+extern int g_draw_w;  // Physical drawable pixels (for glViewport / FBO)
+extern int g_draw_h;
 
 // --- Global Context ---
 uint8_t* g_guest_memory = nullptr;
 const uint32_t GUEST_MEM_SIZE = 0xC0000000; // 3GB
 
 // Game internal render resolution — game engine sees this via setApplicationViewSize.
+// Defaults to 1920×1080, but dynamically updated after display init to match
+// the display's physical pixel dimensions and native aspect ratio.
 // Touch coordinates are kept in legacy 960×544 space and auto-scaled.
-static const int GAME_W = 1920;
-static const int GAME_H = 1080;
-static const float TOUCH_SCALE_X = (float)GAME_W / 960.0f;
-
-// Which game binary to load (switchable via --test-lib flag)
+static int GAME_W = 1920;
+static int GAME_H = 1080;
+static float TOUCH_SCALE_X = (float)GAME_W / 960.0f;
+// Which game binary to load (switchable via launcher or --lib flag)
 static std::string g_lib_name = "libswordigo_nx.so";
 std::string g_assets_dir = "assets";  // "assets" for vanilla, "rl_assets" for RLSwordigo
-static const float TOUCH_SCALE_Y = (float)GAME_H / 544.0f;   // ~1.985
+static float TOUCH_SCALE_Y = (float)GAME_H / 544.0f;   // ~1.985
 
 // Add a specific area for guest-side global variables (libc stuff)
 const uint32_t GUEST_GLOBALS_BASE = 0x50000; 
@@ -695,7 +699,7 @@ void load_and_boot() {
                 } else
 #endif
                 {
-                    fbo_end_game_and_blit(g_win_w, g_win_h, g_fbo_mode, &g_postfx);
+                    fbo_end_game_and_blit(g_draw_w, g_draw_h, g_fbo_mode, &g_postfx);
                 }
             }
 
@@ -712,7 +716,7 @@ void load_and_boot() {
                 g_input_config.render_editor(g_win_w, g_win_h, mouse_x, mouse_y, mouse_pressed);
                 // Draw instruction text on top (uses GUI font renderer)
                 glPushAttrib(GL_ALL_ATTRIB_BITS);
-                glViewport(0, 0, g_win_w, g_win_h);
+                glViewport(0, 0, g_draw_w, g_draw_h);
                 glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
                 glOrtho(0, g_win_w, 0, g_win_h, -1, 1);
                 glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
@@ -727,7 +731,7 @@ void load_and_boot() {
             // Render F3 debug overlay
             if (g_display_active && debug_visible) {
                 glPushAttrib(GL_ALL_ATTRIB_BITS);
-                glViewport(0, 0, g_win_w, g_win_h);
+                glViewport(0, 0, g_draw_w, g_draw_h);
                 glMatrixMode(GL_PROJECTION);
                 glPushMatrix();
                 glLoadIdentity();
@@ -758,7 +762,7 @@ void load_and_boot() {
                 g_gui.draw_string(dbg, 20, g_win_h - 97, 1.2f, 180, 180, 180, 255);
                 snprintf(dbg, sizeof(dbg), "State: %d  TexUps: %d", g_frame_stats.state_changes, g_frame_stats.tex_uploads);
                 g_gui.draw_string(dbg, 20, g_win_h - 114, 1.2f, 180, 180, 180, 255);
-                snprintf(dbg, sizeof(dbg), "Game: %dx%d -> Window: %dx%d", GAME_W, GAME_H, g_win_w, g_win_h);
+                snprintf(dbg, sizeof(dbg), "Render: %dx%d -> Window: %dx%d (Draw: %dx%d)", GAME_W, GAME_H, g_win_w, g_win_h, g_draw_w, g_draw_h);
                 g_gui.draw_string(dbg, 20, g_win_h - 131, 1.2f, 140, 140, 160, 255);
                 snprintf(dbg, sizeof(dbg), "Mouse: %d,%d  DT: %.4fs", mouse_x, mouse_y, dt_seconds);
                 g_gui.draw_string(dbg, 20, g_win_h - 148, 1.2f, 140, 140, 160, 255);
@@ -812,7 +816,7 @@ void load_and_boot() {
             // Render mod tools overlay (speed indicator, toasts, pause screen)
             if (g_display_active) {
                 glPushAttrib(GL_ALL_ATTRIB_BITS);
-                glViewport(0, 0, g_win_w, g_win_h);
+                glViewport(0, 0, g_draw_w, g_draw_h);
                 glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
                 glOrtho(0, g_win_w, 0, g_win_h, -1, 1);
                 glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
@@ -826,7 +830,7 @@ void load_and_boot() {
             // Show hint for first 5 seconds
             if (g_display_active && !gui_visible && (SDL_GetTicks() - hint_start_time) < 5000) {
                 glPushAttrib(GL_ALL_ATTRIB_BITS);
-                glViewport(0, 0, g_win_w, g_win_h);
+                glViewport(0, 0, g_draw_w, g_draw_h);
                 glMatrixMode(GL_PROJECTION);
                 glPushMatrix();
                 glLoadIdentity();
@@ -880,9 +884,10 @@ void load_and_boot() {
                         case SDL_EVENT_WINDOW_RESIZED:
                             g_win_w = event.window.data1;
                             g_win_h = event.window.data2;
-                            // On HiDPI, drawable size may differ from window size
-                            // GUI uses window coords (matching mouse events)
-                            std::cout << "[Display] Window resized to " << g_win_w << "x" << g_win_h << std::endl;
+                            // Physical drawable size for GL rendering (HiDPI)
+                            SDL_GetWindowSizeInPixels(g_display_ptr->get_window(), &g_draw_w, &g_draw_h);
+                            std::cout << "[Display] Window resized to " << g_win_w << "x" << g_win_h
+                                      << " (drawable: " << g_draw_w << "x" << g_draw_h << ")" << std::endl;
                             break;
                         case SDL_EVENT_MOUSE_BUTTON_DOWN:
                             if (event.button.button == SDL_BUTTON_LEFT) {
@@ -1070,15 +1075,17 @@ void load_and_boot() {
                                     SDL_SetWindowFullscreen(g_display_ptr->get_window(), false);
                                     g_win_w = 1920;
                                     g_win_h = 1080;
-                                    std::cout << "[Display] Windowed 1920x1080" << std::endl;
+                                    SDL_GetWindowSizeInPixels(g_display_ptr->get_window(), &g_draw_w, &g_draw_h);
+                                    std::cout << "[Display] Windowed 1920x1080 (drawable: " << g_draw_w << "x" << g_draw_h << ")" << std::endl;
                                 } else {
                                     SDL_SetWindowFullscreen(g_display_ptr->get_window(), true);
-                                    // Get actual fullscreen resolution
+                                    // Get actual fullscreen resolution (logical + physical)
                                     int fw, fh;
                                     SDL_GetWindowSize(g_display_ptr->get_window(), &fw, &fh);
                                     g_win_w = fw;
                                     g_win_h = fh;
-                                    std::cout << "[Display] Fullscreen " << fw << "x" << fh << std::endl;
+                                    SDL_GetWindowSizeInPixels(g_display_ptr->get_window(), &g_draw_w, &g_draw_h);
+                                    std::cout << "[Display] Fullscreen " << fw << "x" << fh << " (drawable: " << g_draw_w << "x" << g_draw_h << ")" << std::endl;
                                 }
                                 break;
                             }
@@ -1463,6 +1470,10 @@ int main(int argc, char* argv[]) {
     if (env_dir) data_dir = env_dir;
     std::string registry_path = base_dir + "/swordigo_binaries.json";
     g_binary_selector.scan_directory(data_dir);
+    // Also scan base_dir in case .so files are next to the executable (dev mode)
+    if (data_dir != "." && data_dir != base_dir) {
+        g_binary_selector.scan_directory(base_dir);
+    }
     g_binary_selector.load_registry(registry_path);
 
     // ========================================================================
@@ -1497,7 +1508,7 @@ int main(int argc, char* argv[]) {
     if (!headless) {
 #ifdef VULKAN_BACKEND
         if (g_graphics_api == GraphicsAPI::VULKAN) {
-            if (display.init_vulkan(1920, 1080, "Swordigo")) {
+            if (display.init_vulkan(GAME_W, GAME_H, "Swordigo")) {
                 g_display_active = true;
                 g_display_ptr = &display;
                 if (!g_vk_backend.init(display.get_window(), GAME_W, GAME_H)) {
@@ -1505,7 +1516,7 @@ int main(int argc, char* argv[]) {
                     g_graphics_api = GraphicsAPI::OPENGL;
                     // Recreate as OpenGL window
                     display = Display();
-                    if (display.init(1920, 1080, "Swordigo")) {
+                    if (display.init(GAME_W, GAME_H, "Swordigo")) {
                         g_display_active = true;
                         g_display_ptr = &display;
                     }
@@ -1518,7 +1529,30 @@ int main(int argc, char* argv[]) {
         if (display.init(1920, 1080, "Swordigo")) {
             g_display_active = true;
             g_display_ptr = &display;
-            std::cout << "[Main] Display initialized - 1920x1080" << std::endl;
+            // Get physical drawable dimensions (HiDPI)
+            SDL_GetWindowSizeInPixels(display.get_window(), &g_draw_w, &g_draw_h);
+
+            // --- Dynamic render resolution: match drawable pixels & aspect ratio ---
+            // Use the physical drawable size directly as the game render resolution.
+            // This gives 1:1 pixel mapping — no upscaling, maximum sharpness.
+            // The aspect ratio naturally matches the display (16:10, 16:9, etc.)
+            GAME_W = g_draw_w;
+            GAME_H = g_draw_h;
+            // Clamp to reasonable range: at least 1920 wide, at most 4096 wide
+            if (GAME_W < 1920) { GAME_W = 1920; GAME_H = (int)(1920.0f * g_draw_h / g_draw_w); }
+            if (GAME_W > 4096) { float s = 4096.0f / GAME_W; GAME_W = 4096; GAME_H = (int)(GAME_H * s); }
+            // Ensure even dimensions (GPU-friendly)
+            GAME_W &= ~1;
+            GAME_H &= ~1;
+            // Recompute touch coordinate scaling
+            TOUCH_SCALE_X = (float)GAME_W / 960.0f;
+            TOUCH_SCALE_Y = (float)GAME_H / 544.0f;
+
+            std::cout << "[Main] Display initialized - logical 1920x1080"
+                      << " | drawable: " << g_draw_w << "x" << g_draw_h
+                      << " | render: " << GAME_W << "x" << GAME_H
+                      << " | aspect: " << std::fixed << std::setprecision(3)
+                      << ((float)GAME_W / GAME_H) << std::endl;
         } else {
             std::cerr << "[Main] Display init failed, falling back to headless" << std::endl;
         }

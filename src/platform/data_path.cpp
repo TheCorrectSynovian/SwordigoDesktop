@@ -2,6 +2,9 @@
 #include <cstdlib>
 #include <string>
 #include <filesystem>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -29,7 +32,23 @@ std::string get_data_path(const std::string& relative_path) {
     }
 
 #ifndef _WIN32
-    // 4. Standard system install paths (Linux only)
+    // 4. Relative to binary location (dev build: build/swordigo_boot → project root)
+    {
+        char exe_buf[4096];
+        ssize_t len = readlink("/proc/self/exe", exe_buf, sizeof(exe_buf) - 1);
+        if (len > 0) {
+            exe_buf[len] = '\0';
+            fs::path exe_dir = fs::path(exe_buf).parent_path();
+            // Check same directory as binary
+            std::string path = (exe_dir / relative_path).string();
+            if (fs::exists(path)) return path;
+            // Check one level up (build/ → project root)
+            path = (exe_dir.parent_path() / relative_path).string();
+            if (fs::exists(path)) return path;
+        }
+    }
+
+    // 5. Standard system install paths (Linux only)
     const char* sys_paths[] = {
         "/usr/share/swordigo/",
         "/usr/local/share/swordigo/",

@@ -304,10 +304,11 @@ void GuiRenderer::render(int mouse_x, int mouse_y, bool mouse_click, int win_w, 
     // Save current OpenGL states
     glPushAttrib(GL_ALL_ATTRIB_BITS);
 
-    // Set viewport to full window
-    glViewport(0, 0, win_w, win_h);
+    // Set viewport to full drawable area (physical pixels for HiDPI)
+    extern int g_draw_w, g_draw_h;
+    glViewport(0, 0, g_draw_w, g_draw_h);
 
-    // Set 2D orthographic projection (origin bottom-left)
+    // Set 2D orthographic projection in logical coords (origin bottom-left)
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();

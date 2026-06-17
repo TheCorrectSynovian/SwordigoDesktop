@@ -2840,8 +2840,10 @@ void bridge_gl_clear_color(void* emu_ptr) {
 }
 
 // Global window dimensions — updated by main.cpp when window resizes or goes fullscreen
-int g_win_w = 1920;
+int g_win_w = 1920;   // Logical window size (for mouse coordinate mapping)
 int g_win_h = 1080;
+int g_draw_w = 1920;  // Physical drawable size in pixels (for glViewport / FBO blit)
+int g_draw_h = 1080;
 
 void bridge_gl_viewport(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;

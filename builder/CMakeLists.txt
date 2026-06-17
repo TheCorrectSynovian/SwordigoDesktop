@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.12)
-project(SwordigoDesktop VERSION 2.0.0 LANGUAGES C CXX)
+project(SwordigoDesktop VERSION 3.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -96,8 +96,8 @@ install(FILES ${CMAKE_SOURCE_DIR}/../Swordigo.desktop DESTINATION share/applicat
 
 set(CPACK_PACKAGE_NAME "swordigo-desktop")
 set(CPACK_PACKAGE_VENDOR "Prenxy / TheCorrectSynovian")
-set(CPACK_PACKAGE_VERSION "2.0.0")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Swordigo Desktop — Native Linux port of Swordigo with advanced rendering")
+set(CPACK_PACKAGE_VERSION "3.0.0")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Swordigo Desktop v3.0r — Native Linux port with SDL3 and advanced rendering")
 set(CPACK_PACKAGE_CONTACT "quantumcreeper@gmail.com")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/../LICENSE")
 
@@ -108,7 +108,11 @@ set(CPACK_GENERATOR "RPM;DEB")
 set(CPACK_RPM_PACKAGE_REQUIRES "SDL3, SDL3_image, openal-soft, mesa-libGL, zlib, unicorn, libvorbis")
 set(CPACK_RPM_PACKAGE_LICENSE "MIT")
 set(CPACK_RPM_PACKAGE_GROUP "Amusements/Games")
-set(CPACK_RPM_PACKAGE_DESCRIPTION "Swordigo Desktop v2.0 — A native Linux runtime for Swordigo (ARM emulation via Unicorn).
+# Disable auto-dependency scanning — the shipped .so files are Android ARM
+# binaries that rpmbuild incorrectly scans for x86_64 Linux deps
+set(CPACK_RPM_PACKAGE_AUTOREQ "no")
+set(CPACK_RPM_PACKAGE_AUTOPROV "no")
+set(CPACK_RPM_PACKAGE_DESCRIPTION "Swordigo Desktop v3.0r — A native Linux runtime for Swordigo (ARM emulation via Unicorn).
 Features: SDL3, advanced shaders (SSAO, godrays, tone mapping), gamepad support,
 free camera, mod tools, binary selector (v1.4.6 / v1.4.12), and more.
 NOTE: Game assets (assets/) and binary (.so) must be supplied by the user from their own copy.")

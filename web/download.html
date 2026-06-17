@@ -3,22 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Download — Swordigo Desktop v2.0r</title>
-  <meta name="description" content="Download Swordigo Desktop v2.0r for Linux x86_64. DEB, RPM, and AppImage packages available.">
-  <meta name="keywords" content="Swordigo Desktop download, Linux game port, DEB RPM package, SRE, Swordigo Runtime Environment, ARM emulation, open source game">
-  <meta name="author" content="QuantumCreeper Labs">
-  <meta name="robots" content="index, follow">
-  <link rel="canonical" href="https://thecorrectsynovian.github.io/SwordigoDesktop/web/download.html">
-  <meta property="og:title" content="Download Swordigo Desktop v2.0r">
-  <meta property="og:description" content="Download Swordigo Desktop for Linux x86_64. DEB, RPM packages. Powered by the Swordigo Runtime Environment.">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="https://thecorrectsynovian.github.io/SwordigoDesktop/web/download.html">
-  <meta property="og:image" content="https://thecorrectsynovian.github.io/SwordigoDesktop/web/assets/og-image.png">
-  <meta property="og:site_name" content="Swordigo Desktop — SRE">
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Download Swordigo Desktop v2.0r">
-  <meta name="twitter:description" content="Download Swordigo Desktop for Linux. Powered by the Swordigo Runtime Environment.">
-  <meta name="twitter:image" content="https://thecorrectsynovian.github.io/SwordigoDesktop/web/assets/og-image.png">
+  <title>Download — Swordigo Desktop</title>
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⬇️</text></svg>">
 </head>
@@ -26,276 +11,91 @@
 
 <canvas id="stars-canvas"></canvas>
 
-<nav class="navbar" id="navbar">
+<nav class="navbar">
   <div class="container">
     <div class="navbar__inner">
       <a href="index.html" class="navbar__logo">
-        <span class="navbar__logo-icon">⚔️</span>
-        <div class="navbar__logo-text"><span>Swordigo</span> Desktop</div>
+        <span>⚔️</span> Swordigo Desktop
       </a>
-      <ul class="navbar__nav" id="main-nav">
+      <ul class="navbar__nav">
         <li><a href="index.html">Home</a></li>
-        <li><a href="download.html">Download</a></li>
+        <li><a href="download.html" class="active">Download</a></li>
         <li><a href="technical.html">Technical</a></li>
         <li><a href="research.html">Research</a></li>
         <li><a href="changelog.html">Changelog</a></li>
       </ul>
-      <div class="navbar__cta" id="nav-cta">
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener" class="btn btn--secondary btn--sm">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
-          GitHub
-        </a>
-        <a href="download.html" class="btn btn--primary btn--sm">⬇ Download</a>
+      <div class="navbar__cta">
+        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" class="btn btn--secondary btn--sm">GitHub</a>
+        <a href="download.html" class="btn btn--primary btn--sm">Download</a>
       </div>
-      <button class="hamburger" id="hamburger" aria-label="Toggle menu"><span></span><span></span><span></span></button>
     </div>
   </div>
 </nav>
 
-<main>
-<!-- PAGE HEADER -->
-<div class="page-header">
-  <div class="container">
-    <span class="section-label">Get It Now</span>
-    <h1 class="section-title">Download <span class="grad">Swordigo Desktop</span></h1>
-    <p class="section-desc">Linux-native packages — runs on any modern x86_64 Linux distribution. Now with advanced PostFX rendering.</p>
-  </div>
-</div>
+<main class="container">
+  <section class="hero" style="padding: var(--space-12) 0; text-align: left;">
+    <h1 class="hero__title" style="font-size: 2.5rem;">Download <span class="grad">v2.0.0</span></h1>
+    <p class="hero__subtitle" style="margin-left: 0; max-width: 800px;">
+      Get the latest stable release of Swordigo Desktop for Linux.
+    </p>
+  </section>
 
-<!-- MAIN DOWNLOAD -->
-<section class="section" id="main-download-section">
-  <div class="container container--narrow">
-
-    <!-- Primary Download -->
-    <div class="download-card reveal" style="margin-bottom: var(--space-xl);">
-      <div class="download-card__version">v2.0r • Stable</div>
-      <div class="download-card__title">Swordigo Desktop</div>
-      <div class="download-card__meta">Linux x86_64 • DEB / RPM / AppImage • ~48 MB</div>
-      <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap; position:relative; z-index:2;">
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop_2.0.0_amd64.deb"
-           class="btn btn--primary btn--lg" id="dl-deb-btn">
-          ⬇ Download .deb (Debian/Ubuntu)
-        </a>
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop-2.0.0-1.fc44.x86_64.rpm"
-           class="btn btn--secondary btn--lg" id="dl-rpm-btn">
-          ⬇ Download .rpm (Fedora/RHEL)
-        </a>
-      </div>
-      <p style="font-size:0.78rem; color:var(--clr-text-dim); margin-top:var(--space-md); position:relative; z-index:2;">
-        Direct link: github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop_2.0.0_amd64.deb
-      </p>
+  <div class="grid grid--3">
+    <div class="card reveal">
+      <h3 class="mt-0">RPM Package</h3>
+      <p class="card__desc">Native package for Fedora, RHEL, and other RPM-based distributions.</p>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop-2.0.0-1.fc44.x86_64.rpm" class="btn btn--primary btn--sm">Download .rpm</a>
     </div>
-
-    <!-- Links -->
-    <div class="grid grid--2 reveal" style="margin-bottom: var(--space-xl);">
-      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener"
-         class="card" style="text-decoration:none; text-align:center;" id="dl-repo-card">
-        <span style="font-size:2.5rem; display:block; margin-bottom:12px;">
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor" style="color:var(--clr-purple-lt)"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
-        </span>
-        <div class="card__title">GitHub Repository</div>
-        <div class="card__body">Source code, issues, and contributions.</div>
-      </a>
-      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v2" target="_blank" rel="noopener"
-         class="card" style="text-decoration:none; text-align:center;" id="dl-commits-card">
-        <span style="font-size:2.5rem; display:block; margin-bottom:12px;">📝</span>
-        <div class="card__title">Full Changelog</div>
-        <div class="card__body">All commits for the v2 release branch.</div>
-      </a>
+    <div class="card reveal">
+      <h3 class="mt-0">DEB Package</h3>
+      <p class="card__desc">Native package for Debian, Ubuntu, and Linux Mint distributions.</p>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop_2.0.0_amd64.deb" class="btn btn--primary btn--sm">Download .deb</a>
     </div>
-
-    <!-- Installation -->
-    <div class="card reveal" id="install-guide">
-      <h2 class="card__title" style="font-size:1.4rem; margin-bottom:var(--space-md);">⚙️ Installation Guide</h2>
-
-      <div class="tabs" id="install-tabs">
-        <button class="tab-btn active" data-tab="tab-appimage" id="install-tab-appimage">DEB / RPM Install</button>
-        <button class="tab-btn" data-tab="tab-deps" id="install-tab-deps">Dependencies</button>
-        <button class="tab-btn" data-tab="tab-assets" id="install-tab-assets">Game Assets</button>
-      </div>
-
-      <div class="tab-panel active" id="tab-appimage">
-        <p class="text-muted mb-md">The AppImage is self-contained. Just make it executable and run it:</p>
-        <div class="code-block">
-<pre><span class="cm"># Download the .deb package (Debian/Ubuntu)</span>
-wget <span class="str">https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop_2.0.0_amd64.deb</span>
-
-<span class="cm"># Install</span>
-sudo dpkg -i swordigo-desktop_2.0.0_amd64.deb
-
-<span class="cm"># Place your game assets in the install directory</span>
-mkdir -p assets/
-
-<span class="cm"># Run!</span>
-swordigo-desktop</pre>
-        </div>
-        <div style="margin-top:16px; padding:14px; background:rgba(245,200,66,0.08); border:1px solid rgba(245,200,66,0.25); border-radius:8px;">
-          <strong style="color:var(--clr-gold)">⚠ Known issue:</strong>
-          <span class="text-muted"> Background music may be less reliable in the AppImage build compared to building from source.</span>
-        </div>
-      </div>
-
-      <div class="tab-panel" id="tab-deps">
-        <p class="text-muted mb-md">System dependencies required (usually pre-installed on most distros):</p>
-        <div class="grid grid--2" style="gap:var(--space-sm);">
-          <div style="background:rgba(0,0,0,0.3); border:1px solid var(--clr-border); border-radius:8px; padding:12px;">
-            <div style="font-family:var(--font-mono); font-size:0.85rem; color:var(--clr-cyan); margin-bottom:4px;">SDL2</div>
-            <div class="text-muted" style="font-size:0.8rem;">Window management, input handling</div>
-          </div>
-          <div style="background:rgba(0,0,0,0.3); border:1px solid var(--clr-border); border-radius:8px; padding:12px;">
-            <div style="font-family:var(--font-mono); font-size:0.85rem; color:var(--clr-cyan); margin-bottom:4px;">OpenAL</div>
-            <div class="text-muted" style="font-size:0.8rem;">3D audio, sound effects</div>
-          </div>
-          <div style="background:rgba(0,0,0,0.3); border:1px solid var(--clr-border); border-radius:8px; padding:12px;">
-            <div style="font-family:var(--font-mono); font-size:0.85rem; color:var(--clr-cyan); margin-bottom:4px;">OpenGL</div>
-            <div class="text-muted" style="font-size:0.8rem;">Desktop renderer (Mesa / NVIDIA / AMD)</div>
-          </div>
-          <div style="background:rgba(0,0,0,0.3); border:1px solid var(--clr-border); border-radius:8px; padding:12px;">
-            <div style="font-family:var(--font-mono); font-size:0.85rem; color:var(--clr-cyan); margin-bottom:4px;">Unicorn Engine</div>
-            <div class="text-muted" style="font-size:0.8rem;">ARMv7 emulation (bundled in AppImage)</div>
-          </div>
-        </div>
-        <div class="code-block mt-md">
-<pre><span class="cm"># Ubuntu / Debian</span>
-sudo apt install libsdl2-2.0-0 libopenal1 libgl1
-
-<span class="cm"># Fedora / RHEL</span>
-sudo dnf install SDL2 openal-soft mesa-libGL
-
-<span class="cm"># Arch Linux</span>
-sudo pacman -S sdl2 openal mesa</pre>
-        </div>
-      </div>
-
-      <div class="tab-panel" id="tab-assets">
-        <div style="padding:16px; background:rgba(255,61,107,0.08); border:1px solid rgba(255,61,107,0.25); border-radius:8px; margin-bottom:16px;">
-          <strong style="color:var(--clr-red)">⚠ IMPORTANT:</strong>
-          <span class="text-muted"> This project does <strong>not</strong> distribute original game assets or binaries. You must provide your own from a legally-owned copy of Swordigo.</span>
-        </div>
-        <p class="text-muted mb-md">Game assets must be placed in the <code style="font-family:var(--font-mono); color:var(--clr-cyan)">assets/</code> directory next to the executable:</p>
-        <div class="code-block">
-<pre>swordigo-desktop            # or swordigo_boot if built from source
-libswordigo.so              # v1.4.6 game binary (required)
-libswordigo_test.so         # v1.4.12 game binary (optional)
-assets/
-  resources/</pre>
-        </div>
-        <p class="text-muted mt-md" style="font-size:0.85rem;">Extract assets from a legally-obtained copy of the Swordigo APK using a tool like <code style="font-family:var(--font-mono)">apktool</code>.</p>
-      </div>
-    </div>
-
-    <!-- Build from Source -->
-    <div class="card reveal mt-xl" id="build-source">
-      <h2 class="card__title" style="font-size:1.3rem; margin-bottom:var(--space-md);">🔨 Build from Source</h2>
-      <p class="text-muted mb-md">For the best experience (especially audio), build from source:</p>
-      <div class="code-block">
-<pre><span class="cm"># Clone the repository</span>
-git clone <span class="str">https://github.com/TheCorrectSynovian/SwordigoDesktop.git</span>
-cd SwordigoDesktop
-
-<span class="cm"># Ensure you have the dependencies: unicorn, sdl2, openal, libgl</span>
-<span class="cm"># Then build:</span>
-make swordigo_boot
-
-<span class="cm"># Run</span>
-./swordigo_boot</pre>
-      </div>
-      <div class="mt-md">
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener" class="btn btn--secondary" id="build-source-link">View Full Build Instructions on GitHub →</a>
-      </div>
-    </div>
-
-  </div>
-</section>
-
-<!-- KNOWN ISSUES -->
-<section class="section" style="background: rgba(13,16,32,0.7);" id="known-issues-section">
-  <div class="container container--narrow">
-    <div class="section-header reveal">
-      <span class="section-label">Transparency</span>
-      <h2 class="section-title">Known <span class="grad">Issues</span></h2>
-    </div>
-
-    <div class="grid grid--2 reveal">
-      <div class="card">
-        <div style="display:flex; align-items:center; gap:10px; margin-bottom:var(--space-md);">
-          <span class="badge badge--issue">Bug</span>
-          <span class="card__title" style="margin:0;">Save Data</span>
-        </div>
-        <p class="card__body">Save data is currently not written correctly and may not persist between sessions. Progress will be lost on exit.</p>
-        <p class="text-muted mt-md" style="font-size:0.8rem;">Status: Active development — future release priority.</p>
-      </div>
-
-      <div class="card">
-        <div style="display:flex; align-items:center; gap:10px; margin-bottom:var(--space-md);">
-          <span class="badge badge--issue">Bug</span>
-          <span class="card__title" style="margin:0;">Background Music</span>
-        </div>
-        <p class="card__body">Background music playback is unreliable and may fail to start. More common in the AppImage build due to audio backend differences.</p>
-        <p class="text-muted mt-md" style="font-size:0.8rem;">Workaround: Build from source for better audio stability.</p>
-      </div>
-
-      <div class="card">
-        <div style="display:flex; align-items:center; gap:10px; margin-bottom:var(--space-md);">
-          <span class="badge badge--wip">Minor</span>
-          <span class="card__title" style="margin:0;">Graphical Artifacts</span>
-        </div>
-        <p class="card__body">Minor graphical artifacts may occasionally appear. These are related to the GLES 1.x to desktop OpenGL translation layer.</p>
-        <p class="text-muted mt-md" style="font-size:0.8rem;">Status: Being investigated and improved.</p>
-      </div>
-
-      <div class="card">
-        <div style="display:flex; align-items:center; gap:10px; margin-bottom:var(--space-md);">
-          <span class="badge badge--wip">Partial</span>
-          <span class="card__title" style="margin:0;">Android-Specific Features</span>
-        </div>
-        <p class="card__body">Some Android-specific features (achievements, cloud saves, in-app purchases) remain stubbed or partially implemented.</p>
-        <p class="text-muted mt-md" style="font-size:0.8rem;">These are Android/Google Play Services features not relevant to desktop.</p>
-      </div>
+    <div class="card reveal">
+      <h3 class="mt-0">Source Code</h3>
+      <p class="card__desc">Latest source archive. Best for developers and custom builds.</p>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/archive/refs/tags/v2.tar.gz" class="btn btn--secondary btn--sm">Download .tar.gz</a>
     </div>
   </div>
-</section>
+
+  <section style="margin-top: var(--space-12);">
+    <h2>Installation Instructions</h2>
+    <div class="doc-layout" style="grid-template-columns: 1fr;">
+      <div class="doc-layout__content">
+        <h3>1. Install the Package</h3>
+        <p>Use your distribution's package manager to install the downloaded file.</p>
+        <pre><code># For RPM (Fedora/RHEL)
+sudo dnf install ./swordigo-desktop-*.rpm
+
+# For DEB (Debian/Ubuntu)
+sudo apt install ./swordigo-desktop_*.deb</code></pre>
+
+        <h3>2. Run the Bootstrap Script</h3>
+        <p>The bootstrap script will download the necessary game assets and set up the environment.</p>
+        <pre><code>chmod +x instx.sh
+./instx.sh --bootstrap</code></pre>
+
+        <h3>3. Launch the Game</h3>
+        <p>Run the launcher script to start the game with the SRE runtime.</p>
+        <pre><code>./run_swordigo.sh</code></pre>
+
+        <div class="callout callout--warning">
+          <div class="callout__title">Dependency Note</div>
+          <p class="mb-0">Ensure you have <code>libsdl2</code> (or <code>libsdl3</code>), <code>libopenal</code>, and <code>mesa-libGL</code> installed if they are not automatically pulled by the package manager.</p>
+        </div>
+      </div>
+    </div>
+  </section>
 </main>
 
 <footer class="footer">
   <div class="container">
-    <div class="footer__grid">
-      <div class="footer__brand">
-        <div style="margin-bottom:12px; display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:700; color:var(--clr-text);">
-          <span style="font-size:1.5rem;">⚔️</span>
-          <span style="background:var(--grad-text); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">Swordigo Desktop</span>
-        </div>
-        <p>A Linux-native port running the original ARM binary through a custom compatibility runtime.</p>
-      </div>
-      <div class="footer__col">
-        <h3>Navigation</h3>
-        <ul class="footer__links">
-          <li><a href="index.html">Home</a></li>
-          <li><a href="download.html">Download</a></li>
-          <li><a href="technical.html">Technical Docs</a></li>
-          <li><a href="research.html">Research Papers</a></li>
-          <li><a href="changelog.html">Changelog</a></li>
-        </ul>
-      </div>
-      <div class="footer__col">
-        <h3>Links</h3>
-        <ul class="footer__links">
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener">GitHub</a></li>
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop_2.0.0_amd64.deb">Direct Download</a></li>
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v2" target="_blank" rel="noopener">Changelog</a></li>
-        </ul>
-      </div>
-      <div class="footer__col">
-        <h3>Legal</h3>
-        <ul class="footer__links">
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/LICENSE" target="_blank" rel="noopener">License</a></li>
-        </ul>
-        <p style="font-size:0.78rem; color:var(--clr-text-dim); margin-top:var(--space-sm);">Swordigo © Touch Foo. This project does not distribute game assets.</p>
-      </div>
-    </div>
-    <div class="footer__bottom">
-      <span>© 2026 SwordigoDesktop Project</span>
-      <span><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener">github.com/TheCorrectSynovian/SwordigoDesktop</a></span>
+    <div class="footer__inner">
+      <p>&copy; 2026 QuantumCreeper Labs. All rights reserved.</p>
+      <ul class="navbar__nav">
+        <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop">GitHub</a></li>
+        <li><a href="sitemap.xml">Sitemap</a></li>
+      </ul>
     </div>
   </div>
 </footer>

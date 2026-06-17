@@ -4,756 +4,121 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Research Papers — Swordigo Desktop</title>
-  <meta name="description" content="Complete reverse-engineering research documentation for the Swordigo Desktop Linux port. 30 detailed technical papers.">
-  <meta name="keywords" content="Swordigo research papers, reverse engineering, Caver engine, ARM ELF analysis, JNI bridge, game preservation, SRE">
-  <meta name="author" content="QuantumCreeper Labs">
-  <meta name="robots" content="index, follow">
-  <link rel="canonical" href="https://thecorrectsynovian.github.io/SwordigoDesktop/web/research.html">
-  <meta property="og:title" content="Research Papers — Swordigo Desktop SRE">
-  <meta property="og:description" content="30 engineering research documents covering every layer of the Swordigo Runtime Environment — from ELF loading to protobuf asset schemas.">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="https://thecorrectsynovian.github.io/SwordigoDesktop/web/research.html">
-  <meta property="og:image" content="https://thecorrectsynovian.github.io/SwordigoDesktop/web/assets/og-image.png">
-  <meta property="og:site_name" content="Swordigo Desktop — SRE">
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Research Papers — Swordigo Desktop SRE">
-  <meta name="twitter:description" content="30 research documents on the Swordigo Runtime Environment architecture.">
-  <meta name="twitter:image" content="https://thecorrectsynovian.github.io/SwordigoDesktop/web/assets/og-image.png">
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📄</text></svg>">
-  <style>
-    .filter-bar {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-bottom: var(--space-lg);
-    }
-    .filter-btn {
-      padding: 6px 16px;
-      border-radius: 99px;
-      border: 1px solid var(--clr-border);
-      background: transparent;
-      color: var(--clr-text-muted);
-      font-size: 0.8rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s;
-      font-family: var(--font-body);
-    }
-    .filter-btn:hover { border-color: rgba(139,61,255,0.4); color: var(--clr-text); }
-    .filter-btn.active { background: rgba(139,61,255,0.2); border-color: rgba(139,61,255,0.5); color: var(--clr-purple-lt); }
-
-    .paper-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-      gap: var(--space-md);
-    }
-
-    .paper-full {
-      background: var(--grad-card);
-      border: 1px solid var(--clr-border);
-      border-radius: var(--radius-lg);
-      overflow: hidden;
-      transition: all 0.3s var(--ease-out);
-    }
-    .paper-full:hover {
-      border-color: rgba(139,61,255,0.35);
-      transform: translateY(-3px);
-      box-shadow: var(--shadow-card);
-    }
-    .paper-full__header {
-      padding: var(--space-md) var(--space-lg);
-      border-bottom: 1px solid rgba(255,255,255,0.05);
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-    .paper-full__icon { font-size: 1.5rem; }
-    .paper-full__body { padding: var(--space-md) var(--space-lg); }
-    .paper-full__title {
-      font-family: var(--font-display);
-      font-size: 1rem;
-      font-weight: 600;
-      color: var(--clr-text);
-      margin-bottom: 6px;
-    }
-    .paper-full__desc {
-      font-size: 0.85rem;
-      color: var(--clr-text-muted);
-      line-height: 1.65;
-      margin-bottom: var(--space-sm);
-    }
-    .paper-full__footer {
-      padding: var(--space-sm) var(--space-lg) var(--space-md);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-    .paper-full__meta {
-      font-family: var(--font-mono);
-      font-size: 0.7rem;
-      color: var(--clr-text-dim);
-    }
-  </style>
 </head>
 <body>
+
 <canvas id="stars-canvas"></canvas>
 
-<nav class="navbar" id="navbar">
+<nav class="navbar">
   <div class="container">
     <div class="navbar__inner">
       <a href="index.html" class="navbar__logo">
-        <span class="navbar__logo-icon">⚔️</span>
-        <div class="navbar__logo-text"><span>Swordigo</span> Desktop</div>
+        <span>⚔️</span> Swordigo Desktop
       </a>
-      <ul class="navbar__nav" id="main-nav">
+      <ul class="navbar__nav">
         <li><a href="index.html">Home</a></li>
         <li><a href="download.html">Download</a></li>
         <li><a href="technical.html">Technical</a></li>
-        <li><a href="research.html">Research</a></li>
+        <li><a href="research.html" class="active">Research</a></li>
         <li><a href="changelog.html">Changelog</a></li>
       </ul>
-      <div class="navbar__cta" id="nav-cta">
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener" class="btn btn--secondary btn--sm">GitHub</a>
-        <a href="download.html" class="btn btn--primary btn--sm">⬇ Download</a>
+      <div class="navbar__cta">
+        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" class="btn btn--secondary btn--sm">GitHub</a>
+        <a href="download.html" class="btn btn--primary btn--sm">Download</a>
       </div>
-      <button class="hamburger" id="hamburger" aria-label="Toggle menu"><span></span><span></span><span></span></button>
     </div>
   </div>
 </nav>
 
-<main>
-<div class="page-header">
-  <div class="container">
-    <span class="section-label">Engineering Research</span>
-    <h1 class="section-title">Research <span class="grad">Papers</span></h1>
-    <p class="section-desc">30 detailed technical documents covering every aspect of the Swordigo Desktop port — from initial feasibility studies through crash investigations to final implementation.</p>
-    <div class="mt-lg" style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
-      <span class="badge badge--info">30 Documents</span>
-      <span class="badge badge--working">All Public</span>
-      <span class="badge badge--wip">Reverse Engineering Research</span>
+<main class="container">
+  <section class="hero" style="padding: var(--space-12) 0; text-align: left;">
+    <h1 class="hero__title" style="font-size: 2.5rem;">Research <span class="grad">Archive</span></h1>
+    <p class="hero__subtitle" style="margin-left: 0; max-width: 800px;">
+      A collection of engineering papers and reverse-engineering logs detailing the development of the Swordigo Runtime Environment.
+    </p>
+  </section>
+
+  <div class="doc-layout" style="grid-template-columns: 1fr;">
+    <div class="doc-layout__content">
+      <div class="grid grid--3">
+        <!-- Core Research -->
+        <div class="card reveal">
+          <div class="card__icon">📦</div>
+          <h3 class="card__title">ELF Relocation Analysis</h3>
+          <p class="card__desc">Deep dive into the relocation types required for ARM ELF32 binaries on x86_64 Linux.</p>
+          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
+        </div>
+        <div class="card reveal">
+          <div class="card__icon">🧬</div>
+          <h3 class="card__title">JNI Bridge Design</h3>
+          <p class="card__desc">Architecture of the marshalling layer between the ARM emulator and native C++ shims.</p>
+          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
+        </div>
+        <div class="card reveal">
+          <div class="card__icon">🎬</div>
+          <h3 class="card__title">GLES Translation</h3>
+          <p class="card__desc">Mapping legacy GLES 1.x calls to modern Desktop OpenGL with shader injection.</p>
+          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
+        </div>
+        
+        <!-- Engine Research -->
+        <div class="card reveal">
+          <div class="card__icon">🧩</div>
+          <h3 class="card__title">Caver Engine Internals</h3>
+          <p class="card__desc">Reverse engineering the scene graph, memory layout, and object lifecycle of the Caver engine.</p>
+          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
+        </div>
+        <div class="card reveal">
+          <div class="card__icon">🌙</div>
+          <h3 class="card__title">Lua 5.1 Runtime</h3>
+          <p class="card__desc">Inventory of Lua API exports and debugging the script execution environment.</p>
+          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
+        </div>
+        <div class="card reveal">
+          <div class="card__icon">💾</div>
+          <h3 class="card__title">Save Data Schema</h3>
+          <p class="card__desc">Analysis of the binary save format and protobuf asset definitions.</p>
+          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
+        </div>
+
+        <!-- Platform Research -->
+        <div class="card reveal">
+          <div class="card__icon">🎮</div>
+          <h3 class="card__title">SDL3 Migration</h3>
+          <p class="card__desc">Planning the transition from SDL2 to SDL3 for improved Wayland and input support.</p>
+          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
+        </div>
+        <div class="card reveal">
+          <div class="card__icon">💻</div>
+          <h3 class="card__title">ARM Execution Options</h3>
+          <p class="card__desc">Benchmarking different ARM emulation strategies (Unicorn, Dynarmic, QEMU-User).</p>
+          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
+        </div>
+        <div class="card reveal">
+          <div class="card__icon">🔍</div>
+          <h3 class="card__title">Crash Investigation</h3>
+          <p class="card__desc">Root cause analysis of boot-sequence memory corruption and ELF loading errors.</p>
+          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
+        </div>
+      </div>
     </div>
   </div>
-</div>
-
-<!-- FILTER BAR -->
-<section class="section" id="all-papers">
-  <div class="container">
-    <div class="filter-bar reveal" id="filter-bar">
-      <button class="filter-btn active" data-filter="all" id="filter-all">All Papers</button>
-      <button class="filter-btn" data-filter="architecture" id="filter-arch">Architecture</button>
-      <button class="filter-btn" data-filter="analysis" id="filter-analysis">Analysis</button>
-      <button class="filter-btn" data-filter="debugging" id="filter-debug">Debugging</button>
-      <button class="filter-btn" data-filter="data-formats" id="filter-data">Data Formats</button>
-      <button class="filter-btn" data-filter="progress" id="filter-progress">Progress</button>
-    </div>
-
-    <div class="paper-grid" id="paper-grid">
-
-      <!-- findings -->
-      <div class="paper-full reveal" data-category="analysis" id="findings">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🔬</span>
-          <span class="badge badge--info">Analysis</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Core Research Findings</div>
-          <div class="paper-full__desc">The master research document. Covers Vita loader architecture, startup sequence, local native library symbol facts, JNI requirements, Android API dependencies, and asset format analysis. 75 evidence-backed findings.</div>
-          <div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:8px;">
-            <span class="badge badge--info" style="font-size:0.68rem;">Vita Loader</span>
-            <span class="badge badge--info" style="font-size:0.68rem;">JNI</span>
-            <span class="badge badge--info" style="font-size:0.68rem;">Android APIs</span>
-            <span class="badge badge--info" style="font-size:0.68rem;">Assets</span>
-          </div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">findings.md · 13.6 KB · Agent 1+2</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/findings.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-findings-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- linux_loader_design -->
-      <div class="paper-full reveal" data-category="architecture" id="linux-loader">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">📐</span>
-          <span class="badge badge--working">Architecture</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Linux Loader Design</div>
-          <div class="paper-full__desc">Complete blueprint for the ARMv7-on-x86_64 ELF loader. Covers ELF loading, relocation, JNI requirements table, Android compatibility layer API mapping, and the minimum viable boot path to reach setupApplication().</div>
-          <div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:8px;">
-            <span class="badge badge--working" style="font-size:0.68rem;">ELF Loader</span>
-            <span class="badge badge--working" style="font-size:0.68rem;">ARM</span>
-            <span class="badge badge--working" style="font-size:0.68rem;">JNI</span>
-          </div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">linux_loader_design.md · 3.3 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/linux_loader_design.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-loader-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- arm_execution_options -->
-      <div class="paper-full reveal" data-category="architecture" id="arm-exec">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">⚙️</span>
-          <span class="badge badge--working">Architecture</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">ARM Execution Feasibility Study</div>
-          <div class="paper-full__desc">Comparative analysis of QEMU User Mode, Unicorn Engine, Dynarmic, Android Emulator, and Box86 for executing ARMv7 on x86_64 Linux. Final recommendation: embedded Unicorn emulation with trampolines.</div>
-          <div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:8px;">
-            <span class="badge badge--working" style="font-size:0.68rem;">QEMU</span>
-            <span class="badge badge--working" style="font-size:0.68rem;">Unicorn</span>
-            <span class="badge badge--working" style="font-size:0.68rem;">Dynarmic</span>
-          </div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">arm_execution_options.md · 4.8 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/arm_execution_options.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-arm-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- mission_7a_final_summary -->
-      <div class="paper-full reveal" data-category="debugging" id="mission7a">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">💥</span>
-          <span class="badge badge--issue">Debugging</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Mission 7A — Root Cause Summary</div>
-          <div class="paper-full__desc">Root cause analysis of the UC_ERR_FETCH_UNMAPPED crash at 0x10000000 after 62M ARM instructions. Identifies missing .bss initialization as the culprit. Includes exact code patches and memory layout diagrams.</div>
-          <div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:8px;">
-            <span class="badge badge--issue" style="font-size:0.68rem;">Crash Analysis</span>
-            <span class="badge badge--issue" style="font-size:0.68rem;">.bss Bug</span>
-            <span class="badge badge--issue" style="font-size:0.68rem;">Unicorn</span>
-          </div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">mission_7a_final_summary.md · 5.2 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/mission_7a_final_summary.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-m7a-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- mission_7a_investigation_complete -->
-      <div class="paper-full reveal" data-category="debugging">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🔍</span>
-          <span class="badge badge--issue">Debugging</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Mission 7A — Full Investigation</div>
-          <div class="paper-full__desc">Complete investigation trail for the memory fetch fault. Includes disassembly analysis, relocation value tracing, function execution profiles, and the identification of the R_ARM_RELATIVE relocation failure.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">mission_7a_investigation_complete.md · 10.0 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/mission_7a_investigation_complete.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-m7a-inv-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- mission_7a_crash_analysis -->
-      <div class="paper-full reveal" data-category="debugging">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🩻</span>
-          <span class="badge badge--issue">Debugging</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Mission 7A — Crash Analysis</div>
-          <div class="paper-full__desc">Step-by-step crash analysis with Unicorn error codes, register dumps, stack traces, and memory map inspection leading to the identification of the unmapped address fault.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">mission_7a_crash_analysis.md · 8.1 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/mission_7a_crash_analysis.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-m7a-crash-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- mission_7a_relocation_smoking_gun -->
-      <div class="paper-full reveal" data-category="debugging">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🔫</span>
-          <span class="badge badge--issue">Debugging</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Mission 7A — Relocation Smoking Gun</div>
-          <div class="paper-full__desc">Pinpoints the exact R_ARM_RELATIVE relocation at offset 0x444ef4 that produced the invalid 0x10000000 pointer, providing definitive evidence for the .bss zero-fill bug.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">mission_7a_relocation_smoking_gun.md · 3.0 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/mission_7a_relocation_smoking_gun.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-m7a-relo-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- protobuf_schema -->
-      <div class="paper-full reveal" data-category="data-formats" id="protobuf">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">📊</span>
-          <span class="badge badge--wip">Data Formats</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Protobuf Schema Analysis</div>
-          <div class="paper-full__desc">Decoded field mappings for .gdata (items, quests, triggers), .scene (scene objects, components, Lua scripts), .gstate (player state, inventory, spells), and .scl (entity class templates).</div>
-          <div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:8px;">
-            <span class="badge badge--wip" style="font-size:0.68rem;">.gdata</span>
-            <span class="badge badge--wip" style="font-size:0.68rem;">.scene</span>
-            <span class="badge badge--wip" style="font-size:0.68rem;">.gstate</span>
-            <span class="badge badge--wip" style="font-size:0.68rem;">.scl</span>
-          </div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">protobuf_schema.md · 4.6 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/protobuf_schema.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-proto-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- android_dependencies -->
-      <div class="paper-full reveal" data-category="analysis">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">📱</span>
-          <span class="badge badge--info">Analysis</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Android Dependencies Catalog</div>
-          <div class="paper-full__desc">Complete catalog of all Android API imports: native shared libraries (DT_NEEDED), NDK asset APIs, JNI functions, GLES/EGL symbols, OpenAL functions, and libc/pthread/zlib surface.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">android_dependencies.md · 4.5 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/android_dependencies.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-android-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- boot_sequence -->
-      <div class="paper-full reveal" data-category="analysis">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🚀</span>
-          <span class="badge badge--info">Analysis</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Engine Boot Sequence</div>
-          <div class="paper-full__desc">Documented call sequence from both the Android Java path and the Vita loader path. Maps every step from library load to the frame render loop, with evidence citations for each call.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">boot_sequence.md · 6.3 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/boot_sequence.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-boot-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- native_engine_map -->
-      <div class="paper-full reveal" data-category="analysis" id="engine-map">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🗺️</span>
-          <span class="badge badge--info">Analysis</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Native Engine Map</div>
-          <div class="paper-full__desc">Full breakdown of the Caver namespace: engine core (CaverShell, FWShell), scene graph (Scene, Entity, Component), Lua scripting (Program, ProgramState), data layer (GameData, GameState), and 3D model loading (PODLoader).</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">native_engine_map.md · 1.2 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/native_engine_map.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-engine-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- native_symbol_map -->
-      <div class="paper-full reveal" data-category="analysis">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🔣</span>
-          <span class="badge badge--info">Analysis</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Native Symbol Map</div>
-          <div class="paper-full__desc">Mapped C++ symbol names from libswordigo.so with address offsets. Public reverse-engineering research artifact used to identify and hook internal engine functions.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">native_symbol_map.md · 2.0 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/native_symbol_map.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-syms-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- version_comparison -->
-      <div class="paper-full reveal" data-category="analysis">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">⚖️</span>
-          <span class="badge badge--info">Analysis</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Version Comparison (1.1 vs 1.4.6)</div>
-          <div class="paper-full__desc">Side-by-side comparison of Swordigo v1.1 and v1.4.6 native libraries. v1.4.6 adds 13 JNI exports including handleApplicationLaunch, making it the correct target version that aligns with the Vita port.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">version_comparison.md · 697 B</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/version_comparison.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-ver-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- progress_log -->
-      <div class="paper-full reveal" data-category="progress">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">📈</span>
-          <span class="badge badge--wip">Progress</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Development Progress Log</div>
-          <div class="paper-full__desc">Chronological log of all development milestones: Vita loader research, Linux loader design, boot prototype, Unicorn integration, 1M+ instructions in drawApplication(), and memory pressure investigations.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">progress_log.md · 4.4 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/progress_log.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-prog-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- hypotheses -->
-      <div class="paper-full reveal" data-category="analysis">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">💡</span>
-          <span class="badge badge--info">Analysis</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Research Hypotheses</div>
-          <div class="paper-full__desc">Initial hypotheses about the engine's behavior, boot requirements, and compatibility challenges. Documents the scientific approach to reverse engineering the startup sequence.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">hypotheses.md · 2.5 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/hypotheses.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-hyp-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- mission_8a_final_handoff -->
-      <div class="paper-full reveal" data-category="debugging">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🤝</span>
-          <span class="badge badge--issue">Debugging</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Mission 8A — Final Handoff</div>
-          <div class="paper-full__desc">Handoff document for the memory pressure investigation — agent-to-agent documentation of the state of the boot prototype after reaching 1M+ ARM instructions in drawApplication().</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">mission_8a_final_handoff.md · 6.2 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/mission_8a_final_handoff.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-m8a-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- mission_8a_memory_audit -->
-      <div class="paper-full reveal" data-category="debugging">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🧠</span>
-          <span class="badge badge--issue">Debugging</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Mission 8A — Memory Audit</div>
-          <div class="paper-full__desc">Deep memory audit identifying the >1GB guest memory pressure issue. Maps allocations, identifies uninitialized pointer dereferences, and documents the heap fragmentation patterns.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">mission_8a_memory_audit.md · 7.6 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/mission_8a_memory_audit.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-m8a-mem-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- mission_8b_asset_loading -->
-      <div class="paper-full reveal" data-category="data-formats">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">📦</span>
-          <span class="badge badge--wip">Data Formats</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Mission 8B — Asset Loading</div>
-          <div class="paper-full__desc">Investigation of the asset loading pipeline — AAssetManager filesystem shim behavior, asset open/read/seek/close bridge implementation, and file descriptor proxying.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">mission_8b_asset_loading.md · 1.8 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/mission_8b_asset_loading.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-m8b-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- mission_8b_relocation_instrumentation -->
-      <div class="paper-full reveal" data-category="debugging">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🛠️</span>
-          <span class="badge badge--issue">Debugging</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Mission 8B — Relocation Instrumentation</div>
-          <div class="paper-full__desc">Added diagnostic logging to the relocation engine to trace all R_ARM_RELATIVE operations. Resulted in finding suspicious relocation values that pointed to investigation of the .bss corruption.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">mission_8b_relocation_instrumentation.md · 4.7 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/mission_8b_relocation_instrumentation.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-m8b-relo-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- pod_pipeline -->
-      <div class="paper-full reveal" data-category="data-formats">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🗿</span>
-          <span class="badge badge--wip">Data Formats</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">POD Asset Pipeline</div>
-          <div class="paper-full__desc">Analysis of the PowerVR Object Data (.POD) pipeline — 787 model files covering animated characters, props, and environment geometry. Covers external .pvr texture references and animation data structures.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">pod_pipeline.md · 1.9 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/pod_pipeline.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-pod-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- jni_export_diff -->
-      <div class="paper-full reveal" data-category="analysis">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🔀</span>
-          <span class="badge badge--info">Analysis</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">JNI Export Diff (v1.1 vs v1.4.6)</div>
-          <div class="paper-full__desc">Precise diff of JNI exported functions between Swordigo v1.1 and v1.4.6. Documents the 13 new exports added in v1.4.6 that enable Vita port compatibility.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">jni_export_diff.md · 1.2 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/jni_export_diff.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-jni-diff-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- data_dependency_map -->
-      <div class="paper-full reveal" data-category="data-formats">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🕸️</span>
-          <span class="badge badge--wip">Data Formats</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Data Dependency Map</div>
-          <div class="paper-full__desc">Comprehensive graph of how game resources interact — how .scene files reference .scl entity templates, .gdata items, Lua scripts, and .POD models. Critical for understanding the asset loading pipeline.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">data_dependency_map.md · 2.5 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/data_dependency_map.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-dep-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- recommended_target_version -->
-      <div class="paper-full reveal" data-category="analysis">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🎯</span>
-          <span class="badge badge--info">Analysis</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Recommended Target Version</div>
-          <div class="paper-full__desc">Decision document recommending Swordigo v1.4.6 as the primary development target. Justification: 31 JNI exports (vs 18 in v1.1), handles full Vita startup sequence, includes handleApplicationLaunch.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">recommended_target_version.md · 1.2 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/recommended_target_version.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-rec-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- vita_compatibility_matrix -->
-      <div class="paper-full reveal" data-category="architecture">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🎮</span>
-          <span class="badge badge--working">Architecture</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Vita Compatibility Matrix</div>
-          <div class="paper-full__desc">Feature-by-feature comparison of the PS Vita port approach vs. the Linux desktop approach. Documents what can be directly ported, what needs adaptation, and what must be reimplemented.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">vita_compatibility_matrix.md · 919 B</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/vita_compatibility_matrix.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-vita-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- questions -->
-      <div class="paper-full reveal" data-category="progress">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">❓</span>
-          <span class="badge badge--wip">Progress</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Open Research Questions</div>
-          <div class="paper-full__desc">Documented open questions that guided the investigation — what field numbers map to what data, how Lua scripts are invoked, exact stack frame layout at crash points.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">questions.md · 2.4 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/questions.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-q-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- AGENT handoffs -->
-      <div class="paper-full reveal" data-category="progress">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">📬</span>
-          <span class="badge badge--wip">Progress</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Agent 1 JNI Findings</div>
-          <div class="paper-full__desc">First agent's detailed JNI compatibility findings including the minimum fake JNI surface required to get past setupNativeInterface() and the full evidence trail.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">agent1_jni_compat_findings.md · 9.7 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/agent1_jni_compat_findings.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-a1-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <div class="paper-full reveal" data-category="progress">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🤖</span>
-          <span class="badge badge--wip">Progress</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Agent 2 Handoff Document</div>
-          <div class="paper-full__desc">Detailed handoff from the initial research agent to the implementation agent. Covers all findings, open questions, and recommended next steps for the Linux port implementation.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">AGENT_2_HANDOFF.md · 5.7 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/AGENT_2_HANDOFF.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-a2-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- boot_observations_log -->
-      <div class="paper-full reveal" data-category="progress">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">📋</span>
-          <span class="badge badge--wip">Progress</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Boot Observations Log</div>
-          <div class="paper-full__desc">Real-time observations during early boot prototype runs — what printed to stdout, what segfaulted, what succeeded, used to guide the iterative boot sequence implementation.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">boot_observations_log.md · 2.7 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/boot_observations_log.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-boot-obs-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- boot_prototype_status -->
-      <div class="paper-full reveal" data-category="progress">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🏗️</span>
-          <span class="badge badge--wip">Progress</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Boot Prototype Status</div>
-          <div class="paper-full__desc">Snapshot of the boot prototype's state — which functions return successfully, which fault, and what the next iteration needs to resolve to reach the render loop.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">boot_prototype_status.md · 1.6 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/boot_prototype_status.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-boot-proto-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- experiment_001 -->
-      <div class="paper-full reveal" data-category="data-formats">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🧪</span>
-          <span class="badge badge--wip">Data Formats</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Experiment 001 — Asset Format Probing</div>
-          <div class="paper-full__desc">First hands-on experiment with game assets using file, xxd, and protoc --decode_raw. Confirmed protobuf encoding of .gdata, .scene, and .gstate files and documented first field mappings.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">experiments/experiment_001.md · 3.7 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/research/experiments/experiment_001.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-exp001-link">View on GitHub →</a>
-        </div>
-      </div>
-
-      <!-- CLEANUP REPORT -->
-      <div class="paper-full reveal" data-category="progress">
-        <div class="paper-full__header">
-          <span class="paper-full__icon">🧹</span>
-          <span class="badge badge--wip">Progress</span>
-        </div>
-        <div class="paper-full__body">
-          <div class="paper-full__title">Cleanup &amp; GitHub Publication Report</div>
-          <div class="paper-full__desc">Pre-publication audit of the entire 1.9GB repository. Identifies 13,596 files, categorizes what's safe to commit, what's copyrighted game content (do not distribute), and recommended pre-publication actions.</div>
-        </div>
-        <div class="paper-full__footer">
-          <span class="paper-full__meta">CLEANUP_REPORT.md · 10.4 KB</span>
-          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/CLEANUP_REPORT.md" target="_blank" rel="noopener" class="btn btn--outline btn--sm" id="paper-cleanup-link">View on GitHub →</a>
-        </div>
-      </div>
-
-    </div><!-- end paper-grid -->
-
-    <!-- Direct GitHub link -->
-    <div class="text-center mt-xl reveal">
-      <p class="text-muted mb-md">All research documents are available in the GitHub repository:</p>
-      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/tree/master/research" target="_blank" rel="noopener"
-         class="btn btn--primary btn--lg" id="view-all-github-btn">
-        View All Research on GitHub →
-      </a>
-    </div>
-  </div>
-</section>
 </main>
 
 <footer class="footer">
   <div class="container">
-    <div class="footer__grid">
-      <div class="footer__brand">
-        <div style="margin-bottom:12px; display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:700; color:var(--clr-text);">
-          <span style="font-size:1.5rem;">⚔️</span>
-          <span style="background:var(--grad-text); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">Swordigo Desktop</span>
-        </div>
-        <p>30 research documents covering every aspect of the Linux port project.</p>
-      </div>
-      <div class="footer__col">
-        <h3>Navigation</h3>
-        <ul class="footer__links">
-          <li><a href="index.html">Home</a></li>
-          <li><a href="download.html">Download</a></li>
-          <li><a href="technical.html">Technical Docs</a></li>
-          <li><a href="research.html">Research Papers</a></li>
-          <li><a href="changelog.html">Changelog</a></li>
-        </ul>
-      </div>
-      <div class="footer__col">
-        <h3>Top Papers</h3>
-        <ul class="footer__links">
-          <li><a href="#findings">Core Findings</a></li>
-          <li><a href="#linux-loader">Loader Design</a></li>
-          <li><a href="#mission7a">Mission 7A</a></li>
-          <li><a href="#protobuf">Protobuf Schema</a></li>
-          <li><a href="#engine-map">Engine Map</a></li>
-        </ul>
-      </div>
-      <div class="footer__col">
-        <h3>Links</h3>
-        <ul class="footer__links">
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener">GitHub Repository</a></li>
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/tree/master/research" target="_blank" rel="noopener">Research Folder</a></li>
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop_2.0.0_amd64.deb">Direct Download</a></li>
-        </ul>
-      </div>
-    </div>
-    <div class="footer__bottom">
-      <span>© 2026 SwordigoDesktop Project. Research released under fair use for educational purposes.</span>
-      <span>Swordigo © Touch Foo</span>
+    <div class="footer__inner">
+      <p>&copy; 2026 QuantumCreeper Labs. All rights reserved.</p>
+      <ul class="navbar__nav">
+        <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop">GitHub</a></li>
+        <li><a href="sitemap.xml">Sitemap</a></li>
+      </ul>
     </div>
   </div>
 </footer>
 
 <script src="main.js"></script>
-<script>
-// Filter functionality
-(function() {
-  const filterBtns = document.querySelectorAll('.filter-btn');
-  const papers = document.querySelectorAll('.paper-full');
-
-  filterBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-      filterBtns.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      const filter = btn.dataset.filter;
-      papers.forEach(p => {
-        if (filter === 'all' || p.dataset.category === filter) {
-          p.style.display = '';
-        } else {
-          p.style.display = 'none';
-        }
-      });
-    });
-  });
-})();
-</script>
 </body>
 </html>

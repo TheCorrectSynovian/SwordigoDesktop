@@ -4,465 +4,136 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Technical Documentation — Swordigo Desktop</title>
-  <meta name="description" content="Technical architecture and engineering documentation for the Swordigo Desktop Linux port project.">
-  <meta name="keywords" content="Swordigo Desktop technical documentation, SRE architecture, ELF loader, JNI bridge, ARM emulation, Unicorn Engine, OpenGL translation">
-  <meta name="author" content="QuantumCreeper Labs">
-  <meta name="robots" content="index, follow">
-  <link rel="canonical" href="https://thecorrectsynovian.github.io/SwordigoDesktop/web/technical.html">
-  <meta property="og:title" content="Technical Documentation — Swordigo Desktop SRE">
-  <meta property="og:description" content="Deep dive into the Swordigo Runtime Environment architecture: ELF loader, JNI bridge, ARM emulation, and OpenGL translation layer.">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="https://thecorrectsynovian.github.io/SwordigoDesktop/web/technical.html">
-  <meta property="og:image" content="https://thecorrectsynovian.github.io/SwordigoDesktop/web/assets/og-image.png">
-  <meta property="og:site_name" content="Swordigo Desktop — SRE">
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Technical Documentation — Swordigo Desktop SRE">
-  <meta name="twitter:description" content="SRE architecture deep dive: ELF loader, JNI bridge, ARM emulation, OpenGL translation.">
-  <meta name="twitter:image" content="https://thecorrectsynovian.github.io/SwordigoDesktop/web/assets/og-image.png">
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚙️</text></svg>">
 </head>
 <body>
+
 <canvas id="stars-canvas"></canvas>
 
-<nav class="navbar" id="navbar">
+<nav class="navbar">
   <div class="container">
     <div class="navbar__inner">
       <a href="index.html" class="navbar__logo">
-        <span class="navbar__logo-icon">⚔️</span>
-        <div class="navbar__logo-text"><span>Swordigo</span> Desktop</div>
+        <span>⚔️</span> Swordigo Desktop
       </a>
-      <ul class="navbar__nav" id="main-nav">
+      <ul class="navbar__nav">
         <li><a href="index.html">Home</a></li>
         <li><a href="download.html">Download</a></li>
-        <li><a href="technical.html">Technical</a></li>
+        <li><a href="technical.html" class="active">Technical</a></li>
         <li><a href="research.html">Research</a></li>
         <li><a href="changelog.html">Changelog</a></li>
       </ul>
-      <div class="navbar__cta" id="nav-cta">
-        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener" class="btn btn--secondary btn--sm">GitHub</a>
-        <a href="download.html" class="btn btn--primary btn--sm">⬇ Download</a>
+      <div class="navbar__cta">
+        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" class="btn btn--secondary btn--sm">GitHub</a>
+        <a href="download.html" class="btn btn--primary btn--sm">Download</a>
       </div>
-      <button class="hamburger" id="hamburger" aria-label="Toggle menu"><span></span><span></span><span></span></button>
     </div>
   </div>
 </nav>
 
-<main>
-<div class="page-header">
-  <div class="container">
-    <span class="section-label">Engineering Deep Dive</span>
-    <h1 class="section-title">Technical <span class="grad">Documentation</span></h1>
-    <p class="section-desc">How the original ARM Android binary runs on your Linux desktop — every layer explained.</p>
-  </div>
-</div>
+<main class="container">
+  <div class="doc-layout">
+    <aside class="doc-layout__sidebar">
+      <nav class="sidebar-nav">
+        <div class="sidebar-nav__group">
+          <div class="sidebar-nav__title">Core Architecture</div>
+          <a href="#overview" class="sidebar-nav__link">Overview</a>
+          <a href="#compatibility-stack" class="sidebar-nav__link">Compatibility Stack</a>
+          <a href="#execution-flow" class="sidebar-nav__link">Execution Flow</a>
+        </div>
+        <div class="sidebar-nav__group">
+          <div class="sidebar-nav__title">Subsystems</div>
+          <a href="#elf-loader" class="sidebar-nav__link">ELF Loader</a>
+          <a href="#jni-bridge" class="sidebar-nav__link">JNI Bridge</a>
+          <a href="#rendering" class="sidebar-nav__link">Rendering Pipeline</a>
+          <a href="#audio" class="sidebar-nav__link">Audio Engine</a>
+        </div>
+      </nav>
+    </aside>
 
-<!-- ARCHITECTURE OVERVIEW -->
-<section class="section" id="architecture">
-  <div class="container">
-    <div class="section-header reveal">
-      <span class="section-label">System Design</span>
-      <h2 class="section-title">Compatibility <span class="grad">Stack</span></h2>
-    </div>
+    <div class="doc-layout__content">
+      <h1 id="overview">Technical Documentation</h1>
+      <p class="hero__subtitle" style="text-align: left; margin-left: 0;">
+        Deep dive into the engineering behind the Swordigo Runtime Environment (SRE).
+      </p>
 
-    <div class="grid grid--2 reveal" style="align-items:start; gap:var(--space-xl);">
-      <div>
-        <p class="text-muted mb-lg">Swordigo Desktop bridges the gap between the original ARM Android binary and your x86_64 Linux system through a multi-layer compatibility stack:</p>
-
-        <div class="arch-layer" style="border-color: rgba(0,229,255,0.3);">
-          <span class="arch-layer__icon">🖥️</span>
-          <div>
-            <div class="arch-layer__name" style="color:var(--clr-cyan);">Host Platform (Linux x86_64)</div>
-            <div class="arch-layer__desc">SDL2 window &amp; input · OpenGL context · OpenAL device · Native filesystem</div>
+      <section id="compatibility-stack">
+        <h2>Compatibility Stack</h2>
+        <p>The SRE bridges the gap between the original ARM Android binary and the x86_64 Linux system using a multi-layered approach:</p>
+        <div class="grid grid--2">
+          <div class="card">
+            <h3 class="mt-0">Host Layer</h3>
+            <p class="card__desc mb-0">Native SDL2/3 platform handling, OpenGL context management, and filesystem abstraction.</p>
+          </div>
+          <div class="card">
+            <h3 class="mt-0">Bridge Layer</h3>
+            <p class="card__desc mb-0">JNI shims and Android system service emulators (Log, AssetManager, Configuration).</p>
           </div>
         </div>
-        <div class="arch-arrow">↕ trampoline calls / marshalling</div>
-        <div class="arch-layer" style="border-color: rgba(139,61,255,0.35);">
-          <span class="arch-layer__icon">🔧</span>
-          <div>
-            <div class="arch-layer__name" style="color:var(--clr-purple-lt);">Bridge Layer</div>
-            <div class="arch-layer__desc">JNI bridge · Android API shims · AAssetManager → fopen · liblog → printf</div>
-          </div>
-        </div>
-        <div class="arch-arrow">↕ ARM register marshalling (R0–R3)</div>
-        <div class="arch-layer" style="border-color: rgba(61,139,255,0.35);">
-          <span class="arch-layer__icon">⚙️</span>
-          <div>
-            <div class="arch-layer__name" style="color:var(--clr-blue-lt);">Unicorn Engine (ARMv7 Emulator)</div>
-            <div class="arch-layer__desc">Embedded ARMv7 CPU emulator · Memory mapping · Hook points for bridge calls</div>
-          </div>
-        </div>
-        <div class="arch-arrow">↕ ELF loading · relocation · symbol resolution</div>
-        <div class="arch-layer" style="border-color: rgba(245,200,66,0.3);">
-          <span class="arch-layer__icon">📦</span>
-          <div>
-            <div class="arch-layer__name" style="color:var(--clr-gold);">libswordigo.so (ARM ELF32)</div>
-            <div class="arch-layer__desc">Caver engine · Lua 5.1 scripting · Protobuf data · GLES 1.x renderer · OpenAL audio</div>
-          </div>
-        </div>
-      </div>
+      </section>
 
-      <div>
-        <h3 style="font-family:var(--font-display); margin-bottom:var(--space-md);">Key Technical Stats</h3>
-        <table class="data-table mb-lg">
-          <tr><th>Metric</th><th>Value</th></tr>
-          <tr><td>Architecture</td><td><code class="text-mono" style="color:var(--clr-cyan)">ARMv7 (EABI5)</code> on x86_64</td></tr>
-          <tr><td>Emulation Engine</td><td>Unicorn Engine (embedded)</td></tr>
-          <tr><td>Guest Memory</td><td>512 MB mapped address space</td></tr>
-          <tr><td>External Symbols</td><td>254 resolved via bridge</td></tr>
-          <tr><td>Internal Symbols</td><td>10,700+ in libswordigo.so</td></tr>
-          <tr><td>Relocations</td><td>10,709+ processed</td></tr>
-          <tr><td>JNI Functions</td><td>40+ fake implementations</td></tr>
-          <tr><td>Graphics</td><td>GLES 1.x → Desktop OpenGL</td></tr>
-          <tr><td>Audio</td><td>OpenAL (native Linux)</td></tr>
-          <tr><td>Windowing</td><td>SDL2</td></tr>
-        </table>
-
-        <h3 style="font-family:var(--font-display); margin-bottom:var(--space-md);">Library Dependencies</h3>
-        <div style="display:flex; flex-wrap:wrap; gap:6px;">
-          <span class="badge badge--info">libopenal-soft.so</span>
-          <span class="badge badge--info">libGLESv1_CM.so</span>
-          <span class="badge badge--info">libEGL.so</span>
-          <span class="badge badge--info">libandroid.so</span>
-          <span class="badge badge--info">liblog.so</span>
-          <span class="badge badge--info">libz.so</span>
-          <span class="badge badge--info">libstdc++.so</span>
-          <span class="badge badge--info">libm.so</span>
-          <span class="badge badge--info">libc.so</span>
-          <span class="badge badge--info">libdl.so</span>
+      <section id="elf-loader">
+        <h2>ELF Loader</h2>
+        <p>Our custom ELF loader (<code>src/loader/elf_loader.cpp</code>) is responsible for parsing the ARM ELF32 binary, allocating memory with proper permissions, and resolving relocations.</p>
+        <div class="callout">
+          <div class="callout__title">Key Feature: Lazy Relocation</div>
+          <p class="mb-0">Symbol resolution is deferred until first access to minimize startup latency, utilizing a trampoline-based approach for ARM function calls.</p>
         </div>
-        <p class="text-muted mt-md" style="font-size:0.82rem;">All Android-specific libraries are replaced with Linux-native shims or bridged to host libraries.</p>
-      </div>
-    </div>
-  </div>
-</section>
+        <pre><code>// Example ELF Loading Snippet
+ElfLoader loader("libswordigo.so");
+if (!loader.load()) {
+    Logger::error("Failed to map binary");
+    return -1;
+}
+void* entry = loader.getSymbol("Java_com_touchfoo_swordigo_SwordigoLib_init");</code></pre>
+      </section>
 
-<!-- ELF LOADER -->
-<section class="section" style="background: rgba(13,16,32,0.7);" id="elf-loader">
-  <div class="container">
-    <div class="section-header reveal">
-      <span class="section-label">ELF Loading</span>
-      <h2 class="section-title">The <span class="grad">Loader</span></h2>
-    </div>
-    <div class="grid grid--2 reveal" style="align-items:start;">
-      <div>
-        <h3 style="font-family:var(--font-display); margin-bottom:var(--space-md);">Loading Process</h3>
-        <div class="timeline">
-          <div class="timeline-item">
-            <div class="tl-meta">Step 1</div>
-            <h4>ELF Header Parsing</h4>
-            <p>Read ELF header, verify ARM EABI5 format, iterate PT_LOAD program headers.</p>
-          </div>
-          <div class="timeline-item">
-            <div class="tl-meta">Step 2</div>
-            <h4>Memory Mapping</h4>
-            <p>Map each PT_LOAD segment into Unicorn's guest address space with correct RX/RW permissions. Zero-initialize .bss region (memsz > filesz).</p>
-          </div>
-          <div class="timeline-item">
-            <div class="tl-meta">Step 3</div>
-            <h4>Relocation Processing</h4>
-            <p>Process 10,709+ relocations: R_ARM_ABS32, R_ARM_RELATIVE, R_ARM_GLOB_DAT, R_ARM_JUMP_SLOT.</p>
-          </div>
-          <div class="timeline-item">
-            <div class="tl-meta">Step 4</div>
-            <h4>Symbol Resolution</h4>
-            <p>Internal symbols resolved to base + st_value. External imports redirected to bridge trampolines at 0xFF000000+.</p>
-          </div>
-          <div class="timeline-item">
-            <div class="tl-meta">Step 5</div>
-            <h4>.init_array Execution</h4>
-            <p>Execute all ELF initialization functions in order before calling any JNI exports.</p>
-          </div>
-          <div class="timeline-item">
-            <div class="tl-meta">Step 6</div>
-            <h4>JNI Lifecycle</h4>
-            <p>Call setFilesDir → setCacheDir → setAssetManager → setupNativeInterface → setupApplication → setApplicationViewSize → main loop.</p>
-          </div>
-        </div>
-      </div>
-
-      <div>
-        <h3 style="font-family:var(--font-display); margin-bottom:var(--space-md);">Relocation Types</h3>
-        <table class="data-table mb-lg">
-          <tr><th>Type</th><th>Description</th></tr>
-          <tr><td><code class="text-mono" style="color:var(--clr-cyan)">R_ARM_ABS32</code></td><td>Absolute 32-bit address</td></tr>
-          <tr><td><code class="text-mono" style="color:var(--clr-cyan)">R_ARM_RELATIVE</code></td><td>Base-relative address (most common)</td></tr>
-          <tr><td><code class="text-mono" style="color:var(--clr-cyan)">R_ARM_GLOB_DAT</code></td><td>Global data pointer from GOT</td></tr>
-          <tr><td><code class="text-mono" style="color:var(--clr-cyan)">R_ARM_JUMP_SLOT</code></td><td>PLT jump slot for function calls</td></tr>
-        </table>
-
-        <h3 style="font-family:var(--font-display); margin-bottom:var(--space-md);">Memory Layout</h3>
-        <div class="code-block">
-<pre><span class="cm">Guest Memory Map:</span>
-  <span class="num">0x00000000</span> - <span class="num">0x00010000</span>: JNI env structs
-  <span class="num">0x01000000</span> - <span class="num">0x02800000</span>: libswordigo.so segments
-  <span class="num">0x02800000</span> - <span class="num">0x0FFF0000</span>: Guest heap / data
-  <span class="num">0x0FFF0000</span> - <span class="num">0x10000000</span>: Stack (1MB)
-  <span class="num">0xFF000000</span> - <span class="num">0xFFFFFFFF</span>: Bridge trampolines</pre>
-        </div>
-
-        <div class="mt-md" style="padding:14px; background:rgba(57,255,131,0.07); border:1px solid rgba(57,255,131,0.2); border-radius:8px;">
-          <strong style="color:var(--clr-green)">✓ Critical Fix:</strong>
-          <span class="text-muted"> The .bss zero-initialization bug (UC_ERR_FETCH_UNMAPPED at 0x10000000) was identified and fixed, allowing the engine to successfully reach and execute drawApplication().</span>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- JNI BRIDGE -->
-<section class="section" id="jni-bridge">
-  <div class="container">
-    <div class="section-header reveal">
-      <span class="section-label">Android Compatibility</span>
-      <h2 class="section-title">JNI <span class="grad">Bridge</span></h2>
-      <p class="section-desc">A complete fake Android JNI environment allows the ARM game engine to initialize and run as if it were on Android.</p>
-    </div>
-
-    <div class="grid grid--3 reveal">
-      <div class="card">
-        <span class="card__icon">🔗</span>
-        <div class="card__title">Class Operations</div>
-        <div class="code-block mt-sm" style="font-size:0.75rem;">
-<pre>FindClass
-NewGlobalRef
-DeleteGlobalRef
-GetObjectClass
-NewObjectV</pre>
-        </div>
-      </div>
-      <div class="card">
-        <span class="card__icon">📞</span>
-        <div class="card__title">Method Calls</div>
-        <div class="code-block mt-sm" style="font-size:0.75rem;">
-<pre>GetMethodID
-CallObjectMethodV
-CallBooleanMethodV
-CallIntMethodV
-CallVoidMethodV
-CallStaticVoidMethodV</pre>
-        </div>
-      </div>
-      <div class="card">
-        <span class="card__icon">📝</span>
-        <div class="card__title">Strings &amp; Arrays</div>
-        <div class="code-block mt-sm" style="font-size:0.75rem;">
-<pre>NewStringUTF
-GetStringUTFChars
-ReleaseStringUTFChars
-GetArrayLength
-GetIntArrayElements</pre>
-        </div>
-      </div>
-    </div>
-
-    <div class="card reveal mt-lg" id="jni-startup-sequence">
-      <h3 class="card__title" style="font-size:1.3rem; margin-bottom:var(--space-md);">Engine Startup Sequence</h3>
-      <div class="grid grid--2" style="gap:var(--space-lg);">
-        <div>
-          <h4 style="font-family:var(--font-mono); font-size:0.85rem; color:var(--clr-purple-lt); margin-bottom:8px;">Android Java Path</h4>
-          <ol style="padding-left:20px; color:var(--clr-text-muted); font-size:0.875rem; line-height:2;">
-            <li>System.loadLibrary("swordigo")</li>
-            <li>Native.setFilesDir(getFilesDir())</li>
-            <li>Native.setCacheDir(getCacheDir())</li>
-            <li>Native.setAssetManager(getAssets())</li>
-            <li>GameRenderer.onSurfaceCreated()</li>
-            <li>Native.setupNativeInterface()</li>
-            <li>Native.setupApplication()</li>
-            <li>Native.setApplicationViewSize(w, h)</li>
-            <li>Loop: updateApplication() + drawApplication()</li>
-          </ol>
-        </div>
-        <div>
-          <h4 style="font-family:var(--font-mono); font-size:0.85rem; color:var(--clr-purple-lt); margin-bottom:8px;">Linux Desktop Path (Our Port)</h4>
-          <ol style="padding-left:20px; color:var(--clr-text-muted); font-size:0.875rem; line-height:2;">
-            <li>Load libswordigo.so → Unicorn</li>
-            <li>Build fake JavaVM + JNIEnv tables</li>
-            <li>Resolve 254 external symbols → bridges</li>
-            <li>Call setFilesDir (→ "./files")</li>
-            <li>Call setCacheDir (→ "./cache")</li>
-            <li>Call setAssetManager (→ filesystem shim)</li>
-            <li>Call setupNativeInterface()</li>
-            <li>Call setupApplication()</li>
-            <li>SDL2 loop: updateApplication() + drawApplication()</li>
-          </ol>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- GRAPHICS LAYER -->
-<section class="section" style="background: rgba(13,16,32,0.7);" id="graphics">
-  <div class="container">
-    <div class="section-header reveal">
-      <span class="section-label">Rendering</span>
-      <h2 class="section-title">OpenGL <span class="grad">Translation</span></h2>
-    </div>
-    <div class="grid grid--2 reveal" style="align-items:start;">
-      <div>
-        <p class="text-muted mb-md">The game uses OpenGL ES 1.x (fixed-function pipeline) — an older API no longer natively supported on modern desktops. Our bridge translates these calls to desktop OpenGL.</p>
-        <table class="data-table">
-          <tr><th>GLES 1.x Call</th><th>Host Implementation</th></tr>
-          <tr><td><code class="text-mono" style="color:var(--clr-cyan); font-size:0.8rem">glMatrixMode</code></td><td>Desktop OpenGL matrix stack</td></tr>
-          <tr><td><code class="text-mono" style="color:var(--clr-cyan); font-size:0.8rem">glVertexPointer</code></td><td>glVertexAttribPointer via VAO</td></tr>
-          <tr><td><code class="text-mono" style="color:var(--clr-cyan); font-size:0.8rem">glTexImage2D</code></td><td>Direct pass-through</td></tr>
-          <tr><td><code class="text-mono" style="color:var(--clr-cyan); font-size:0.8rem">glCompressedTexImage2D</code></td><td>ETC1/PVR decompression</td></tr>
-          <tr><td><code class="text-mono" style="color:var(--clr-cyan); font-size:0.8rem">glDrawArrays/Elements</code></td><td>Direct pass-through</td></tr>
-          <tr><td><code class="text-mono" style="color:var(--clr-cyan); font-size:0.8rem">eglGetProcAddress</code></td><td>SDL_GL_GetProcAddress</td></tr>
-        </table>
-      </div>
-      <div>
-        <h3 style="font-family:var(--font-display); margin-bottom:var(--space-md);">Asset Formats</h3>
-        <div style="display:flex; flex-direction:column; gap:8px;">
-          <div class="arch-layer">
-            <span class="arch-layer__icon">🖼️</span>
-            <div>
-              <div class="arch-layer__name">.pvr — PowerVR Textures</div>
-              <div class="arch-layer__desc">506 files · Character sprites, environment textures, UI elements</div>
-            </div>
-          </div>
-          <div class="arch-layer">
-            <span class="arch-layer__icon">🗿</span>
-            <div>
-              <div class="arch-layer__name">.POD — 3D Models</div>
-              <div class="arch-layer__desc">787 files · Animated characters, props, environment geometry</div>
-            </div>
-          </div>
-          <div class="arch-layer">
-            <span class="arch-layer__icon">🗺️</span>
-            <div>
-              <div class="arch-layer__name">.scene — Level Definitions</div>
-              <div class="arch-layer__desc">232 files · Protobuf scene graphs with Lua scripts embedded</div>
-            </div>
-          </div>
-          <div class="arch-layer">
-            <span class="arch-layer__icon">📊</span>
-            <div>
-              <div class="arch-layer__name">.scl / .gdata — Game Data</div>
-              <div class="arch-layer__desc">Protobuf entity templates, item DB, quest triggers</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ENGINE INTERNALS -->
-<section class="section" id="engine">
-  <div class="container">
-    <div class="section-header reveal">
-      <span class="section-label">Game Engine</span>
-      <h2 class="section-title">Caver <span class="grad">Engine</span> Internals</h2>
-      <p class="section-desc">libswordigo.so contains a complete custom game engine in the Caver namespace.</p>
-    </div>
-
-    <div class="grid grid--3 reveal">
-      <div class="card">
-        <span class="card__icon">🎯</span>
-        <div class="card__title">Engine Core</div>
-        <ul class="feature-list mt-sm">
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::CaverShell</code> — main loop</li>
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::FWShell</code> — framework</li>
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::RenderingContext</code></li>
+      <section id="jni-bridge">
+        <h2>JNI Bridge</h2>
+        <p>Since the game engine expects a Java environment, SRE provides a comprehensive JNI bridge that marshals data between the ARM emulator and native C++ code.</p>
+        <ul>
+          <li><strong>Symbol Mapping:</strong> Maps Android-specific symbols to native shims.</li>
+          <li><strong>Thread Management:</strong> Synchronizes the JNI environment across multiple threads.</li>
+          <li><strong>String Marshalling:</strong> Converts UTF-8/UTF-16 strings between environments.</li>
         </ul>
-      </div>
-      <div class="card">
-        <span class="card__icon">🌍</span>
-        <div class="card__title">Scene Graph</div>
-        <ul class="feature-list mt-sm">
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::Scene</code> — level mgmt</li>
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::SceneObject</code> — entities</li>
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::Component</code> — behaviors</li>
-        </ul>
-      </div>
-      <div class="card">
-        <span class="card__icon">📜</span>
-        <div class="card__title">Lua Scripting</div>
-        <ul class="feature-list mt-sm">
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::Program</code> — scripts</li>
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::ProgramState</code> — Lua VM</li>
-          <li>Lua 5.1 / LuaJIT bytecode in assets</li>
-        </ul>
-      </div>
-      <div class="card">
-        <span class="card__icon">💾</span>
-        <div class="card__title">Data Layer</div>
-        <ul class="feature-list mt-sm">
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::GameData</code> — .gdata</li>
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::GameState</code> — .gstate</li>
-          <li>Google Protobuf serialization</li>
-        </ul>
-      </div>
-      <div class="card">
-        <span class="card__icon">🗿</span>
-        <div class="card__title">3D Models</div>
-        <ul class="feature-list mt-sm">
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::ModelLibrary</code></li>
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::PODLoader</code></li>
-          <li>PowerVR Object Data format</li>
-        </ul>
-      </div>
-      <div class="card">
-        <span class="card__icon">📐</span>
-        <div class="card__title">Math Library</div>
-        <ul class="feature-list mt-sm">
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::Matrix4</code></li>
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::Vector3</code></li>
-          <li><code class="text-mono" style="font-size:0.78rem">Caver::Color</code></li>
-        </ul>
-      </div>
+      </section>
+
+      <section id="rendering">
+        <h2>Rendering Pipeline</h2>
+        <p>The original game uses GLES 1.x. SRE translates these calls to modern Desktop OpenGL 3.3+ while injecting post-processing effects into the pipeline.</p>
+        <div class="grid grid--2">
+          <div class="card">
+            <h3 class="mt-0">FBO Scaler</h3>
+            <p class="card__desc mb-0">Renders the game to a fixed-resolution buffer before scaling to the window size with high-quality filtering.</p>
+          </div>
+          <div class="card">
+            <h3 class="mt-0">PostFX</h3>
+            <p class="card__desc mb-0">Custom GLSL shaders for SSAO, bloom, and god rays that enhance the visual fidelity without altering game logic.</p>
+          </div>
+        </div>
+      </section>
     </div>
 
-    <div class="text-center mt-xl reveal">
-      <a href="research.html" class="btn btn--primary btn--lg" id="tech-research-link">Read Full Research Papers →</a>
-    </div>
+    <aside class="doc-layout__toc">
+      <div class="toc__title">On this page</div>
+      <a href="#overview" class="toc__link">Overview</a>
+      <a href="#compatibility-stack" class="toc__link">Compatibility Stack</a>
+      <a href="#elf-loader" class="toc__link">ELF Loader</a>
+      <a href="#jni-bridge" class="toc__link">JNI Bridge</a>
+      <a href="#rendering" class="toc__link">Rendering Pipeline</a>
+    </aside>
   </div>
-</section>
 </main>
 
 <footer class="footer">
   <div class="container">
-    <div class="footer__grid">
-      <div class="footer__brand">
-        <div style="margin-bottom:12px; display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:700; color:var(--clr-text);">
-          <span style="font-size:1.5rem;">⚔️</span>
-          <span style="background:var(--grad-text); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">Swordigo Desktop</span>
-        </div>
-        <p>Linux-native ARM compatibility runtime for the classic action-adventure.</p>
-      </div>
-      <div class="footer__col">
-        <h3>Navigation</h3>
-        <ul class="footer__links">
-          <li><a href="index.html">Home</a></li>
-          <li><a href="download.html">Download</a></li>
-          <li><a href="technical.html">Technical Docs</a></li>
-          <li><a href="research.html">Research Papers</a></li>
-          <li><a href="changelog.html">Changelog</a></li>
-        </ul>
-      </div>
-      <div class="footer__col">
-        <h3>Technical</h3>
-        <ul class="footer__links">
-          <li><a href="#architecture">Architecture</a></li>
-          <li><a href="#elf-loader">ELF Loader</a></li>
-          <li><a href="#jni-bridge">JNI Bridge</a></li>
-          <li><a href="#graphics">OpenGL Layer</a></li>
-          <li><a href="#engine">Caver Engine</a></li>
-        </ul>
-      </div>
-      <div class="footer__col">
-        <h3>Links</h3>
-        <ul class="footer__links">
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener">GitHub Repository</a></li>
-          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop_2.0.0_amd64.deb">Direct Download</a></li>
-        </ul>
-      </div>
-    </div>
-    <div class="footer__bottom">
-      <span>© 2026 SwordigoDesktop Project</span>
-      <span>Swordigo © Touch Foo</span>
+    <div class="footer__inner">
+      <p>&copy; 2026 QuantumCreeper Labs. All rights reserved.</p>
+      <ul class="navbar__nav">
+        <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop">GitHub</a></li>
+        <li><a href="sitemap.xml">Sitemap</a></li>
+      </ul>
     </div>
   </div>
 </footer>
