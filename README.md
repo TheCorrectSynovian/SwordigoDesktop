@@ -11,7 +11,7 @@
 [![Version](https://img.shields.io/badge/Version-v2.0r-00e5ff.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases)
 [![Engine](https://img.shields.io/badge/Engine-SRE%20v2.0-8b3dff.svg)](#-sre-architecture)
 
-[Website](https://thecorrectsynovian.github.io/SwordigoDesktop/web/) · [Download](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases) · [Research](https://thecorrectsynovian.github.io/SwordigoDesktop/web/research.html) · [Changelog](https://thecorrectsynovian.github.io/SwordigoDesktop/web/changelog.html)
+[Website](https://thecorrectsynovian.github.io/SwordigoDesktop_web/) · [Download](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases) · [Research](https://thecorrectsynovian.github.io/SwordigoDesktop/web/research.html) · [Discord](https://discord.gg/HsmDZHffCX)
 
 </div>
 
