@@ -9,7 +9,7 @@
 // 64-bit ELF structures for AArch64
 #include "elf_types_arm64.h"
 
-class JniBridge;
+class JniBridge64;
 
 // ARM64 module — mirrors so_module but with 64-bit types
 struct so_module_arm64 {
@@ -56,7 +56,7 @@ public:
     int load(so_module_arm64* mod, const std::string& filename, uint64_t load_addr);
     int relocate(so_module_arm64* mod);
     int resolve(so_module_arm64* mod, const std::vector<so_default_dynlib_arm64>& imports);
-    int resolve_all_to_bridge(so_module_arm64* mod, JniBridge* bridge, uint64_t globals_base = 0);
+    int resolve_all_to_bridge(so_module_arm64* mod, JniBridge64* bridge, uint64_t globals_base = 0);
     
     uint64_t get_symbol_vaddr(so_module_arm64* mod, const std::string& name);
 

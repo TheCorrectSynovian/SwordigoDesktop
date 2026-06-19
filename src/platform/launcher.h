@@ -9,7 +9,7 @@
 
 struct LaunchConfig {
     GraphicsAPI graphics_api = GraphicsAPI::OPENGL;
-    std::string selected_binary = "libswordigo_nx.so";
+    std::string selected_binary = "engine/v1.4.12/armeabi-v7a/libswordigo.so";
     std::string assets_dir = "assets";       // "assets" for vanilla, "rl_assets" for RLSwordigo
     std::string game_type = "Swordigo";      // "Swordigo" or "RLSwordigo"
     bool should_launch = true;  // false if user closed the launcher

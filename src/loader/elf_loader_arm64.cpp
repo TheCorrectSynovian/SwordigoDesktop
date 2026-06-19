@@ -1,5 +1,5 @@
 #include "elf_loader_arm64.h"
-#include "../jni/jni_bridge.h"
+#include "../jni/jni_bridge_arm64.h"
 #include <fstream>
 #include <iostream>
 #include <cstring>
@@ -21,15 +21,17 @@
 ElfLoaderArm64::ElfLoaderArm64(uint8_t* guest_mem_base, uint64_t guest_mem_size)
     : guest_base(guest_mem_base), guest_limit(guest_mem_size) {}
 
-int ElfLoaderArm64::resolve_all_to_bridge(so_module_arm64* mod, JniBridge* bridge, uint64_t globals_base) {
+int ElfLoaderArm64::resolve_all_to_bridge(so_module_arm64* mod, JniBridge64* bridge, uint64_t globals_base) {
     int sym_count = 0;
+    int resolved = 0, unresolved = 0;
     uint64_t next_global = globals_base;
 
     // ARM64 uses RELA (with explicit addend) instead of REL
-    auto process_rela = [&](Elf64_Rela* rela, int count) {
+    auto process_rela = [&](Elf64_Rela* rela, int count, const char* section) {
         for (int i = 0; i < count; i++) {
             Elf64_Rela* r = &rela[i];
             uint64_t sym_idx = ELF64_R_SYM(r->r_info);
+            uint64_t type = ELF64_R_TYPE(r->r_info);
             Elf64_Sym* sym = &mod->dynsym[sym_idx];
             // Write 64-bit pointers into the GOT/PLT
             uint64_t* ptr = (uint64_t*)(guest_base + mod->base_addr + r->r_offset);
@@ -55,16 +57,31 @@ int ElfLoaderArm64::resolve_all_to_bridge(so_module_arm64* mod, JniBridge* bridg
                 } else {
                     // ARM64: __aeabi_* helpers don't exist — skip silently
                     if (sname.substr(0, 7) == "__aeabi") {
-                        // ARM32-specific compiler helpers, not needed on AArch64
-                        // The compiler generates native instructions instead
                         continue;
                     }
                     
-                    uint32_t bridge_addr = bridge->get_address(sname.c_str());
+                    uint64_t bridge_addr = bridge->get_address(sname.c_str());
                     if (bridge_addr != 0) {
                         *ptr = (uint64_t)bridge_addr;
+                        resolved++;
+                        // Debug: log first few resolutions
+                        if (resolved <= 5) {
+                            std::cout << "[Resolve/ARM64] " << section << "[" << i << "] " << sname
+                                      << " -> GOT@0x" << std::hex << (mod->base_addr + r->r_offset) 
+                                      << " = 0x" << bridge_addr << std::dec << std::endl;
+                        }
                     } else {
-                        std::cerr << "[Resolve/ARM64] WARNING: No bridge for " << name << std::endl;
+                        // Auto-stub: register a dynamic stub bridge so the GOT
+                        // points to valid bridge code instead of dangling at 0.
+                        // The stub logs the call and returns 0.
+                        bridge->register_handler(sname, nullptr);
+                        uint64_t stub_addr = bridge->get_address(sname.c_str());
+                        if (stub_addr != 0) {
+                            *ptr = stub_addr;
+                        }
+                        unresolved++;
+                        std::cerr << "[Resolve/ARM64] AUTO-STUB: " << name << " -> 0x" 
+                                  << std::hex << stub_addr << std::dec << std::endl;
                     }
                 }
                 sym_count++;
@@ -72,10 +89,11 @@ int ElfLoaderArm64::resolve_all_to_bridge(so_module_arm64* mod, JniBridge* bridg
         }
     };
 
-    process_rela(mod->reladyn, mod->num_reladyn);
-    process_rela(mod->relaplt, mod->num_relaplt);
+    process_rela(mod->reladyn, mod->num_reladyn, ".rela.dyn");
+    process_rela(mod->relaplt, mod->num_relaplt, ".rela.plt");
     
-    std::cout << "[Resolve/ARM64] Total external symbols resolved: " << sym_count << std::endl;
+    std::cout << "[Resolve/ARM64] Total: " << sym_count << " external symbols, " 
+              << resolved << " resolved, " << unresolved << " unresolved" << std::endl;
 
     return 0;
 }

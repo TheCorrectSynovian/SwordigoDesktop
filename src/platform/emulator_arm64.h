@@ -4,8 +4,9 @@
 #include <stdint.h>
 #include <string>
 #include <vector>
+#include <iostream>
 #include "loader/elf_loader_arm64.h"
-#include "jni/jni_bridge.h"
+#include "jni/jni_bridge_arm64.h"
 
 // ARM64 emulator — uses Unicorn in AArch64 mode
 // Key differences from ARM32 Emulator:
@@ -38,16 +39,50 @@ public:
     void run(uint64_t start_pc);
     uint64_t call(uint64_t addr, const std::vector<uint64_t>& args);
 
-    void set_bridge(JniBridge* bridge) { this->bridge = bridge; }
+    void set_bridge(JniBridge64* bridge) { this->bridge = bridge; }
     void handle_bridge_call(uint64_t address);
     uint64_t get_bridge_base();
     uint8_t* get_memory_base() { return memory; }
+    void* get_uc_handle() { return uc; }
 
     // Public for hooks
-    JniBridge* bridge;
+    JniBridge64* bridge;
     void record_pc(uint64_t pc);
     void print_trace();
+    void set_lr(uint64_t lr);
     bool quiet_mode = false;
+    
+    // Bridge redirect: if set by a handler, handle_bridge_call uses this PC
+    // instead of the saved LR. Reset to 0 after use.
+    uint64_t redirect_pc = 0;
+
+    // Deferred thread execution queue — avoids nested uc_emu_start
+    struct DeferredThread {
+        uint64_t start_routine;
+        uint64_t arg;
+    };
+    std::vector<DeferredThread> pending_threads;
+    
+    // Queue a thread for deferred execution (called from pthread_create bridge)
+    void queue_thread(uint64_t start_routine, uint64_t arg) {
+        pending_threads.push_back({start_routine, arg});
+        std::cerr << "[Thread64] Queued deferred thread func=0x" << std::hex 
+                  << start_routine << " arg=0x" << arg << std::dec << std::endl;
+    }
+    
+    // Run all pending threads (call from game loop between frames)
+    void run_pending_threads() {
+        while (!pending_threads.empty()) {
+            DeferredThread t = pending_threads.front();
+            pending_threads.erase(pending_threads.begin());
+            std::cout << "[Thread64] Running deferred thread func=0x" << std::hex 
+                      << t.start_routine << " arg=0x" << t.arg << std::dec << std::endl;
+            call(t.start_routine, {t.arg});
+            std::cout << "[Thread64] Deferred thread completed." << std::endl;
+        }
+    }
+    
+    bool has_pending_threads() const { return !pending_threads.empty(); }
 
 private:
     uint8_t* memory;

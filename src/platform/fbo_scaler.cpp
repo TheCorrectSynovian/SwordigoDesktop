@@ -21,6 +21,8 @@ static bool   g_fbo_ok    = false;
 static GLuint g_postfx_fbo  = 0, g_postfx_tex  = 0;  // Color PostFX output
 static GLuint g_half_fbo_a  = 0, g_half_tex_a  = 0;  // Half-res ping
 static GLuint g_half_fbo_b  = 0, g_half_tex_b  = 0;  // Half-res pong
+static GLuint g_bloom_fbo_a = 0, g_bloom_tex_a = 0;  // Bloom ping
+static GLuint g_bloom_fbo_b = 0, g_bloom_tex_b = 0;  // Bloom pong
 static int    g_half_w = 0, g_half_h = 0;
 static float  g_postfx_time = 0.0f;
 
@@ -33,14 +35,16 @@ static GLuint g_prog_godrays = 0;
 static GLuint g_prog_ssao    = 0;
 static GLuint g_prog_blur    = 0;
 static GLuint g_prog_composite = 0;
+static GLuint g_prog_bloom_extract = 0;
+static GLuint g_prog_fsr     = 0;
 
 // ======================= SHADER SOURCES =======================
 
 static const char* VERT_SRC = R"GLSL(
-#version 120
-attribute vec2 a_pos;
-attribute vec2 a_uv;
-varying vec2 v_uv;
+#version 330
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec2 a_uv;
+out vec2 v_uv;
 void main() {
     gl_Position = vec4(a_pos, 0.0, 1.0);
     v_uv = a_uv;
@@ -48,11 +52,12 @@ void main() {
 )GLSL";
 
 static const char* FRAG_SHARP_BILINEAR = R"GLSL(
-#version 120
+#version 330
 uniform sampler2D u_tex;
 uniform vec2 u_tex_size;
 uniform vec2 u_out_size;
-varying vec2 v_uv;
+in vec2 v_uv;
+out vec4 FragColor;
 void main() {
     vec2 scale    = u_out_size / u_tex_size;
     vec2 texel    = v_uv * u_tex_size;
@@ -60,28 +65,30 @@ void main() {
     vec2 texel_i  = floor(texel) + 0.5;
     vec2 frange   = clamp(texel_f / fwidth(texel), 0.0, 1.0);
     vec2 uv_sharp = (texel_i + frange - 0.5) / u_tex_size;
-    gl_FragColor  = texture2D(u_tex, uv_sharp);
+    FragColor     = texture(u_tex, uv_sharp);
 }
 )GLSL";
 
 static const char* FRAG_NEAREST = R"GLSL(
-#version 120
+#version 330
 uniform sampler2D u_tex;
 uniform vec2 u_tex_size;
 uniform vec2 u_out_size;
-varying vec2 v_uv;
+in vec2 v_uv;
+out vec4 FragColor;
 void main() {
     vec2 uv = (floor(v_uv * u_tex_size) + 0.5) / u_tex_size;
-    gl_FragColor = texture2D(u_tex, uv);
+    FragColor = texture(u_tex, uv);
 }
 )GLSL";
 
 static const char* FRAG_CRT = R"GLSL(
-#version 120
+#version 330
 uniform sampler2D u_tex;
 uniform vec2 u_tex_size;
 uniform vec2 u_out_size;
-varying vec2 v_uv;
+in vec2 v_uv;
+out vec4 FragColor;
 vec2 barrel(vec2 uv) {
     vec2 c = uv - 0.5;
     float r2 = dot(c, c);
@@ -90,26 +97,27 @@ vec2 barrel(vec2 uv) {
 void main() {
     vec2 uv = barrel(v_uv);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return;
+        FragColor = vec4(0.0, 0.0, 0.0, 1.0); return;
     }
-    vec4 col = texture2D(u_tex, uv);
+    vec4 col = texture(u_tex, uv);
     float scanline = sin(uv.y * u_tex_size.y * 3.14159) * 0.5 + 0.5;
     col.rgb *= 0.75 + 0.25 * scanline;
     vec2 vig = uv * (1.0 - uv);
     col.rgb *= clamp(vig.x * vig.y * 15.0, 0.0, 1.0);
-    gl_FragColor = col;
+    FragColor = col;
 }
 )GLSL";
 
 // ----- Tier 1 PostFX (color effects in single pass) -----
 static const char* FRAG_POSTFX = R"GLSL(
-#version 120
+#version 330
 uniform sampler2D u_tex;
 uniform vec2 u_tex_size;
 uniform float u_time;
 uniform float u_vignette, u_grain, u_ca_offset;
 uniform float u_saturation, u_contrast, u_brightness, u_warmth, u_sharpen;
-varying vec2 v_uv;
+in vec2 v_uv;
+out vec4 FragColor;
 float rand(vec2 co) {
     return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
 }
@@ -119,16 +127,16 @@ void main() {
     vec4 col;
     if (u_ca_offset > 0.0) {
         vec2 dir = (uv - 0.5) * u_ca_offset;
-        col.r = texture2D(u_tex, uv - dir).r;
-        col.g = texture2D(u_tex, uv).g;
-        col.b = texture2D(u_tex, uv + dir).b;
+        col.r = texture(u_tex, uv - dir).r;
+        col.g = texture(u_tex, uv).g;
+        col.b = texture(u_tex, uv + dir).b;
         col.a = 1.0;
     } else {
-        col = texture2D(u_tex, uv);
+        col = texture(u_tex, uv);
     }
     if (u_sharpen > 0.0) {
-        vec4 blur = (texture2D(u_tex, uv + vec2(-px.x,0)) + texture2D(u_tex, uv + vec2(px.x,0)) +
-                     texture2D(u_tex, uv + vec2(0,-px.y)) + texture2D(u_tex, uv + vec2(0,px.y))) * 0.25;
+        vec4 blur = (texture(u_tex, uv + vec2(-px.x,0)) + texture(u_tex, uv + vec2(px.x,0)) +
+                     texture(u_tex, uv + vec2(0,-px.y)) + texture(u_tex, uv + vec2(0,px.y))) * 0.25;
         col.rgb += (col.rgb - blur.rgb) * u_sharpen;
     }
     col.rgb += u_brightness;
@@ -141,13 +149,13 @@ void main() {
         vec2 vig = uv * (1.0 - uv);
         col.rgb *= pow(clamp(vig.x * vig.y * 15.0, 0.0, 1.0), u_vignette);
     }
-    gl_FragColor = vec4(clamp(col.rgb, 0.0, 1.0), 1.0);
+    FragColor = vec4(clamp(col.rgb, 0.0, 1.0), 1.0);
 }
 )GLSL";
 
 // ----- God Rays (screen-space radial blur from sun position) -----
 static const char* FRAG_GODRAYS = R"GLSL(
-#version 120
+#version 330
 uniform sampler2D u_tex;      // scene color
 uniform sampler2D u_depth;    // depth texture
 uniform vec2 u_sun_pos;       // sun position in UV space
@@ -155,7 +163,8 @@ uniform float u_intensity;    // overall intensity
 uniform float u_decay;        // per-sample decay
 uniform float u_density;      // sample spacing
 uniform float u_exposure;     // final exposure multiply
-varying vec2 v_uv;
+in vec2 v_uv;
+out vec4 FragColor;
 
 float rand(vec2 co) {
     return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
@@ -187,8 +196,8 @@ void main() {
         // Clamp to valid UV range
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break;
         
-        vec3 sample_col = texture2D(u_tex, uv).rgb;
-        float depth = texture2D(u_depth, uv).r;
+        vec3 sample_col = texture(u_tex, uv).rgb;
+        float depth = texture(u_depth, uv).r;
         
         // Depth masking — only sky/background (far pixels) can emit light
         // Depth near 1.0 = far/sky, near 0.0 = close (foreground occluder)
@@ -210,19 +219,20 @@ void main() {
     
     // Add sun corona and apply intensity & scattering
     vec3 final_ray = god_ray * u_intensity * (1.0 + scattering * 0.5) + vec3(sun_glow * u_intensity);
-    gl_FragColor = vec4(clamp(final_ray, 0.0, 1.0), 1.0);
+    FragColor = vec4(clamp(final_ray, 0.0, 1.0), 1.0);
 }
 )GLSL";
 
 // ----- SSAO (Screen Space Ambient Occlusion) -----
 static const char* FRAG_SSAO = R"GLSL(
-#version 120
+#version 330
 uniform sampler2D u_depth;    // depth texture
 uniform vec2 u_tex_size;      // resolution
 uniform float u_radius;       // sample radius in UV
 uniform float u_intensity;    // AO strength
 uniform float u_time;         // for noise
-varying vec2 v_uv;
+in vec2 v_uv;
+out vec4 FragColor;
 
 float rand(vec2 co) {
     return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
@@ -236,12 +246,12 @@ float linearize_depth(float d) {
 }
 
 void main() {
-    float depth = texture2D(u_depth, v_uv).r;
+    float depth = texture(u_depth, v_uv).r;
     float center_z = linearize_depth(depth);
     
     // Skip sky/far pixels
     if (depth > 0.999) {
-        gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+        FragColor = vec4(1.0, 1.0, 1.0, 1.0);
         return;
     }
     
@@ -262,7 +272,7 @@ void main() {
         offset.x *= u_tex_size.y / u_tex_size.x;
         
         vec2 sample_uv = v_uv + offset;
-        float sample_depth = texture2D(u_depth, sample_uv).r;
+        float sample_depth = texture(u_depth, sample_uv).r;
         float sample_z = linearize_depth(sample_depth);
         
         // If sample is closer to the camera than center (sample_z < center_z), it blocks light
@@ -277,73 +287,175 @@ void main() {
     float ao = 1.0 - (occlusion / float(samples)) * u_intensity;
     ao = clamp(ao, 0.0, 1.0);
     
-    gl_FragColor = vec4(ao, ao, ao, 1.0);
+    FragColor = vec4(ao, ao, ao, 1.0);
 }
 )GLSL";
 
 // ----- Gaussian Blur (separable, for SSAO smoothing) -----
 static const char* FRAG_BLUR = R"GLSL(
-#version 120
+#version 330
 uniform sampler2D u_tex;
 uniform vec2 u_direction;   // (1/w, 0) for horizontal, (0, 1/h) for vertical
-varying vec2 v_uv;
+in vec2 v_uv;
+out vec4 FragColor;
 void main() {
     vec4 col = vec4(0.0);
     // 9-tap Gaussian kernel
-    col += texture2D(u_tex, v_uv - 4.0 * u_direction) * 0.0162;
-    col += texture2D(u_tex, v_uv - 3.0 * u_direction) * 0.0540;
-    col += texture2D(u_tex, v_uv - 2.0 * u_direction) * 0.1216;
-    col += texture2D(u_tex, v_uv - 1.0 * u_direction) * 0.1945;
-    col += texture2D(u_tex, v_uv)                      * 0.2270;
-    col += texture2D(u_tex, v_uv + 1.0 * u_direction) * 0.1945;
-    col += texture2D(u_tex, v_uv + 2.0 * u_direction) * 0.1216;
-    col += texture2D(u_tex, v_uv + 3.0 * u_direction) * 0.0540;
-    col += texture2D(u_tex, v_uv + 4.0 * u_direction) * 0.0162;
-    gl_FragColor = col;
+    col += texture(u_tex, v_uv - 4.0 * u_direction) * 0.0162;
+    col += texture(u_tex, v_uv - 3.0 * u_direction) * 0.0540;
+    col += texture(u_tex, v_uv - 2.0 * u_direction) * 0.1216;
+    col += texture(u_tex, v_uv - 1.0 * u_direction) * 0.1945;
+    col += texture(u_tex, v_uv)                      * 0.2270;
+    col += texture(u_tex, v_uv + 1.0 * u_direction) * 0.1945;
+    col += texture(u_tex, v_uv + 2.0 * u_direction) * 0.1216;
+    col += texture(u_tex, v_uv + 3.0 * u_direction) * 0.0540;
+    col += texture(u_tex, v_uv + 4.0 * u_direction) * 0.0162;
+    FragColor = col;
+}
+)GLSL";
+
+// ----- Bloom: extract bright areas -----
+static const char* FRAG_BLOOM_EXTRACT = R"GLSL(
+#version 330
+uniform sampler2D u_tex;
+uniform float u_threshold;
+in vec2 v_uv;
+out vec4 FragColor;
+void main() {
+    vec3 col = texture(u_tex, v_uv).rgb;
+    float brightness = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    // Soft knee extraction — smoother than hard cutoff
+    float knee = max(0.0, brightness - u_threshold) / max(brightness, 0.001);
+    FragColor = vec4(col * knee, 1.0);
 }
 )GLSL";
 
 // ----- Composite: scene + AO multiply + god rays additive -----
 static const char* FRAG_COMPOSITE = R"GLSL(
-#version 120
+#version 330
 uniform sampler2D u_scene;      // original scene
 uniform sampler2D u_ao;         // SSAO result (grayscale)
 uniform sampler2D u_godrays;    // god rays (additive light)
 uniform float u_ao_enabled;     // 0 or 1
 uniform float u_gr_enabled;     // 0 or 1
 uniform float u_gr_tint_r, u_gr_tint_g, u_gr_tint_b;  // god ray color tint
-varying vec2 v_uv;
+in vec2 v_uv;
+out vec4 FragColor;
 void main() {
-    vec3 scene = texture2D(u_scene, v_uv).rgb;
+    vec3 scene = texture(u_scene, v_uv).rgb;
     
     // Apply SSAO (multiply)
     if (u_ao_enabled > 0.5) {
-        float ao = texture2D(u_ao, v_uv).r;
+        float ao = texture(u_ao, v_uv).r;
         scene *= ao;
     }
     
     // Apply God Rays (additive with tint)
     if (u_gr_enabled > 0.5) {
-        vec3 rays = texture2D(u_godrays, v_uv).rgb;
+        vec3 rays = texture(u_godrays, v_uv).rgb;
         vec3 tint = vec3(u_gr_tint_r, u_gr_tint_g, u_gr_tint_b);
         scene += rays * tint;
     }
     
     // --- Tone mapping (Extended Reinhard) ---
-    // Prevents additive godrays from blowing out highlights.
-    // Lwhite controls the maximum luminance that maps to white.
     float Lwhite = 2.5;
     scene = scene * (1.0 + scene / (Lwhite * Lwhite)) / (1.0 + scene);
     
     // --- Saturation boost ---
-    // Additive light desaturates; compensate with a gentle bump.
     float luma = dot(scene, vec3(0.2126, 0.7152, 0.0722));
     scene = mix(vec3(luma), scene, 1.15);
     
     // --- Contrast micro-curve ---
     scene = smoothstep(0.0, 1.0, scene);
     
-    gl_FragColor = vec4(clamp(scene, 0.0, 1.0), 1.0);
+    FragColor = vec4(clamp(scene, 0.0, 1.0), 1.0);
+}
+)GLSL";
+
+// ----- FSR 1.0 EASU: Edge-Adaptive Spatial Upscaling (simplified) -----
+// Based on AMD FidelityFX Super Resolution 1.0
+// 12-tap filter with edge detection for sharp, artifact-free upscaling
+static const char* FRAG_FSR = R"GLSL(
+#version 330
+uniform sampler2D u_tex;
+uniform vec2 u_tex_size;   // input texture resolution
+uniform vec2 u_out_size;   // output resolution
+in vec2 v_uv;
+out vec4 FragColor;
+
+// Compute Lanczos2 weight
+float lanczos2(float x) {
+    if (abs(x) < 1e-6) return 1.0;
+    if (abs(x) >= 2.0) return 0.0;
+    float pi_x = 3.14159265 * x;
+    return sin(pi_x) * sin(pi_x * 0.5) / (pi_x * pi_x * 0.5);
+}
+
+void main() {
+    vec2 pixel = v_uv * u_tex_size;
+    vec2 frac_pos = fract(pixel) - 0.5;
+    vec2 pixel_center = floor(pixel) + 0.5;
+    vec2 texel = 1.0 / u_tex_size;
+    
+    // Sample 4x4 neighborhood (16 taps, but we use 12 inner ones)
+    vec3 samples[4][4];
+    for (int y = -1; y <= 2; y++) {
+        for (int x = -1; x <= 2; x++) {
+            vec2 uv = (pixel_center + vec2(x, y)) * texel;
+            samples[y+1][x+1] = texture(u_tex, uv).rgb;
+        }
+    }
+    
+    // Edge detection: compute gradients
+    vec3 dx = (samples[1][2] - samples[1][0]) + (samples[2][2] - samples[2][0]);
+    vec3 dy = (samples[2][1] - samples[0][1]) + (samples[2][2] - samples[0][2]);
+    float edge_h = dot(abs(dx), vec3(0.333));
+    float edge_v = dot(abs(dy), vec3(0.333));
+    
+    // Directional sharpness: sharpen along edges, smooth across them
+    float edge_strength = min(edge_h + edge_v, 1.0);
+    float sharpness = mix(0.5, 1.0, edge_strength); // More sharpness at edges
+    
+    // Lanczos2 filter with directional weighting
+    vec3 color = vec3(0.0);
+    float total_weight = 0.0;
+    
+    for (int y = -1; y <= 2; y++) {
+        for (int x = -1; x <= 2; x++) {
+            vec2 d = frac_pos - vec2(x, y);
+            
+            // Directional scaling: stretch kernel along edge direction
+            float w;
+            if (edge_h > edge_v * 1.5) {
+                // Horizontal edge: sharpen vertically
+                w = lanczos2(d.x) * lanczos2(d.y * sharpness);
+            } else if (edge_v > edge_h * 1.5) {
+                // Vertical edge: sharpen horizontally
+                w = lanczos2(d.x * sharpness) * lanczos2(d.y);
+            } else {
+                // No strong edge: isotropic
+                w = lanczos2(d.x) * lanczos2(d.y);
+            }
+            
+            color += samples[y+1][x+1] * w;
+            total_weight += w;
+        }
+    }
+    
+    color /= max(total_weight, 0.001);
+    
+    // Clamp to prevent ringing artifacts
+    vec3 min_col = min(min(samples[1][1], samples[1][2]), min(samples[2][1], samples[2][2]));
+    vec3 max_col = max(max(samples[1][1], samples[1][2]), max(samples[2][1], samples[2][2]));
+    color = clamp(color, min_col, max_col);
+    
+    // Subtle RCAS (sharpening) pass — integrated
+    vec3 center = samples[1][1];
+    vec3 n = samples[0][1], s = samples[2][1], e = samples[1][2], w2 = samples[1][0];
+    vec3 sharp = center * 5.0 - n - s - e - w2;
+    color = mix(color, clamp(sharp, min_col, max_col), 0.15);
+    
+    FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
 }
 )GLSL";
 
@@ -397,6 +509,9 @@ static GLuint get_program(FBOScale mode) {
         case FBOScale::CRT_SCANLINE:
             if (!g_prog_crt) g_prog_crt = link_program(VERT_SRC, FRAG_CRT);
             return g_prog_crt;
+        case FBOScale::FSR:
+            if (!g_prog_fsr) g_prog_fsr = link_program(VERT_SRC, FRAG_FSR);
+            return g_prog_fsr;
         default:
             if (!g_prog_sharp) g_prog_sharp = link_program(VERT_SRC, FRAG_SHARP_BILINEAR);
             return g_prog_sharp;
@@ -521,6 +636,7 @@ void fbo_destroy() {
     del_prg(g_prog_sharp); del_prg(g_prog_nearest); del_prg(g_prog_crt);
     del_prg(g_prog_postfx); del_prg(g_prog_godrays); del_prg(g_prog_ssao);
     del_prg(g_prog_blur); del_prg(g_prog_composite);
+    del_prg(g_prog_bloom_extract); del_prg(g_prog_fsr);
     g_fbo_ok = false;
 }
 
@@ -528,13 +644,28 @@ void fbo_begin_game() {
     if (!g_fbo_ok) return;
     glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
     glViewport(0, 0, g_game_w, g_game_h);
+    
+    static int begin_diag_count = 0;
+    if (begin_diag_count < 5) {
+        GLenum err = glGetError();
+        std::cout << "[FBO-Diag] fbo_begin_game: FBO=" << g_fbo << " size=" << g_game_w << "x" << g_game_h << " err=" << err << std::endl;
+        begin_diag_count++;
+    }
 }
 
 void fbo_end_game_and_blit(int win_w, int win_h, FBOScale mode, const PostFXState* postfx) {
     if (!g_fbo_ok) return;
 
+    static int end_diag_count = 0;
+    if (end_diag_count < 5) {
+        GLenum err = glGetError();
+        std::cout << "[FBO-Diag] fbo_end_game_and_blit: win=" << win_w << "x" << win_h << " mode=" << (int)mode << " err=" << err << std::endl;
+        end_diag_count++;
+    }
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, win_w, win_h);
+    // Clear to magenta for diagnostic visual visibility (if FBO is empty/transparent, screen turns magenta)
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
@@ -743,8 +874,10 @@ void fbo_end_game_and_blit(int win_w, int win_h, FBOScale mode, const PostFXStat
     glUniform2f(glGetUniformLocation(prog, "u_out_size"), (float)vw, (float)vh);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, final_tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    // FSR does its own filtering — use NEAREST to avoid pre-blurring
+    GLenum filter = (mode == FBOScale::FSR || mode == FBOScale::NEAREST) ? GL_NEAREST : GL_LINEAR;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
     draw_fsq();
 
     glUseProgram(old_prog);
@@ -761,6 +894,43 @@ void postfx_apply_preset(PostFXState& s, PostFXPreset p) {
     switch (p) {
         case PostFXPreset::OFF:
             s.preset_name = "Off";
+            break;
+        case PostFXPreset::SW_PLUS:
+            s.enabled = true;
+            // SSAO — deep shadows, stronger than Atmospheric
+            s.ssao = true; s.ssao_radius = 0.03f; s.ssao_intensity = 1.5f;
+            // God rays — stronger than Ethereal (0.5), dramatic light shafts
+            s.god_rays = true; s.god_rays_intensity = 0.7f; s.god_rays_decay = 0.96f;
+            s.sun_x = 0.65f; s.sun_y = 0.88f;
+            // Volumetric light — layered on top
+            s.volumetric_light = true; s.volumetric_intensity = 0.35f;
+            // Warm color grading — slight golden tone
+            s.color_adjust = true; s.warmth = 0.15f; s.contrast = 1.08f; 
+            s.saturation = 1.08f; s.brightness = 0.01f;
+            // Vignette — subtle frame
+            s.vignette = true; s.vignette_intensity = 0.25f;
+            // Sharpening — crisp edges
+            s.sharpen = true; s.sharpen_strength = 0.25f;
+            // Subtle chromatic aberration — premium lens feel
+            s.chromatic_aberration = true; s.ca_offset = 0.001f;
+            s.preset_name = "Sw+";
+            break;
+        case PostFXPreset::ATMOSPHERIC:
+            s.enabled = true;
+            s.ssao = true; s.ssao_radius = 0.025f; s.ssao_intensity = 1.0f;
+            s.volumetric_light = true; s.volumetric_intensity = 0.25f;
+            s.sun_x = 0.7f; s.sun_y = 0.85f;
+            s.vignette = true; s.vignette_intensity = 0.3f;
+            s.color_adjust = true; s.contrast = 1.05f;
+            s.preset_name = "Atmospheric";
+            break;
+        case PostFXPreset::ETHEREAL:
+            s.enabled = true;
+            s.god_rays = true; s.god_rays_intensity = 0.5f; s.god_rays_decay = 0.95f;
+            s.sun_x = 0.5f; s.sun_y = 0.9f;
+            s.vignette = true; s.vignette_intensity = 0.2f;
+            s.color_adjust = true; s.warmth = 0.4f; s.brightness = 0.03f; s.saturation = 1.1f;
+            s.preset_name = "Ethereal";
             break;
         case PostFXPreset::CINEMATIC:
             s.enabled = true;
@@ -790,23 +960,6 @@ void postfx_apply_preset(PostFXState& s, PostFXPreset p) {
             s.color_adjust = true; s.saturation = 0.15f; s.contrast = 1.4f; s.brightness = -0.03f;
             s.preset_name = "Noir";
             break;
-        case PostFXPreset::ETHEREAL:
-            s.enabled = true;
-            s.god_rays = true; s.god_rays_intensity = 0.5f; s.god_rays_decay = 0.95f;
-            s.sun_x = 0.5f; s.sun_y = 0.9f;
-            s.vignette = true; s.vignette_intensity = 0.2f;
-            s.color_adjust = true; s.warmth = 0.4f; s.brightness = 0.03f; s.saturation = 1.1f;
-            s.preset_name = "Ethereal";
-            break;
-        case PostFXPreset::ATMOSPHERIC:
-            s.enabled = true;
-            s.ssao = true; s.ssao_radius = 0.025f; s.ssao_intensity = 1.0f;
-            s.volumetric_light = true; s.volumetric_intensity = 0.25f;
-            s.sun_x = 0.7f; s.sun_y = 0.85f;
-            s.vignette = true; s.vignette_intensity = 0.3f;
-            s.color_adjust = true; s.contrast = 1.05f;
-            s.preset_name = "Atmospheric";
-            break;
         case PostFXPreset::CUSTOM:
             s.enabled = true;
             s.preset_name = "Custom";
@@ -818,12 +971,13 @@ void postfx_apply_preset(PostFXState& s, PostFXPreset p) {
 const char* postfx_preset_name(PostFXPreset p) {
     switch (p) {
         case PostFXPreset::OFF: return "Off";
+        case PostFXPreset::SW_PLUS: return "Sw+";
+        case PostFXPreset::ATMOSPHERIC: return "Atmospheric";
+        case PostFXPreset::ETHEREAL: return "Ethereal";
         case PostFXPreset::CINEMATIC: return "Cinematic";
         case PostFXPreset::RETRO: return "Retro";
         case PostFXPreset::FANTASY: return "Fantasy";
         case PostFXPreset::NOIR: return "Noir";
-        case PostFXPreset::ETHEREAL: return "Ethereal";
-        case PostFXPreset::ATMOSPHERIC: return "Atmospheric";
         case PostFXPreset::CUSTOM: return "Custom";
         default: return "Unknown";
     }

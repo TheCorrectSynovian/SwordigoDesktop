@@ -1,16 +1,30 @@
 #!/bin/bash
-# Swordigo Desktop Launcher
+# Swordigo Desktop — Build & Run
+# Usage:
+#   ./run_swordigo.sh          # Build + Run
+#   ./run_swordigo.sh --run    # Run only (skip build)
+#   ./run_swordigo.sh --build  # Build only (skip run)
 
-# Ensure we are in the correct directory
+set -e
+
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
-# Detection of session type
-if [ "$XDG_SESSION_TYPE" == "wayland" ]; then
-    echo "Running on Wayland session..."
-    # Potential Wayland-specific tweaks (e.g., SDL_VIDEODRIVER=wayland)
-    # export SDL_VIDEODRIVER=wayland
+BUILD=true
+RUN=true
+
+case "${1:-}" in
+    --run)   BUILD=false ;;
+    --build) RUN=false ;;
+esac
+
+if $BUILD; then
+    echo "=== Building Swordigo Desktop ==="
+    make -j$(nproc)
+    echo "=== Build OK ==="
 fi
 
-# Run the boot prototype
-./swordigo_boot "$@"
+if $RUN; then
+    echo "=== Launching ==="
+    ./swordigo_boot "$@"
+fi

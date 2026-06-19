@@ -1,3 +1,4 @@
+// Force rebuild: PostFXState struct changed in fbo_scaler.h
 #ifndef _WIN32
 #include <unistd.h>
 #else
@@ -11,9 +12,15 @@
 #include <filesystem>
 namespace fs = std::filesystem;
 #include "loader/elf_loader.h"
+#include "loader/elf_loader_arm64.h"
+#include "loader/arch_detect.h"
 #include "jni/jni_layer.h"
+#include "jni/jni_layer_arm64.h"
 #include "jni/jni_bridge.h"
+#include "jni/jni_bridge_arm64.h"
+#include <unicorn/unicorn.h>
 #include "platform/emulator.h"
+#include "platform/emulator_arm64.h"
 #include "platform/display.h"
 #include "android/asset_manager.h"
 #include "game/camera_override.h"
@@ -41,7 +48,7 @@ extern int g_draw_h;
 
 // --- Global Context ---
 uint8_t* g_guest_memory = nullptr;
-const uint32_t GUEST_MEM_SIZE = 0xC0000000; // 3GB
+const uint32_t GUEST_MEM_SIZE = 0xE0000000; // 3.5GB — ARM64 needs >3GB for area transitions
 
 // Game internal render resolution — game engine sees this via setApplicationViewSize.
 // Defaults to 1920×1080, but dynamically updated after display init to match
@@ -51,7 +58,7 @@ static int GAME_W = 1920;
 static int GAME_H = 1080;
 static float TOUCH_SCALE_X = (float)GAME_W / 960.0f;
 // Which game binary to load (switchable via launcher or --lib flag)
-static std::string g_lib_name = "libswordigo_nx.so";
+static std::string g_lib_name = "engine/v1.4.12/armeabi-v7a/libswordigo.so";
 std::string g_assets_dir = "assets";  // "assets" for vanilla, "rl_assets" for RLSwordigo
 static float TOUCH_SCALE_Y = (float)GAME_H / 544.0f;   // ~1.985
 
@@ -59,10 +66,20 @@ static float TOUCH_SCALE_Y = (float)GAME_H / 544.0f;   // ~1.985
 const uint32_t GUEST_GLOBALS_BASE = 0x50000; 
 const uint32_t GUEST_GLOBALS_SIZE = 0x1000; 
 
+// ARM32 subsystem
 so_module g_main_mod;
 ElfLoader* g_loader = nullptr;
 JniBridge g_bridge;
 Emulator* g_emulator = nullptr;
+
+// ARM64 subsystem
+so_module_arm64 g_main_mod_64;
+ElfLoaderArm64* g_loader_64 = nullptr;
+JniBridge64 g_bridge_64;
+EmulatorArm64* g_emulator_64 = nullptr;
+
+// Architecture flag — set during boot based on selected binary
+bool g_is_arm64 = false;
 GuiRenderer g_gui;
 InputConfig g_input_config;
 SDL_Gamepad* g_gamepad = nullptr;
@@ -198,9 +215,18 @@ static void fw_send_char(uint32_t charCode, double timestamp) {
 }
 
 void init_all() {
-    g_guest_memory = new uint8_t[GUEST_MEM_SIZE];
+    // CRITICAL: calloc zero-initializes via OS lazy-zeroing (demand-paged).
+    // new uint8_t[N] leaves garbage that causes 0xFFFFFFFF... in uninitialized
+    // stack/BSS areas, creating corrupt 64-bit pointers on ARM64.
+    g_guest_memory = (uint8_t*)calloc(GUEST_MEM_SIZE, 1);
+    if (!g_guest_memory) {
+        std::cerr << "FATAL: Failed to allocate " << GUEST_MEM_SIZE << " bytes for guest memory" << std::endl;
+        exit(1);
+    }
     g_loader = new ElfLoader(g_guest_memory, GUEST_MEM_SIZE);
+    g_loader_64 = new ElfLoaderArm64(g_guest_memory, GUEST_MEM_SIZE);
     g_bridge.init_standard_bridges();
+    g_bridge_64.init_standard_bridges();
     asset_manager_init(get_data_path(g_assets_dir).c_str());
     g_gui.init();
     g_input_config.load(g_save_dir + "/controls.ini");
@@ -212,6 +238,7 @@ void init_all() {
     // Initialize FBO Scaler
     if (g_display_active) {
         fbo_init(GAME_W, GAME_H);
+        draw_batcher_init();
     }
     
     // Open any connected gamepad
@@ -299,6 +326,78 @@ uint32_t setup_jni_env(uint8_t* memory) {
         *(uint32_t*)(memory + vm_vtable_ptr + i * 4) = g_bridge.get_address(slot_name);
     }
     *(uint32_t*)(memory + vm_vtable_ptr + 0x18) = g_bridge.get_address("GetEnv"); // GetEnv at offset 0x18
+
+    return env_ptr;
+}
+
+uint64_t setup_jni_env_arm64(uint8_t* memory) {
+    uint64_t env_ptr = 0x10000;
+    uint64_t vtable_ptr = 0x10010;
+    
+    *(uint64_t*)(memory + env_ptr) = vtable_ptr;
+    
+    // Fill vtable with a default unhandled bridge address (300 slots × 8 bytes)
+    for (int i = 0; i < 300; i++) {
+        std::string slot_name = "UnhandledJNI_" + std::to_string(i);
+        *(uint64_t*)(memory + vtable_ptr + i * 8) = g_bridge_64.get_address(slot_name);
+    }
+    
+    // Set specific JNI functions at their correct ARM64 offsets (ARM32 offset × 2)
+    *(uint64_t*)(memory + vtable_ptr + 0x30)  = g_bridge_64.get_address("FindClass");
+    *(uint64_t*)(memory + vtable_ptr + 0x70)  = g_bridge_64.get_address("ThrowNew");
+    *(uint64_t*)(memory + vtable_ptr + 0x98)  = g_bridge_64.get_address("PushLocalFrame");
+    *(uint64_t*)(memory + vtable_ptr + 0xA0)  = g_bridge_64.get_address("PopLocalFrame");
+    *(uint64_t*)(memory + vtable_ptr + 0xA8)  = g_bridge_64.get_address("NewGlobalRef");
+    *(uint64_t*)(memory + vtable_ptr + 0xB0)  = g_bridge_64.get_address("DeleteGlobalRef");
+    *(uint64_t*)(memory + vtable_ptr + 0xB8)  = g_bridge_64.get_address("DeleteLocalRef");
+    *(uint64_t*)(memory + vtable_ptr + 0xE8)  = g_bridge_64.get_address("NewObjectV");
+    *(uint64_t*)(memory + vtable_ptr + 0xF8)  = g_bridge_64.get_address("GetObjectClass");
+    *(uint64_t*)(memory + vtable_ptr + 0x108) = g_bridge_64.get_address("GetMethodID");
+    *(uint64_t*)(memory + vtable_ptr + 0x118) = g_bridge_64.get_address("CallObjectMethodV");
+    *(uint64_t*)(memory + vtable_ptr + 0x130) = g_bridge_64.get_address("CallBooleanMethodV");
+    *(uint64_t*)(memory + vtable_ptr + 0x190) = g_bridge_64.get_address("CallIntMethodV");
+    *(uint64_t*)(memory + vtable_ptr + 0x1A8) = g_bridge_64.get_address("CallLongMethodV");
+    *(uint64_t*)(memory + vtable_ptr + 0x1F0) = g_bridge_64.get_address("CallVoidMethodV");
+    *(uint64_t*)(memory + vtable_ptr + 0x2F0) = g_bridge_64.get_address("GetFieldID");
+    *(uint64_t*)(memory + vtable_ptr + 0x2F8) = g_bridge_64.get_address("GetBooleanField");
+    *(uint64_t*)(memory + vtable_ptr + 0x320) = g_bridge_64.get_address("GetIntField");
+    *(uint64_t*)(memory + vtable_ptr + 0x330) = g_bridge_64.get_address("GetFloatField");
+    *(uint64_t*)(memory + vtable_ptr + 0x388) = g_bridge_64.get_address("GetStaticMethodID");
+    *(uint64_t*)(memory + vtable_ptr + 0x398) = g_bridge_64.get_address("CallStaticObjectMethodV");
+    *(uint64_t*)(memory + vtable_ptr + 0x3B0) = g_bridge_64.get_address("CallStaticBooleanMethodV");
+    *(uint64_t*)(memory + vtable_ptr + 0x410) = g_bridge_64.get_address("CallStaticIntMethodV");
+    *(uint64_t*)(memory + vtable_ptr + 0x438) = g_bridge_64.get_address("CallStaticLongMethodV");
+    *(uint64_t*)(memory + vtable_ptr + 0x440) = g_bridge_64.get_address("CallStaticFloatMethodV");
+    *(uint64_t*)(memory + vtable_ptr + 0x470) = g_bridge_64.get_address("CallStaticVoidMethodV");
+    *(uint64_t*)(memory + vtable_ptr + 0x480) = g_bridge_64.get_address("GetStaticFieldID");
+    *(uint64_t*)(memory + vtable_ptr + 0x488) = g_bridge_64.get_address("GetStaticObjectField");
+    *(uint64_t*)(memory + vtable_ptr + 0x538) = g_bridge_64.get_address("NewStringUTF");
+    *(uint64_t*)(memory + vtable_ptr + 0x540) = g_bridge_64.get_address("GetStringUTFLength");
+    *(uint64_t*)(memory + vtable_ptr + 0x548) = g_bridge_64.get_address("GetStringUTFChars");
+    *(uint64_t*)(memory + vtable_ptr + 0x550) = g_bridge_64.get_address("ReleaseStringUTFChars");
+    *(uint64_t*)(memory + vtable_ptr + 0x558) = g_bridge_64.get_address("GetArrayLength");
+    *(uint64_t*)(memory + vtable_ptr + 0x568) = g_bridge_64.get_address("GetObjectArrayElement");
+    *(uint64_t*)(memory + vtable_ptr + 0x580) = g_bridge_64.get_address("NewByteArray");
+    *(uint64_t*)(memory + vtable_ptr + 0x598) = g_bridge_64.get_address("NewIntArray");
+    *(uint64_t*)(memory + vtable_ptr + 0x5C0) = g_bridge_64.get_address("GetByteArrayElements");
+    *(uint64_t*)(memory + vtable_ptr + 0x5D8) = g_bridge_64.get_address("GetIntArrayElements");
+    *(uint64_t*)(memory + vtable_ptr + 0x600) = g_bridge_64.get_address("ReleaseByteArrayElements");
+    *(uint64_t*)(memory + vtable_ptr + 0x618) = g_bridge_64.get_address("ReleaseIntArrayElements");
+    *(uint64_t*)(memory + vtable_ptr + 0x698) = g_bridge_64.get_address("SetIntArrayRegion");
+    *(uint64_t*)(memory + vtable_ptr + 0x6B8) = g_bridge_64.get_address("RegisterNatives");
+    *(uint64_t*)(memory + vtable_ptr + 0x6D8) = g_bridge_64.get_address("GetJavaVM");
+    *(uint64_t*)(memory + vtable_ptr + 0x6E8) = g_bridge_64.get_address("GetStringUTFRegion");
+
+    // Setup JavaVM structures at 0x11000 (64-bit)
+    uint64_t vm_ptr = 0x11000;
+    uint64_t vm_vtable_ptr = 0x11010;
+    *(uint64_t*)(memory + vm_ptr) = vm_vtable_ptr;
+    
+    for (int i = 0; i < 50; i++) {
+        std::string slot_name = "UnhandledVM_" + std::to_string(i);
+        *(uint64_t*)(memory + vm_vtable_ptr + i * 8) = g_bridge_64.get_address(slot_name);
+    }
+    *(uint64_t*)(memory + vm_vtable_ptr + 0x30) = g_bridge_64.get_address("GetEnv"); // GetEnv at ARM64 offset (0x18 * 2)
 
     return env_ptr;
 }
@@ -575,6 +674,12 @@ void load_and_boot() {
                 }
             }
 
+            // --- Process pending macro step 2 (delayed spell slot tap) ---
+            g_input_config.process_macros(accumulated_time,
+                [&](int action, int id, double time, float x, float y, float ox, float oy, int tap) {
+                    call_handle_touch_event(handleTouchEvent, env_ptr, 0, action, id, time, x, y, ox, oy, tap);
+                });
+
             // --- Per-frame camera movement (Arrow keys, dt-scaled with acceleration) ---
             if (g_cam_active) {
                 bool any_cam_key = arrow_left || arrow_right || arrow_up || arrow_down || cam_key_pgup || cam_key_pgdn;
@@ -659,11 +764,11 @@ void load_and_boot() {
             io_thread_poll();
 
             // Handle async callbacks: if loadSnapshot was called, call snapshotLoaded
-            extern bool g_snapshot_load_pending;
+            extern int g_snapshot_load_pending_count;
             extern bool g_snapshot_has_data;
             extern std::vector<uint8_t> g_snapshot_data;
-            if (g_snapshot_load_pending && snapshotLoaded) {
-                g_snapshot_load_pending = false;
+            while (g_snapshot_load_pending_count > 0 && snapshotLoaded) {
+                g_snapshot_load_pending_count--;
                 if (g_snapshot_has_data && !g_snapshot_data.empty()) {
                     // Allocate byte array in guest memory: [length(4)] [data(N)]
                     static uint32_t save_buf_addr = 0x40000000; // high address for save buffer
@@ -699,6 +804,7 @@ void load_and_boot() {
                 } else
 #endif
                 {
+                    draw_batcher_flush(); // Flush any pending batched draws
                     fbo_end_game_and_blit(g_draw_w, g_draw_h, g_fbo_mode, &g_postfx);
                 }
             }
@@ -722,8 +828,44 @@ void load_and_boot() {
                 glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
                 glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
                 glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-                g_gui.draw_string("CONTROLS EDITOR - Drag buttons to reposition | F2 to save & close", 10, g_win_h - 20, 1.5f, 100, 200, 255, 255);
-                g_gui.draw_string("Blue=Movement  Green=Action  Orange=Menu", 10, g_win_h - 38, 1.2f, 180, 180, 200, 200);
+                // Controls editor header text
+                {
+                    std::string mode_str = "POSITION";
+                    if (g_input_config.get_editor_mode() == EDITOR_REBIND) mode_str = "REBIND (click button, press key)";
+                    g_gui.draw_string("CONTROLS EDITOR [" + mode_str + "]  |  F2=Save & Close  R=Toggle Rebind", 10, g_win_h - 20, 1.3f, 100, 200, 255, 255);
+                    g_gui.draw_string("Blue=Move  Green=Action  Orange=Menu  Purple=Magic Macro  Yellow=Custom", 10, g_win_h - 38, 1.1f, 180, 180, 200, 200);
+                }
+                // Draw readable button labels on each circle
+                {
+                    float sx = (float)g_win_w / 960.0f;
+                    float sy = (float)g_win_h / 544.0f;
+                    for (int i = 0; i < g_input_config.button_count(); i++) {
+                        TouchButton* btn = g_input_config.get_button(i);
+                        if (!btn) continue;
+                        float wx = btn->game_x * sx;
+                        float wy = btn->game_y * sy;
+                        float wr = btn->radius * std::min(sx, sy) * 0.7f;
+                        // Display name
+                        std::string dname = btn->display_name.empty() ? btn->name : btn->display_name;
+                        // Key binding text
+                        std::string key1 = InputConfig::scancode_name(btn->sdl_scancode);
+                        std::string key2 = InputConfig::scancode_name(btn->sdl_scancode_alt);
+                        std::string keytxt = "[" + key1;
+                        if (btn->sdl_scancode_alt > 0) keytxt += "/" + key2;
+                        keytxt += "]";
+                        // Color
+                        uint8_t cr = 255, cg = 255, cb = 255;
+                        if (btn->is_macro) { cr = 200; cg = 140; cb = 255; }
+                        else if (btn->is_custom) { cr = 255; cg = 255; cb = 100; }
+                        // Draw name above center
+                        g_gui.draw_string(dname, (int)(wx - dname.size() * 4), (int)(wy + 6), 1.0f, cr, cg, cb, 255);
+                        // Draw key binding below center
+                        g_gui.draw_string(keytxt, (int)(wx - keytxt.size() * 3.5f), (int)(wy - 10), 0.9f, 180, 180, 180, 200);
+                        if (btn->is_macro) {
+                            g_gui.draw_string("MACRO", (int)(wx - 16), (int)(wy - wr - 14), 0.8f, 180, 80, 220, 200);
+                        }
+                    }
+                }
                 glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix();
                 glPopAttrib();
             }
@@ -771,6 +913,7 @@ void load_and_boot() {
                 if (g_fbo_mode == FBOScale::SHARP_BILINEAR) mode_str = "Sharp-Bilinear";
                 else if (g_fbo_mode == FBOScale::NEAREST) mode_str = "Nearest";
                 else if (g_fbo_mode == FBOScale::CRT_SCANLINE) mode_str = "CRT Scanline";
+                else if (g_fbo_mode == FBOScale::FSR) mode_str = "FSR 1.0";
                 snprintf(dbg, sizeof(dbg), "Scale Mode: %s", mode_str);
                 g_gui.draw_string(dbg, 20, g_win_h - 165, 1.2f, 255, 200, 100, 255);
 
@@ -1061,11 +1204,12 @@ void load_and_boot() {
                                 break;
                             }
                             if (event.key.key == SDLK_F4 && !event.key.repeat) {
-                                g_fbo_mode = static_cast<FBOScale>((static_cast<int>(g_fbo_mode) + 1) % 3);
+                                g_fbo_mode = static_cast<FBOScale>((static_cast<int>(g_fbo_mode) + 1) % 4);
                                 const char* m_name = "Unknown";
                                 if (g_fbo_mode == FBOScale::SHARP_BILINEAR) m_name = "Sharp-Bilinear";
                                 else if (g_fbo_mode == FBOScale::NEAREST) m_name = "Nearest";
                                 else if (g_fbo_mode == FBOScale::CRT_SCANLINE) m_name = "CRT Scanline";
+                                else if (g_fbo_mode == FBOScale::FSR) m_name = "FSR 1.0 (Edge-Adaptive)";
                                 std::cout << "[FBO] Scale mode changed to " << m_name << std::endl;
                                 break;
                             }
@@ -1179,17 +1323,44 @@ void load_and_boot() {
                             }
                             
                             // ---- NORMAL MODE: route through InputConfig ----
-                            int btn_idx = g_input_config.find_by_scancode(scancode);
-                            if (btn_idx >= 0) {
-                                TouchButton* btn = g_input_config.get_button(btn_idx);
-                                if (btn && btn->is_pressed != is_down) {
-                                    btn->is_pressed = is_down;
-                                    call_handle_touch_event(handleTouchEvent, env_ptr, 0,
-                                        is_down ? 1 : 2, btn->touch_id, accumulated_time,
-                                        btn->game_x, btn->game_y, btn->game_x, btn->game_y,
-                                        is_down ? 1 : 0);
+                            if (!g_input_config.is_editing()) {
+                                int btn_idx = g_input_config.find_by_scancode(scancode);
+                                if (btn_idx >= 0) {
+                                    TouchButton* btn = g_input_config.get_button(btn_idx);
+                                    if (btn && btn->is_pressed != is_down) {
+                                        btn->is_pressed = is_down;
+                                        
+                                        if (is_down && btn->is_macro && btn->macro_open_touch_id >= 0) {
+                                            // Macro step 1: press the opener button (use_item)
+                                            TouchButton* opener = nullptr;
+                                            for (int j = 0; j < g_input_config.button_count(); j++) {
+                                                TouchButton* t = g_input_config.get_button(j);
+                                                if (t && t->touch_id == btn->macro_open_touch_id) { opener = t; break; }
+                                            }
+                                            if (opener) {
+                                                int macro_tid = 100 + btn->touch_id;
+                                                call_handle_touch_event(handleTouchEvent, env_ptr, 0,
+                                                    1, macro_tid, accumulated_time,
+                                                    opener->game_x, opener->game_y, opener->game_x, opener->game_y, 1);
+                                                call_handle_touch_event(handleTouchEvent, env_ptr, 0,
+                                                    2, macro_tid, accumulated_time + 0.2,
+                                                    opener->game_x, opener->game_y, opener->game_x, opener->game_y, 0);
+                                            }
+                                            btn->macro_pending = true;
+                                            btn->macro_fire_time = (uint64_t)(accumulated_time * 1000.0);
+                                        } else if (!btn->is_macro) {
+                                            // Normal button press/release
+                                            call_handle_touch_event(handleTouchEvent, env_ptr, 0,
+                                                is_down ? 1 : 2, btn->touch_id, accumulated_time,
+                                                btn->game_x, btn->game_y, btn->game_x, btn->game_y,
+                                                is_down ? 1 : 0);
+                                        }
+                                    }
+                                    break;
                                 }
-                                break;
+                            } else {
+                                // Editor: capture key for rebinding
+                                if (is_down && g_input_config.editor_handle_key(scancode)) break;
                             }
                             
                             // Camera + arrow keys (camera-only, not game movement)
@@ -1409,6 +1580,1054 @@ void load_and_boot() {
     }
 }
 
+void load_and_boot_arm64() {
+    std::string so_path = get_data_path(g_lib_name);
+    std::cout << "[Loader64] Loading: " << so_path << std::endl;
+    uint64_t load_addr = 0x1000000;
+    
+    // 1. Load ELF (ARM64)
+    if (g_loader_64->load(&g_main_mod_64, so_path, load_addr) != 0) {
+        std::cerr << "[Loader64] Failed to load SO" << std::endl;
+        exit(1);
+    }
+    
+    // 2. Internal Relocations
+    g_loader_64->relocate(&g_main_mod_64);
+    
+    // 3. External Symbol Resolution (to Bridge addresses)
+    g_loader_64->resolve_all_to_bridge(&g_main_mod_64, &g_bridge_64, GUEST_GLOBALS_BASE);
+    
+    std::cout << "[Loader64] Game binary ready (all symbols bridged)." << std::endl;
+
+    // Initialize ARM64 Emulator AFTER memory is prepared
+    g_emulator_64 = new EmulatorArm64(g_guest_memory, GUEST_MEM_SIZE);
+    g_emulator_64->set_bridge(&g_bridge_64);
+
+    // --- Runtime binary patches (ARM64) ---
+    // Patch code integrity checks that fail in emulation
+    {
+        uint32_t NOP = 0xD503201F;  // ARM64 NOP instruction
+        
+        // 1. NOP the "bl abort" at 0x5812e0 (Lua compiler assert)
+        //    Original: 0x5812e0: bl abort  →  triggered when parser returns non-zero
+        *(uint32_t*)(g_guest_memory + load_addr + 0x5812e0) = NOP;
+        
+        // 2. NOP the code validation "b.ne" at 0x580728
+        //    Original: checks if code bytes match magic1 (0xd2801168)
+        *(uint32_t*)(g_guest_memory + load_addr + 0x580728) = NOP;
+        
+        // 3. NOP the code validation "b.ne" at 0x580740
+        //    Original: checks if code bytes match magic2 (0xd4000001)  
+        *(uint32_t*)(g_guest_memory + load_addr + 0x580740) = NOP;
+        
+        // 4. NOP the "bl abort" at 0x5702a4 (fwrite assert path)
+        *(uint32_t*)(g_guest_memory + load_addr + 0x5702a4) = NOP;
+        
+        // 5. NOP the load instruction at 0x580720 that dereferences invalid 
+        //    64-bit pointers (0xffffffff...) during scene processing.
+        //    This happens because pointer arithmetic overflows in our flat 
+        //    32-bit memory layout vs Android's 64-bit address space.
+        *(uint32_t*)(g_guest_memory + load_addr + 0x580720) = NOP;
+        
+        std::cout << "[Patch64] Applied 5 runtime patches (integrity checks bypassed)" << std::endl;
+    }
+
+    // --- POD block parsing loop fix ---
+    // At guest 0x15807d0 (binary offset 0x5807d0): ADD X0, X0, X2
+    // This advances through a linked block structure. When the data is 
+    // corrupt/uninitialized (size=0 at [X0+4]), the loop never advances.
+    // Hook this instruction to ensure minimum advance of 8 bytes (header size).
+    {
+        static auto hook_pod_advance = [](uc_engine* uc, uint64_t addr, 
+                                          uint32_t size, void* data) {
+            uint64_t x2;
+            uc_reg_read(uc, UC_ARM64_REG_X2, &x2);
+            if ((x2 & 0xFFFFFFFF) == 0) {
+                x2 = 8; // minimum advance = sizeof(tag) + sizeof(size)
+                uc_reg_write(uc, UC_ARM64_REG_X2, &x2);
+            }
+        };
+        uint64_t hook_addr = load_addr + 0x5807d0;
+        uc_hook pod_hook;
+        uc_hook_add((uc_engine*)g_emulator_64->get_uc_handle(), &pod_hook, 
+                    UC_HOOK_CODE, (void*)(+hook_pod_advance), nullptr, 
+                    hook_addr, hook_addr);
+        std::cout << "[Patch64] POD loop advance hook at 0x" << std::hex 
+                  << hook_addr << std::dec << std::endl;
+    }
+    
+    // --- Entity inner loop break ---
+    // The entity processing has an inner loop (0x15811B8 → 0x158120c/0x1581230 → back)
+    // that iterates over entity sub-items. When entity data pointers are 0 (because
+    // the entity data pool at [X20+0x310] is NULL/zeroed), the inner loop reads
+    // all zeros and never exits. Hook the loop-back branches to count iterations
+    // and break out after a reasonable limit.
+    {
+        // Patch the unconditional B at 0x158120c (B 0x15811B8) and 0x1581230 (B 0x15811B8)
+        // to jump to the entity-advance code at 0x1581234 instead.
+        // This makes each entity's inner loop run exactly once, then advance.
+        // Original: 17ffffeb (B -0x54)  →  Changed to: 1400000a (B +0x28 → 0x1581234)
+        // Original: 17ffffe2 (B -0x78)  →  Changed to: 14000001 (B +0x4 → 0x1581234)
+        
+        // Actually, let's compute the correct branch offsets:
+        // From 0x158120c to 0x1581234: offset = (0x1581234 - 0x158120c) / 4 = 0x28/4 = 10
+        // Encoding: 0x14000000 | 10 = 0x1400000a
+        *(uint32_t*)(g_guest_memory + load_addr + 0x58120c) = 0x1400000a;
+        
+        // From 0x1581230 to 0x1581234: offset = (0x1581234 - 0x1581230) / 4 = 0x4/4 = 1
+        // Encoding: 0x14000000 | 1 = 0x14000001
+        *(uint32_t*)(g_guest_memory + load_addr + 0x581230) = 0x14000001;
+        
+        std::cout << "[Patch64] Entity inner loop patched (single-pass per entity)" << std::endl;
+    }
+    
+    // --- Entity setup function bypass ---
+    // The BL at 0x580708 calls 0x1583248 (entity_setup) which searches a
+    // linked list at global 0x16FE598 (BSS). When the list is empty (0),
+    // the function loops infinitely. Replace BL with MOV X0, XZR (= return 0).
+    // The subsequent CBNZ at 0x580710 checks X0; if 0, falls through
+    // to the init loop path instead of the "found" path at 0x580810.
+    {
+        // MOV X0, XZR = 0xAA1F03E0
+        *(uint32_t*)(g_guest_memory + load_addr + 0x580708) = 0xAA1F03E0;
+        std::cout << "[Patch64] Entity setup BL at 0x1580708 → MOV X0, XZR" << std::endl;
+    }
+    
+    // --- Entity list global watchpoint ---
+    // Monitor writes to the entity list head at 0x16FE598 (BSS).
+    // If anything writes here, it means entity creation code ran.
+    {
+        static auto hook_entity_write = [](uc_engine* uc, uc_mem_type type,
+                                           uint64_t addr, int size, 
+                                           int64_t value, void* data) {
+            uint64_t pc;
+            uc_reg_read(uc, UC_ARM64_REG_PC, &pc);
+            std::cerr << "[WATCHPOINT] Write to entity list global 0x16FE598: "
+                      << "value=0x" << std::hex << value 
+                      << " size=" << std::dec << size
+                      << " PC=0x" << std::hex << pc << std::dec << std::endl;
+        };
+        uc_hook wp_hook;
+        uc_hook_add((uc_engine*)g_emulator_64->get_uc_handle(), &wp_hook, 
+                    UC_HOOK_MEM_WRITE, (void*)(+hook_entity_write), nullptr, 
+                    0x16FE590, 0x16FE5A0);
+        std::cout << "[Patch64] Entity list watchpoint at 0x16FE590-0x16FE5A0" << std::endl;
+    }
+
+    // Debug: Check what's at the crash address 0x270
+    {
+        uint32_t code_at_270[4] = {0};
+        memcpy(code_at_270, g_guest_memory + 0x270, 16);
+        std::cout << "[Debug] Code at guest 0x270: " << std::hex 
+                  << code_at_270[0] << " " << code_at_270[1] << " " << code_at_270[2] << " " << code_at_270[3]
+                  << std::dec << std::endl;
+        // Check first few GOT entries near where PLT points
+        uint64_t got_sample[4] = {0};
+        // The GOT is typically at the start of the DATA segment
+        uint64_t got_vaddr = g_main_mod_64.data_bases.empty() ? 0 : g_main_mod_64.data_bases[0];
+        if (got_vaddr > 0) {
+            memcpy(got_sample, g_guest_memory + got_vaddr, 32);
+            std::cout << "[Debug] First GOT entries at 0x" << std::hex << got_vaddr << ": "
+                      << got_sample[0] << " " << got_sample[1] << " " << got_sample[2] << " " << got_sample[3]
+                      << std::dec << std::endl;
+        }
+    }
+
+    // Run dynamic initializers (.init_array) — entries are uint64_t (8 bytes each)
+    if (g_main_mod_64.init_array_vaddr != 0 && g_main_mod_64.init_array_size > 0) {
+        int count = g_main_mod_64.init_array_size / 8;
+        std::cout << "[Boot64] Executing " << count << " dynamic initializers..." << std::endl;
+        uint64_t* init_array = (uint64_t*)(g_guest_memory + g_main_mod_64.init_array_vaddr);
+        for (int i = 0; i < count; i++) {
+            uint64_t init_func = init_array[i];
+            if (init_func != 0) {
+                if (i % 50 == 0 || i == count - 1) {
+                    std::cout << "  -> Initializer " << i << "/" << count << " at 0x" << std::hex << init_func << std::dec << std::endl;
+                }
+                g_emulator_64->call(init_func, {});
+            }
+        }
+        std::cout << "[Boot64] Dynamic initializers completed successfully." << std::endl;
+    }
+
+    // 4. Boot Sequence — resolve symbols (all addresses are uint64_t)
+    uint64_t setFilesDir = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_setFilesDir");
+    uint64_t setCacheDir = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_setCacheDir");
+    uint64_t setAssetMgr = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_setAssetManager");
+    uint64_t googleSignInCompleted = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_googleSignInCompleted");
+    uint64_t handleAppLaunch = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_handleApplicationLaunch");
+    uint64_t initMusicPlayer = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_MusicPlayer_initMusicPlayer");
+    uint64_t setupNative = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_setupNativeInterface");
+    uint64_t setupApp = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_setupApplication");
+    uint64_t setApplicationViewSize = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_setApplicationViewSize");
+    uint64_t applicationDidBecomeActive = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_applicationDidBecomeActive");
+
+    // Resolve FWKeyboard API symbols (mangled C++ names from the Caver engine)
+    // Note: ARM64 uses different mangling for some types but symbol names are the same
+    g_fw_sharedKeyboard = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "_ZN5Caver10FWKeyboard14sharedKeyboardEv");
+    g_fw_sendKeyDown    = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "_ZN5Caver10FWKeyboard16SendKeyDownEventEjjd");
+    g_fw_sendKeyUp      = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "_ZN5Caver10FWKeyboard14SendKeyUpEventEjjd");
+    g_fw_sendKeyChar    = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "_ZN5Caver10FWKeyboard16SendKeyCharEventEjd");
+    g_fw_handleMenuBtn  = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_handleMenuButtonPress");
+    std::cout << "[Boot64] FWKeyboard API: sharedKeyboard=0x" << std::hex << g_fw_sharedKeyboard
+              << " sendDown=0x" << g_fw_sendKeyDown << " sendUp=0x" << g_fw_sendKeyUp
+              << " sendChar=0x" << g_fw_sendKeyChar << " menuBtn=0x" << g_fw_handleMenuBtn
+              << std::dec << std::endl;
+
+    // Setup fake JNI structures in guest memory (64-bit)
+    uint64_t env_ptr = setup_jni_env_arm64(g_guest_memory);
+    std::cout << "[Debug64] env_ptr = 0x" << std::hex << env_ptr << " vtable_ptr = 0x" << *(uint64_t*)(g_guest_memory + env_ptr) << std::dec << std::endl;
+
+    // Allocate some strings in guest memory for paths
+    // Guest path pointers are still uint32_t addresses (guest memory < 4GB)
+    uint32_t path_ptr = 0x20000;
+    uint32_t files_dir = path_ptr;
+    strcpy((char*)(g_guest_memory + files_dir), g_save_dir.c_str());
+    path_ptr += 100;
+    
+    uint32_t cache_dir = path_ptr;
+    strcpy((char*)(g_guest_memory + cache_dir), g_cache_dir.c_str());
+    path_ptr += 100;
+
+    // Reload controls for ARM64 (separate from ARM32 due to different scaling)
+    g_input_config.load(g_save_dir + "/controls_arm64.ini");
+    std::cout << "[Input64] Loaded ARM64 controls config (" << g_input_config.button_count() << " buttons)" << std::endl;
+
+    if (setFilesDir) {
+        std::cout << "[Boot64] Calling setFilesDir" << std::endl;
+        g_emulator_64->call(setFilesDir, {env_ptr, 0, (uint64_t)files_dir});
+    }
+    if (setCacheDir) {
+        std::cout << "[Boot64] Calling setCacheDir" << std::endl;
+        g_emulator_64->call(setCacheDir, {env_ptr, 0, (uint64_t)cache_dir});
+    }
+    if (setAssetMgr) {
+        std::cout << "[Boot64] Calling setAssetManager" << std::endl;
+        g_emulator_64->call(setAssetMgr, {env_ptr, 0, 0x55555555});
+    }
+    if (googleSignInCompleted) {
+        std::cout << "[Boot64] Calling googleSignInCompleted" << std::endl;
+        g_emulator_64->call(googleSignInCompleted, {env_ptr, 0, 0});
+    }
+    if (handleAppLaunch) {
+        std::cout << "[Boot64] Calling handleApplicationLaunch" << std::endl;
+        g_emulator_64->call(handleAppLaunch, {env_ptr, 0});
+    }
+    if (initMusicPlayer) {
+        std::cout << "[Boot64] Calling initMusicPlayer" << std::endl;
+        g_emulator_64->call(initMusicPlayer, {env_ptr, 0x22222222});
+    }
+    if (setupNative) {
+        std::cout << "[Boot64] Calling setupNativeInterface" << std::endl;
+        g_emulator_64->call(setupNative, {env_ptr, 0});
+    }
+    if (setupApp) {
+        std::cout << "[Boot64] Calling setupApplication" << std::endl;
+        g_emulator_64->call(setupApp, {env_ptr, 0});
+    }
+    if (setApplicationViewSize) {
+        std::cout << "[Boot64] Calling setApplicationViewSize" << std::endl;
+        g_emulator_64->call(setApplicationViewSize, {env_ptr, 0, (uint64_t)GAME_W, (uint64_t)GAME_H, 1});
+    }
+    if (applicationDidBecomeActive) {
+        std::cout << "[Boot64] Calling applicationDidBecomeActive" << std::endl;
+        g_emulator_64->call(applicationDidBecomeActive, {env_ptr, 0});
+    }
+    std::cout << "[Diag64] Post-applicationDidBecomeActive" << std::endl;
+    std::cout.flush();
+
+    // ========================================================================
+    // Death screen fix: Patch ShowInterstitialAd + wire ad dismissed callback
+    // ARM64 version: use 'ret' (0xD65F03C0) instead of Thumb 'bx lr' (0x4770)
+    // No Thumb bit stripping needed — ARM64 has no Thumb mode
+    // ========================================================================
+    {
+        uint64_t showAd = g_loader_64->get_symbol_vaddr(&g_main_mod_64,
+            "_ZN5Caver24OnlineController_Android18ShowInterstitialAdERKSsif");
+        if (showAd) {
+            uint8_t* memory = g_emulator_64->get_memory_base();
+            // Write ARM64 'ret' instruction (0xD65F03C0) — 4 bytes, little-endian
+            *(uint32_t*)(memory + showAd) = 0xD65F03C0;
+            std::cout << "[Fix64] Patched ShowInterstitialAd at 0x" << std::hex << showAd
+                      << " -> ret (no-op)" << std::dec << std::endl;
+        }
+
+        uint64_t showAd2 = g_loader_64->get_symbol_vaddr(&g_main_mod_64,
+            "_ZN5Caver25AndroidShowInterstitialAdEd");
+        if (showAd2) {
+            uint8_t* memory = g_emulator_64->get_memory_base();
+            *(uint32_t*)(memory + showAd2) = 0xD65F03C0;
+            std::cout << "[Fix64] Patched AndroidShowInterstitialAd at 0x" << std::hex << showAd2
+                      << " -> ret" << std::dec << std::endl;
+        }
+    }
+    std::cout << "[Diag64] Post-ad-patches" << std::endl;
+    std::cout.flush();
+
+    // Resolve the ad dismissed callback — called reactively in game loop when death is detected
+    uint64_t adVisibilityChanged = g_loader_64->get_symbol_vaddr(&g_main_mod_64,
+        "Java_com_touchfoo_swordigo_Native_interstitialAdVisibilityChanged");
+    if (adVisibilityChanged) {
+        std::cout << "[Fix64] Resolved interstitialAdVisibilityChanged at 0x"
+                  << std::hex << adVisibilityChanged << std::dec
+                  << " — will fire reactively on death detection" << std::endl;
+    }
+
+    // 5. Game Loop
+    uint64_t updateApp = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_updateApplication");
+    uint64_t drawApp = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_drawApplication");
+    uint64_t handleTouchEvent = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_handleTouchEvent");
+    uint64_t snapshotLoaded = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_snapshotLoaded");
+    
+    // Tell the game that Google Sign-In failed (services not available)
+    if (googleSignInCompleted) {
+        std::cout << "[Boot64] Calling googleSignInCompleted(false) — no Google Play services" << std::endl;
+        std::cout.flush();
+        g_emulator_64->call(googleSignInCompleted, {env_ptr, 0, 0});
+        std::cout << "[Diag64] Post-googleSignInCompleted" << std::endl;
+        std::cout.flush();
+    }
+
+    bool g_hide_touch_hud = true;
+    g_gl_hide_hud = g_hide_touch_hud;
+
+    std::cout << "[Diag64] Entering game loop. updateApp=0x" << std::hex << updateApp
+              << " drawApp=0x" << drawApp << std::dec << std::endl;
+    std::cout.flush();
+
+    if (updateApp && drawApp) {
+        Uint64 last_ticks = SDL_GetTicks();
+        double accumulated_time = 0.0;
+        bool gui_visible = false;
+        bool debug_visible = false;
+        bool hint_shown = false;
+        Uint64 hint_start_time = SDL_GetTicks();
+        float fps = 0.0f;
+        Uint64 fps_last_time = SDL_GetTicks();
+        int fps_frame_count = 0;
+        
+        const int TARGET_FRAMES = g_display_active ? 0 : 1000;
+        int completed_frames = 0;
+        
+        uint32_t total_draw_calls = 0;
+        uint32_t total_tex_binds = 0;
+        uint32_t total_tex_uploads = 0;
+        uint32_t total_matrix_ops = 0;
+        uint32_t total_state_changes = 0;
+        uint32_t total_asset_opens = 0;
+
+        std::cout << "\n========================================" << std::endl;
+        if (g_display_active) {
+            std::cout << "[Loop64] Starting visual game loop (close window to stop)" << std::endl;
+        } else {
+            std::cout << "[Loop64] Starting " << TARGET_FRAMES << "-frame stability test" << std::endl;
+        }
+        std::cout << "========================================\n" << std::endl;
+
+        extern Display* g_display_ptr;
+
+        int mouse_x = 0;
+        int mouse_y = 0;
+        bool mouse_pressed = false;
+        bool click_swallowed_by_gui = false;
+        float last_mouse_x = -1.0f;
+        float last_mouse_y = -1.0f;
+
+        bool key_left = false;
+        bool key_right = false;
+        bool key_jump = false;
+        bool key_attack = false;
+        bool key_magic = false;
+        bool key_use_item = false;
+        bool key_menu = false;
+
+        bool arrow_left  = false;
+        bool arrow_right = false;
+        bool arrow_up    = false;
+        bool arrow_down  = false;
+        bool cam_key_pgup  = false;
+        bool cam_key_pgdn  = false;
+
+        bool running = true;
+        while (running) {
+            g_frame_stats.reset();
+            
+            Uint64 now_ticks = SDL_GetTicks();
+            float dt_seconds = (now_ticks - last_ticks) / 1000.0f;
+            if (dt_seconds > 0.1f) dt_seconds = 0.016666668f;
+            if (dt_seconds < 0.001f) dt_seconds = 0.016666668f;
+            last_ticks = now_ticks;
+            accumulated_time += dt_seconds;
+            
+            if (completed_frames < 2) {
+                g_emulator_64->quiet_mode = false;
+            } else {
+                g_emulator_64->quiet_mode = true;
+            }
+            
+            // Touch held buttons — ARM64 AAPCS64 calling convention:
+            // Integer args: X0=env, X1=obj, X2=action, X3=id, X4=tapCount
+            // Float args (separate sequence): D0=time, S1=x, S2=y, S3=oldX, S4=oldY
+            static int touch_debug_count = 0;
+            auto call_touch_64 = [&](int action, int id, double time_val, float x, float y, float old_x, float old_y, int tap_count) {
+                if (!handleTouchEvent) return;
+                
+                // Scale from legacy 960×544 touch space to actual game resolution
+                // (same as ARM32 call_handle_touch_event)
+                x     *= TOUCH_SCALE_X;  y     *= TOUCH_SCALE_Y;
+                old_x *= TOUCH_SCALE_X;  old_y *= TOUCH_SCALE_Y;
+                
+                if (touch_debug_count < 5) {
+                    std::cout << "[Touch64] action=" << action << " id=" << id
+                              << " x=" << x << " y=" << y << std::endl;
+                }
+                // Set float/double args (AAPCS64: D0=1st FP, S1=2nd FP, S2=3rd FP, etc.)
+                g_emulator_64->set_dreg(0, time_val);
+                g_emulator_64->set_sreg(1, x);
+                g_emulator_64->set_sreg(2, y);
+                g_emulator_64->set_sreg(3, old_x);
+                g_emulator_64->set_sreg(4, old_y);
+                
+                if (touch_debug_count < 5) {
+                    std::cout << "[Touch64-Verify] D0=" << g_emulator_64->get_dreg(0)
+                              << " S1=" << g_emulator_64->get_sreg(1)
+                              << " S2=" << g_emulator_64->get_sreg(2)
+                              << " S3=" << g_emulator_64->get_sreg(3)
+                              << " S4=" << g_emulator_64->get_sreg(4) << std::endl;
+                    touch_debug_count++;
+                }
+                // Integer args via call()
+                g_emulator_64->call(handleTouchEvent, {env_ptr, 0, (uint64_t)action, (uint64_t)id, (uint64_t)tap_count});
+            };
+
+            // Per-frame camera movement
+            if (g_cam_active) {
+                bool any_cam_key = arrow_left || arrow_right || arrow_up || arrow_down || cam_key_pgup || cam_key_pgdn;
+                if (any_cam_key) {
+                    float dx = 0, dy = 0, dz = 0;
+                    if (arrow_left)   dx -= 1.0f;
+                    if (arrow_right)  dx += 1.0f;
+                    if (arrow_up)     dy += 1.0f;
+                    if (arrow_down)   dy -= 1.0f;
+                    if (cam_key_pgup) dz -= 1.0f;
+                    if (cam_key_pgdn) dz += 1.0f;
+                    cam_move_scaled(dx, dy, dz, dt_seconds);
+                } else {
+                    cam_reset_accel();
+                }
+            }
+
+            float game_dt = dt_seconds * g_game_speed;
+            uint32_t dt_hex;
+            memcpy(&dt_hex, &game_dt, 4);
+
+            if (!g_game_paused || g_step_one_frame) {
+                // ARM64 AAPCS: float dt goes in S0, not X2
+                g_emulator_64->set_sreg(0, game_dt);
+                g_emulator_64->call(updateApp, {env_ptr, 0});
+                if (g_step_one_frame) {
+                    g_step_one_frame = false;
+                    mod_toast("Stepped 1 frame", 0.8f);
+                }
+            }
+            
+            // Death screen workaround
+            if (g_death_detected_countdown > 0) {
+                g_death_detected_countdown--;
+                if (g_death_detected_countdown == 0) {
+                    std::cout << "\n[Fix64] Death screen detected — auto-restarting engine..." << std::endl;
+                    std::cout << "[Fix64] You will resume from your last checkpoint." << std::endl;
+                    SDL_Quit();
+                    extern std::string g_lib_name;
+                    extern char** g_saved_argv;
+                    extern int g_saved_argc;
+                    std::vector<std::string> arg_strs;
+                    std::vector<char*> args;
+                    for (int i = 0; i < g_saved_argc; i++) {
+                        std::string a = g_saved_argv[i];
+                        if ((a == "--lib" || a == "--assets") && i + 1 < g_saved_argc) { i++; continue; }
+                        arg_strs.push_back(a);
+                    }
+                    arg_strs.push_back("--lib");
+                    arg_strs.push_back(g_lib_name);
+                    arg_strs.push_back("--assets");
+                    arg_strs.push_back(g_assets_dir);
+                    for (auto& s : arg_strs) args.push_back(&s[0]);
+                    args.push_back(nullptr);
+#ifdef _WIN32
+                    char exe_path[MAX_PATH];
+                    GetModuleFileNameA(NULL, exe_path, MAX_PATH);
+                    _spawnv(_P_NOWAIT, exe_path, args.data());
+#else
+                    execv("/proc/self/exe", args.data());
+#endif
+                    std::cerr << "[Fix64] Restart failed, please start manually." << std::endl;
+                    exit(1);
+                }
+            }
+            
+            io_thread_poll();
+
+            // Handle async snapshot callbacks
+            extern int g_snapshot_load_pending_count; // counter, not boolean
+            extern bool g_snapshot_has_data;
+            extern std::vector<uint8_t> g_snapshot_data;
+            while (g_snapshot_load_pending_count > 0 && snapshotLoaded) {
+                g_snapshot_load_pending_count--;
+                if (g_snapshot_has_data && !g_snapshot_data.empty()) {
+                    static uint32_t save_buf_addr = 0x40000000;
+                    uint32_t array_len = g_snapshot_data.size();
+                    *(uint32_t*)(g_guest_memory + save_buf_addr) = array_len;
+                    memcpy(g_guest_memory + save_buf_addr + 4, g_snapshot_data.data(), array_len);
+                    std::cout << "[Callback64] snapshotLoaded with " << array_len << " bytes of save data" << std::endl;
+                    g_emulator_64->call(snapshotLoaded, {env_ptr, 0, 0, (uint64_t)save_buf_addr});
+                    g_snapshot_has_data = false;
+                } else {
+                    std::cout << "[Callback64] snapshotLoaded(null, null) — no saved game" << std::endl;
+                    g_emulator_64->call(snapshotLoaded, {env_ptr, 0, 0, 0});
+                }
+            }
+            
+            if (g_display_active) {
+#ifdef VULKAN_BACKEND
+                if (g_graphics_api == GraphicsAPI::VULKAN) {
+                    g_vk_backend.begin_frame();
+                } else
+#endif
+                {
+                    fbo_begin_game();
+                }
+            }
+            
+            // --- Run deferred threads (from pthread_create) ---
+            // Scene transitions spawn loading threads. Running them inline
+            // (nested uc_emu_start) corrupts state. Run them here between frames.
+            if (g_emulator_64->has_pending_threads()) {
+                g_emulator_64->run_pending_threads();
+            }
+            
+            g_emulator_64->call(drawApp, {env_ptr, 0});
+
+            if (g_display_active) {
+#ifdef VULKAN_BACKEND
+                if (g_graphics_api == GraphicsAPI::VULKAN) {
+                    // Vulkan frame end + present is done after overlays
+                } else
+#endif
+                {
+                    draw_batcher_flush(); // Flush any pending batched draws
+                    fbo_end_game_and_blit(g_draw_w, g_draw_h, g_fbo_mode, &g_postfx);
+                }
+            }
+
+            // Camera override not yet ported to ARM64 (cam_apply uses Emulator* / ARM32 registers)
+            // cam_apply(g_emulator_64, g_guest_memory);
+
+            // Render GUI overlay (F1 toggle)
+            if (g_display_active && gui_visible) {
+                g_gui.render(mouse_x, mouse_y, mouse_pressed, g_win_w, g_win_h);
+            }
+            
+            // Render controls editor overlay (F2 toggle)
+            if (g_display_active && g_input_config.is_editing()) {
+                g_input_config.render_editor(g_win_w, g_win_h, mouse_x, mouse_y, mouse_pressed);
+                glPushAttrib(GL_ALL_ATTRIB_BITS);
+                glViewport(0, 0, g_draw_w, g_draw_h);
+                glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+                glOrtho(0, g_win_w, 0, g_win_h, -1, 1);
+                glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+                glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
+                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                // Controls editor header text
+                {
+                    std::string mode_str = "POSITION";
+                    if (g_input_config.get_editor_mode() == EDITOR_REBIND) mode_str = "REBIND (click button, press key)";
+                    g_gui.draw_string("CONTROLS EDITOR [" + mode_str + "]  |  F2=Save & Close  R=Toggle Rebind", 10, g_win_h - 20, 1.3f, 100, 200, 255, 255);
+                    g_gui.draw_string("Blue=Move  Green=Action  Orange=Menu  Purple=Magic Macro  Yellow=Custom", 10, g_win_h - 38, 1.1f, 180, 180, 200, 200);
+                }
+                // Draw readable button labels on each circle
+                {
+                    float sx = (float)g_win_w / 960.0f;
+                    float sy = (float)g_win_h / 544.0f;
+                    for (int i = 0; i < g_input_config.button_count(); i++) {
+                        TouchButton* btn = g_input_config.get_button(i);
+                        if (!btn) continue;
+                        float wx = btn->game_x * sx;
+                        float wy = btn->game_y * sy;
+                        float wr = btn->radius * std::min(sx, sy) * 0.7f;
+                        // Display name
+                        std::string dname = btn->display_name.empty() ? btn->name : btn->display_name;
+                        // Key binding text
+                        std::string key1 = InputConfig::scancode_name(btn->sdl_scancode);
+                        std::string key2 = InputConfig::scancode_name(btn->sdl_scancode_alt);
+                        std::string keytxt = "[" + key1;
+                        if (btn->sdl_scancode_alt > 0) keytxt += "/" + key2;
+                        keytxt += "]";
+                        // Color
+                        uint8_t cr = 255, cg = 255, cb = 255;
+                        if (btn->is_macro) { cr = 200; cg = 140; cb = 255; }
+                        else if (btn->is_custom) { cr = 255; cg = 255; cb = 100; }
+                        // Draw name above center
+                        g_gui.draw_string(dname, (int)(wx - dname.size() * 4), (int)(wy + 6), 1.0f, cr, cg, cb, 255);
+                        // Draw key binding below center
+                        g_gui.draw_string(keytxt, (int)(wx - keytxt.size() * 3.5f), (int)(wy - 10), 0.9f, 180, 180, 180, 200);
+                        if (btn->is_macro) {
+                            g_gui.draw_string("MACRO", (int)(wx - 16), (int)(wy - wr - 14), 0.8f, 180, 80, 220, 200);
+                        }
+                    }
+                }
+                glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix();
+                glPopAttrib();
+            }
+            
+            // Render F3 debug overlay
+            if (g_display_active && debug_visible) {
+                glPushAttrib(GL_ALL_ATTRIB_BITS);
+                glViewport(0, 0, g_draw_w, g_draw_h);
+                glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+                glOrtho(0, g_win_w, 0, g_win_h, -1, 1);
+                glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+                glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
+                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glColor4ub(0, 0, 0, 180);
+                glBegin(GL_QUADS);
+                glVertex2f(10, g_win_h - 10); glVertex2f(420, g_win_h - 10);
+                glVertex2f(420, g_win_h - 275); glVertex2f(10, g_win_h - 275);
+                glEnd();
+                char dbg[256];
+                snprintf(dbg, sizeof(dbg), "FPS: %.1f", fps);
+                g_gui.draw_string(dbg, 20, g_win_h - 35, 2.0f, 0, 255, 100, 255);
+                snprintf(dbg, sizeof(dbg), "Frame: %d  [ARM64]", completed_frames);
+                g_gui.draw_string(dbg, 20, g_win_h - 60, 1.4f, 200, 200, 200, 255);
+                snprintf(dbg, sizeof(dbg), "Draws: %d  TexBinds: %d", g_frame_stats.draw_calls, g_frame_stats.texture_binds);
+                g_gui.draw_string(dbg, 20, g_win_h - 80, 1.2f, 180, 180, 180, 255);
+                snprintf(dbg, sizeof(dbg), "Verts: %d  MatOps: %d", g_frame_stats.vertices_submitted, g_frame_stats.matrix_ops);
+                g_gui.draw_string(dbg, 20, g_win_h - 97, 1.2f, 180, 180, 180, 255);
+                snprintf(dbg, sizeof(dbg), "State: %d  TexUps: %d", g_frame_stats.state_changes, g_frame_stats.tex_uploads);
+                g_gui.draw_string(dbg, 20, g_win_h - 114, 1.2f, 180, 180, 180, 255);
+                snprintf(dbg, sizeof(dbg), "Render: %dx%d -> Window: %dx%d (Draw: %dx%d)", GAME_W, GAME_H, g_win_w, g_win_h, g_draw_w, g_draw_h);
+                g_gui.draw_string(dbg, 20, g_win_h - 131, 1.2f, 140, 140, 160, 255);
+                snprintf(dbg, sizeof(dbg), "Mouse: %d,%d  DT: %.4fs", mouse_x, mouse_y, dt_seconds);
+                g_gui.draw_string(dbg, 20, g_win_h - 148, 1.2f, 140, 140, 160, 255);
+
+                const char* fbo_mode_str = "Unknown";
+                if (g_fbo_mode == FBOScale::SHARP_BILINEAR) fbo_mode_str = "Sharp-Bilinear";
+                else if (g_fbo_mode == FBOScale::NEAREST) fbo_mode_str = "Nearest";
+                else if (g_fbo_mode == FBOScale::CRT_SCANLINE) fbo_mode_str = "CRT Scanline";
+                else if (g_fbo_mode == FBOScale::FSR) fbo_mode_str = "FSR 1.0";
+                snprintf(dbg, sizeof(dbg), "Scale Mode: %s", fbo_mode_str);
+                g_gui.draw_string(dbg, 20, g_win_h - 165, 1.2f, 255, 200, 100, 255);
+
+                snprintf(dbg, sizeof(dbg), "Speed: %s  %s", mod_speed_label(), g_game_paused ? "|| PAUSED" : "");
+                g_gui.draw_string(dbg, 20, g_win_h - 185, 1.2f, 255, 180, 50, 255);
+                snprintf(dbg, sizeof(dbg), "F1:GUI F2:Ctrl F3:Dbg F4:Scale F5:Cam F6:PostFX F7:Type F10:HUD");
+                g_gui.draw_string(dbg, 20, g_win_h - 202, 1.1f, 100, 100, 120, 200);
+                if (g_typing_mode) {
+                    g_gui.draw_string("TYPING MODE ACTIVE", 20, g_win_h - 218, 1.2f, 255, 100, 100, 255);
+                }
+                char cam_dbg[128];
+                cam_debug_string(cam_dbg, sizeof(cam_dbg));
+                g_gui.draw_string(cam_dbg, 20, g_win_h - 222, 1.1f,
+                    g_cam_active ? 0 : 120,
+                    g_cam_active ? 220 : 120,
+                    g_cam_active ? 100 : 120, 255);
+
+                // Binary info
+                const BinaryInfo* binfo = g_binary_selector.get_loaded_info();
+                if (binfo) {
+                    snprintf(dbg, sizeof(dbg), "Binary: %s (%s)", binfo->filename.c_str(), binfo->label.c_str());
+                    g_gui.draw_string(dbg, 20, g_win_h - 240, 1.2f, 100, 200, 255, 255);
+                } else {
+                    snprintf(dbg, sizeof(dbg), "Binary: %s", g_lib_name.c_str());
+                    g_gui.draw_string(dbg, 20, g_win_h - 240, 1.2f, 100, 200, 255, 255);
+                }
+
+                // PostFX info
+                if (g_postfx.enabled) {
+                    snprintf(dbg, sizeof(dbg), "PostFX: %s", g_postfx.preset_name);
+                    g_gui.draw_string(dbg, 20, g_win_h - 255, 1.2f, 255, 180, 100, 255);
+                } else {
+                    g_gui.draw_string("PostFX: Off", 20, g_win_h - 255, 1.2f, 120, 120, 120, 200);
+                }
+
+                glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix();
+                glPopAttrib();
+            }
+            
+            // Render mod tools overlay
+            if (g_display_active) {
+                glPushAttrib(GL_ALL_ATTRIB_BITS);
+                glViewport(0, 0, g_draw_w, g_draw_h);
+                glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+                glOrtho(0, g_win_w, 0, g_win_h, -1, 1);
+                glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+                glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
+                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                mod_render_overlay(g_gui, g_win_w, g_win_h, dt_seconds);
+                glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix();
+                glPopAttrib();
+            }
+
+            extern int g_gl_diag_frame;
+            g_gl_diag_frame++;
+            
+            // Present the frame
+            if (g_display_active && g_display_ptr) {
+#ifdef VULKAN_BACKEND
+                if (g_graphics_api == GraphicsAPI::VULKAN) {
+                    g_vk_backend.end_frame_and_present();
+                } else
+#endif
+                {
+                    g_display_ptr->swap();
+                }
+                
+                SDL_Event event;
+                while (SDL_PollEvent(&event)) {
+                    switch (event.type) {
+                        case SDL_EVENT_QUIT:
+                            running = false;
+                            break;
+                        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+                            running = false;
+                            break;
+                        case SDL_EVENT_WINDOW_RESIZED:
+                            g_win_w = event.window.data1;
+                            g_win_h = event.window.data2;
+                            SDL_GetWindowSizeInPixels(g_display_ptr->get_window(), &g_draw_w, &g_draw_h);
+                            std::cout << "[Display] Window resized to " << g_win_w << "x" << g_win_h
+                                      << " (drawable: " << g_draw_w << "x" << g_draw_h << ")" << std::endl;
+                            break;
+                        case SDL_EVENT_KEY_DOWN:
+                            if (event.key.key == SDLK_F1 && !event.key.repeat) { gui_visible = !gui_visible; break; }
+                            if (event.key.key == SDLK_F2 && !event.key.repeat) {
+                                g_input_config.toggle_editor();
+                                if (!g_input_config.is_editing()) g_input_config.save(g_save_dir + "/controls_arm64.ini");
+                                break;
+                            }
+                            // Controls editor: R toggles rebind mode, Delete removes custom button
+                            if (g_input_config.is_editing() && !event.key.repeat) {
+                                if (event.key.key == SDLK_R) {
+                                    auto mode = g_input_config.get_editor_mode();
+                                    g_input_config.set_editor_mode(mode == EDITOR_REBIND ? EDITOR_POSITION : EDITOR_REBIND);
+                                    std::cout << "[Controls] Editor mode: " 
+                                              << (g_input_config.get_editor_mode() == EDITOR_REBIND ? "REBIND" : "POSITION") << std::endl;
+                                    break;
+                                }
+                                // Capture key for rebinding
+                                if (g_input_config.editor_handle_key(event.key.scancode)) break;
+                            }
+                            if (event.key.key == SDLK_F3 && !event.key.repeat) { debug_visible = !debug_visible; break; }
+                            if (event.key.key == SDLK_F4 && !event.key.repeat) {
+                                g_fbo_mode = static_cast<FBOScale>((static_cast<int>(g_fbo_mode) + 1) % 4);
+                                const char* m_name = "Unknown";
+                                if (g_fbo_mode == FBOScale::SHARP_BILINEAR) m_name = "Sharp-Bilinear";
+                                else if (g_fbo_mode == FBOScale::NEAREST) m_name = "Nearest";
+                                else if (g_fbo_mode == FBOScale::CRT_SCANLINE) m_name = "CRT Scanline";
+                                else if (g_fbo_mode == FBOScale::FSR) m_name = "FSR 1.0 (Edge-Adaptive)";
+                                std::cout << "[FBO] Scale mode changed to " << m_name << std::endl;
+                                break;
+                            }
+                            if (event.key.key == SDLK_F5 && !event.key.repeat) { cam_toggle(); break; }
+                            if (event.key.key == SDLK_F6 && !event.key.repeat) {
+                                g_postfx_preset = static_cast<PostFXPreset>(
+                                    (static_cast<int>(g_postfx_preset) + 1) % static_cast<int>(PostFXPreset::COUNT)
+                                );
+                                postfx_apply_preset(g_postfx, g_postfx_preset);
+                                std::cout << "[PostFX] Preset: " << g_postfx.preset_name << std::endl;
+                                break;
+                            }
+                            if (event.key.key == SDLK_F7 && !event.key.repeat) {
+                                g_typing_mode = !g_typing_mode;
+                                if (g_typing_mode) {
+                                    SDL_StartTextInput(g_display_ptr->get_window());
+                                    std::cout << "[Keyboard] Typing mode ON" << std::endl;
+                                } else {
+                                    SDL_StopTextInput(g_display_ptr->get_window());
+                                    std::cout << "[Keyboard] Typing mode OFF" << std::endl;
+                                }
+                                break;
+                            }
+                            if (event.key.key == SDLK_F8 && !event.key.repeat) { mod_toggle_pause(); break; }
+                            if (event.key.key == SDLK_F9 && !event.key.repeat) { mod_step_frame(); break; }
+                            if (event.key.key == SDLK_F10 && !event.key.repeat) {
+                                g_hide_touch_hud = !g_hide_touch_hud;
+                                g_gl_hide_hud = g_hide_touch_hud;
+                                break;
+                            }
+                            if (event.key.key == SDLK_F12 && !event.key.repeat) {
+                                SDL_WindowFlags flags = SDL_GetWindowFlags(g_display_ptr->get_window());
+                                if (flags & SDL_WINDOW_FULLSCREEN) {
+                                    SDL_SetWindowFullscreen(g_display_ptr->get_window(), false);
+                                    g_win_w = 1920; g_win_h = 1080;
+                                    SDL_GetWindowSizeInPixels(g_display_ptr->get_window(), &g_draw_w, &g_draw_h);
+                                } else {
+                                    SDL_SetWindowFullscreen(g_display_ptr->get_window(), true);
+                                    int fw, fh;
+                                    SDL_GetWindowSize(g_display_ptr->get_window(), &fw, &fh);
+                                    g_win_w = fw; g_win_h = fh;
+                                    SDL_GetWindowSizeInPixels(g_display_ptr->get_window(), &g_draw_w, &g_draw_h);
+                                }
+                                break;
+                            }
+                            if (event.key.key == SDLK_EQUALS && !event.key.repeat) { mod_speed_up(); break; }
+                            if (event.key.key == SDLK_MINUS && !event.key.repeat) { mod_speed_down(); break; }
+                            if (event.key.key == SDLK_0 && !event.key.repeat) { mod_speed_reset(); break; }
+                            // fall through
+                        case SDL_EVENT_KEY_UP: {
+                            bool is_down = (event.type == SDL_EVENT_KEY_DOWN);
+                            int scancode = event.key.scancode;
+                            // Camera + arrow keys
+                            switch (event.key.key) {
+                                case SDLK_LEFT:     arrow_left   = is_down; break;
+                                case SDLK_RIGHT:    arrow_right  = is_down; break;
+                                case SDLK_UP:       arrow_up     = is_down; break;
+                                case SDLK_DOWN:     arrow_down   = is_down; break;
+                                case SDLK_PAGEUP:   cam_key_pgup = is_down; break;
+                                case SDLK_PAGEDOWN: cam_key_pgdn = is_down; break;
+                                case SDLK_HOME:
+                                    if (is_down) cam_reset();
+                                    break;
+                            }
+                            break;
+                        }
+                        case SDL_EVENT_MOUSE_WHEEL:
+                            if (g_cam_active) cam_scroll_zoom((float)event.wheel.y);
+                            break;
+                        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                            if (event.button.button == SDL_BUTTON_LEFT) {
+                                mouse_pressed = true;
+                                mouse_x = event.button.x;
+                                mouse_y = g_win_h - event.button.y;
+                                // Controls editor intercepts all mouse events
+                                if (g_input_config.is_editing()) {
+                                    float gx = event.button.x * 960.0f / (float)g_win_w;
+                                    float gy = 544.0f - (event.button.y * 544.0f / (float)g_win_h);
+                                    g_input_config.editor_mouse_down(gx, gy);
+                                    click_swallowed_by_gui = true;
+                                    break;
+                                }
+                                GuiAction gui_action = GUI_NONE;
+                                bool gui_consumed = false;
+                                if (gui_visible) {
+                                    gui_action = g_gui.handle_click(mouse_x, mouse_y, g_win_w, g_win_h);
+                                    gui_consumed = (gui_action != GUI_NONE)
+                                                || (mouse_y >= g_win_h - (int)(32 * g_gui.get_scale()))
+                                                || g_gui.has_modal_open();
+                                }
+                                if (gui_consumed) {
+                                    click_swallowed_by_gui = true;
+                                    switch (gui_action) {
+                                        case GUI_EXIT: running = false; break;
+                                        case GUI_PAUSE: mod_toggle_pause(); break;
+                                        case GUI_CUSTOMIZE_CONTROLS: g_input_config.set_editing(true); break;
+                                        case GUI_GAME_SPEED_UP: mod_speed_up(); break;
+                                        case GUI_GAME_SPEED_DOWN: mod_speed_down(); break;
+                                        case GUI_GAME_SPEED_RESET: mod_speed_reset(); break;
+                                        case GUI_TOGGLE_CAM: cam_toggle(); break;
+                                        case GUI_TOGGLE_PAUSE: mod_toggle_pause(); break;
+                                        case GUI_TOGGLE_SMOOTH_CAM: cam_toggle_smooth(); break;
+                                        case GUI_MOD_WALK_SPEED_UP: g_gui.mod_walk_speed = std::min(g_gui.mod_walk_speed + 0.5f, 10.0f); break;
+                                        case GUI_MOD_WALK_SPEED_DOWN: g_gui.mod_walk_speed = std::max(g_gui.mod_walk_speed - 0.5f, 0.5f); break;
+                                        case GUI_MOD_RUN_SPEED_UP: g_gui.mod_run_speed = std::min(g_gui.mod_run_speed + 0.5f, 10.0f); break;
+                                        case GUI_MOD_RUN_SPEED_DOWN: g_gui.mod_run_speed = std::max(g_gui.mod_run_speed - 0.5f, 0.5f); break;
+                                        case GUI_MOD_JUMP_HEIGHT_UP: g_gui.mod_jump_height = std::min(g_gui.mod_jump_height + 0.5f, 10.0f); break;
+                                        case GUI_MOD_JUMP_HEIGHT_DOWN: g_gui.mod_jump_height = std::max(g_gui.mod_jump_height - 0.5f, 0.5f); break;
+                                        case GUI_MOD_LEVEL_UP: g_gui.mod_level = std::min(g_gui.mod_level + 1, 99); break;
+                                        case GUI_MOD_LEVEL_DOWN: g_gui.mod_level = std::max(g_gui.mod_level - 1, 0); break;
+                                        case GUI_MOD_EXP_UP: g_gui.mod_exp += 100; break;
+                                        case GUI_MOD_EXP_DOWN: g_gui.mod_exp = std::max(g_gui.mod_exp - 100, 0); break;
+                                        default: break;
+                                    }
+                                } else {
+                                    click_swallowed_by_gui = false;
+                                    float x = event.button.x * 960.0f / (float)g_win_w;
+                                    float y = 544.0f - (event.button.y * 544.0f / (float)g_win_h);
+                                    last_mouse_x = x; last_mouse_y = y;
+                                    call_touch_64(1, 1, accumulated_time, x, y, x, y, 1);
+                                }
+                            }
+                            break;
+                        case SDL_EVENT_MOUSE_MOTION:
+                            mouse_x = event.motion.x;
+                            mouse_y = g_win_h - event.motion.y;
+                            if (g_input_config.is_editing() && mouse_pressed) {
+                                float gx = event.motion.x * 960.0f / (float)g_win_w;
+                                float gy = 544.0f - (event.motion.y * 544.0f / (float)g_win_h);
+                                g_input_config.editor_mouse_move(gx, gy);
+                            } else if (mouse_pressed && !click_swallowed_by_gui) {
+                                float x = event.motion.x * 960.0f / (float)g_win_w;
+                                float y = 544.0f - (event.motion.y * 544.0f / (float)g_win_h);
+                                call_touch_64(4, 1, accumulated_time, x, y, last_mouse_x, last_mouse_y, 0);
+                                last_mouse_x = x; last_mouse_y = y;
+                            }
+                            break;
+                        case SDL_EVENT_MOUSE_BUTTON_UP:
+                            if (event.button.button == SDL_BUTTON_LEFT) {
+                                mouse_pressed = false;
+                                mouse_x = event.button.x;
+                                mouse_y = g_win_h - event.button.y;
+                                if (g_input_config.is_editing()) {
+                                    g_input_config.editor_mouse_up();
+                                } else if (!click_swallowed_by_gui) {
+                                    float x = event.button.x * 960.0f / (float)g_win_w;
+                                    float y = 544.0f - (event.button.y * 544.0f / (float)g_win_h);
+                                    call_touch_64(2, 1, accumulated_time, x, y, last_mouse_x, last_mouse_y, 0);
+                                    last_mouse_x = -1.0f; last_mouse_y = -1.0f;
+                                }
+                                click_swallowed_by_gui = false;
+                            }
+                            break;
+                        // --- Multi-touch / finger events (touchscreen support) ---
+                        case SDL_EVENT_FINGER_DOWN: {
+                            float x = event.tfinger.x * 960.0f;
+                            float y = (1.0f - event.tfinger.y) * 544.0f;
+                            int finger_id = (int)(event.tfinger.fingerID % 10) + 20;
+                            call_touch_64(1, finger_id, accumulated_time, x, y, x, y, 1);
+                            break;
+                        }
+                        case SDL_EVENT_FINGER_UP: {
+                            float x = event.tfinger.x * 960.0f;
+                            float y = (1.0f - event.tfinger.y) * 544.0f;
+                            int finger_id = (int)(event.tfinger.fingerID % 10) + 20;
+                            call_touch_64(2, finger_id, accumulated_time, x, y, x, y, 0);
+                            break;
+                        }
+                        case SDL_EVENT_FINGER_MOTION: {
+                            float x = event.tfinger.x * 960.0f;
+                            float y = (1.0f - event.tfinger.y) * 544.0f;
+                            int finger_id = (int)(event.tfinger.fingerID % 10) + 20;
+                            call_touch_64(4, finger_id, accumulated_time, x, y, x, y, 0);
+                            break;
+                        }
+                        case SDL_EVENT_GAMEPAD_ADDED:
+                            if (!g_gamepad) {
+                                g_gamepad = SDL_OpenGamepad(event.gdevice.which);
+                                if (g_gamepad)
+                                    std::cout << "[Input] Gamepad connected: " << SDL_GetGamepadName(g_gamepad) << std::endl;
+                            }
+                            break;
+                        case SDL_EVENT_GAMEPAD_REMOVED:
+                            if (g_gamepad && event.gdevice.which == SDL_GetJoystickID(SDL_GetGamepadJoystick(g_gamepad))) {
+                                SDL_CloseGamepad(g_gamepad);
+                                g_gamepad = nullptr;
+                                std::cout << "[Input] Gamepad disconnected" << std::endl;
+                            }
+                            break;
+                    }
+                }
+                
+                // Keyboard→touch button dispatch (game buttons like WASD, space, etc.)
+                {
+                    const bool* keys = SDL_GetKeyboardState(nullptr);
+                    for (int bi = 0; bi < g_input_config.button_count(); bi++) {
+                        TouchButton* btn = g_input_config.get_button(bi);
+                        if (!btn) continue;
+                        
+                        // Skip buttons during controls editor
+                        if (g_input_config.is_editing()) continue;
+                        
+                        // Check both primary and alt key bindings
+                        bool is_down = false;
+                        if (btn->sdl_scancode > 0 && btn->sdl_scancode < 512)
+                            is_down = keys[btn->sdl_scancode];
+                        if (!is_down && btn->sdl_scancode_alt > 0 && btn->sdl_scancode_alt < 512)
+                            is_down = keys[btn->sdl_scancode_alt];
+                        
+                        if (is_down && !btn->is_pressed) {
+                            btn->is_pressed = true;
+                            
+                            if (btn->is_macro && btn->macro_open_touch_id >= 0) {
+                                // Macro step 1: press the magic menu button to open spell selection
+                                TouchButton* opener = nullptr;
+                                for (int j = 0; j < g_input_config.button_count(); j++) {
+                                    TouchButton* t = g_input_config.get_button(j);
+                                    if (t && t->touch_id == btn->macro_open_touch_id) { opener = t; break; }
+                                }
+                                if (opener) {
+                                    std::cout << "[Macro] Step 1: press " << opener->name 
+                                              << " at (" << opener->game_x << ", " << opener->game_y 
+                                              << ") touch_id=" << opener->touch_id << std::endl;
+                                    // Press the opener (magic button) — use a unique touch_id (100+btn->touch_id)
+                                    // to avoid conflicting with the actual magic button state
+                                    int macro_tid = 100 + btn->touch_id;
+                                    call_touch_64(1, macro_tid, accumulated_time,
+                                        opener->game_x, opener->game_y, opener->game_x, opener->game_y, 1);
+                                    // Release after a short hold (200ms simulated via second call)
+                                    call_touch_64(2, macro_tid, accumulated_time + 0.2,
+                                        opener->game_x, opener->game_y, opener->game_x, opener->game_y, 0);
+                                }
+                                // Schedule macro step 2 (will tap spell slot after delay)
+                                btn->macro_pending = true;
+                                btn->macro_fire_time = (uint64_t)(accumulated_time * 1000.0);
+                                std::cout << "[Macro] Scheduled step 2 for " << btn->name 
+                                          << " in " << btn->macro_delay_ms << "ms" << std::endl;
+                            } else {
+                                // Normal button press
+                                call_touch_64(1, btn->touch_id, accumulated_time,
+                                    btn->game_x, btn->game_y, btn->game_x, btn->game_y, 1);
+                            }
+                        } else if (!is_down && btn->is_pressed) {
+                            btn->is_pressed = false;
+                            if (!btn->is_macro) {
+                                call_touch_64(2, btn->touch_id, accumulated_time,
+                                    btn->game_x, btn->game_y, btn->game_x, btn->game_y, 0);
+                            }
+                        }
+                    }
+                    
+                    // Process pending macro step 2 (delayed spell slot tap)
+                    g_input_config.process_macros(accumulated_time,
+                        [&](int action, int id, double time, float x, float y, float ox, float oy, int tap) {
+                            call_touch_64(action, id, time, x, y, ox, oy, tap);
+                        });
+                }
+            }
+            
+            // FPS counter
+            fps_frame_count++;
+            Uint64 fps_now = SDL_GetTicks();
+            if (fps_now - fps_last_time >= 1000) {
+                fps = fps_frame_count * 1000.0f / (fps_now - fps_last_time);
+                fps_frame_count = 0;
+                fps_last_time = fps_now;
+            }
+            
+            completed_frames++;
+            total_draw_calls += g_frame_stats.draw_calls;
+            total_tex_binds += g_frame_stats.texture_binds;
+            total_tex_uploads += g_frame_stats.tex_uploads;
+            total_matrix_ops += g_frame_stats.matrix_ops;
+            total_state_changes += g_frame_stats.state_changes;
+            total_asset_opens += g_frame_stats.asset_opens;
+            
+            if (completed_frames == 1 || completed_frames == 10 || 
+                completed_frames % 100 == 0) {
+                std::cout << "[Frame64 " << completed_frames << "] "
+                          << "draws=" << g_frame_stats.draw_calls
+                          << " tex_binds=" << g_frame_stats.texture_binds
+                          << std::endl;
+                draw_batcher_print_stats();
+            }
+            
+            if (TARGET_FRAMES > 0 && completed_frames >= TARGET_FRAMES) running = false;
+        }
+
+        g_input_config.save(g_save_dir + "/controls_arm64.ini");
+        if (g_gamepad) {
+            SDL_CloseGamepad(g_gamepad);
+            g_gamepad = nullptr;
+        }
+
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "[RESULT64] Completed " << completed_frames << " frames (ARM64)" << std::endl;
+        std::cout << "========================================" << std::endl;
+        std::cout << "  Total draw calls:      " << total_draw_calls << std::endl;
+        std::cout << "  Total tex binds:       " << total_tex_binds << std::endl;
+        std::cout << "  Avg draw/frame:        " << (completed_frames ? total_draw_calls / completed_frames : 0) << std::endl;
+        std::cout << "========================================" << std::endl;
+    }
+}
 
 
 
@@ -1430,8 +2649,8 @@ int main(int argc, char* argv[]) {
         if (strcmp(argv[i], "--vulkan") == 0) g_graphics_api = GraphicsAPI::VULKAN;
 #endif
         if (strcmp(argv[i], "--test-lib") == 0) {
-            g_lib_name = "libswordigo_nx.so";
-            std::cout << "[Main] Using libswordigo_nx.so" << std::endl;
+            g_lib_name = "engine/v1.4.12/armeabi-v7a/libswordigo.so";
+            std::cout << "[Main] Using v1.4.12 ARM32" << std::endl;
         }
         if (strcmp(argv[i], "--lib") == 0 && i + 1 < argc) {
             g_lib_name = argv[++i];
@@ -1440,6 +2659,15 @@ int main(int argc, char* argv[]) {
         if (strcmp(argv[i], "--assets") == 0 && i + 1 < argc) {
             g_assets_dir = argv[++i];
             std::cout << "[Main] Custom assets: " << g_assets_dir << std::endl;
+        }
+        // Generate manifest.json from engine/ dir and exit
+        // Usage: swordigo-desktop --generate-manifest [engine_dir] [output_path]
+        if (strcmp(argv[i], "--generate-manifest") == 0) {
+            std::string eng_path = (i + 1 < argc) ? argv[i + 1] : "engine";
+            std::string out_path = (i + 2 < argc) ? argv[i + 2] : eng_path + "/manifest.json";
+            BinarySelector gen;
+            gen.generate_manifest(eng_path, out_path);
+            return 0;
         }
     }
     
@@ -1463,17 +2691,63 @@ int main(int argc, char* argv[]) {
     Display display;
     
     // ========================================================================
-    // Binary scan (needed BEFORE launcher so it can show binary list)
+    // First-run setup: copy data from system install to user dir
+    // (like Minecraft: /usr/share/swordigo → ~/.local/share/swordigo-desktop/)
     // ========================================================================
-    std::string data_dir = ".";
+    ensure_user_data();
+    
+    // ========================================================================
+    // Binary discovery (manifest-first, scan-fallback)
+    // ========================================================================
+    // Priority: user data dir > CWD > env override > system install
+    std::string data_dir = base_dir;  // ~/.local/share/swordigo-desktop/
     const char* env_dir = getenv("SWORDIGO_DATA_DIR");
     if (env_dir) data_dir = env_dir;
-    std::string registry_path = base_dir + "/swordigo_binaries.json";
-    g_binary_selector.scan_directory(data_dir);
-    // Also scan base_dir in case .so files are next to the executable (dev mode)
-    if (data_dir != "." && data_dir != base_dir) {
-        g_binary_selector.scan_directory(base_dir);
+    
+    // If user data dir has no engine/, fall back to CWD (dev mode)
+    if (!fs::exists(data_dir + "/engine")) {
+        if (fs::exists("./engine")) {
+            data_dir = ".";
+            std::cout << "[Boot] Using CWD for game data (dev mode)" << std::endl;
+        }
     }
+    
+    // Paths for manifest-based loading
+    std::string engine_dir = data_dir + "/engine";
+    std::string system_manifest = engine_dir + "/manifest.json";
+    std::string user_config_dir;
+    const char* xdg_config = getenv("XDG_CONFIG_HOME");
+    if (xdg_config) {
+        user_config_dir = std::string(xdg_config) + "/swordigo-desktop";
+    } else {
+        const char* home = getenv("HOME");
+        user_config_dir = std::string(home ? home : ".") + "/.config/swordigo-desktop";
+    }
+    std::string user_instances_path = user_config_dir + "/instances.json";
+    std::string registry_path = base_dir + "/swordigo_binaries.json";
+    
+    // Strategy: manifest.json → scan fallback
+    if (fs::exists(system_manifest)) {
+        // Primary: read pre-built manifest (fast, no hashing at boot)
+        std::cout << "[Boot] Loading system manifest: " << system_manifest << std::endl;
+        g_binary_selector.load_manifest(system_manifest);
+    } else if (fs::exists(engine_dir) && fs::is_directory(engine_dir)) {
+        // Fallback: scan engine/ directory (dev mode or first run before packaging)
+        std::cout << "[Boot] No manifest found, scanning: " << engine_dir << std::endl;
+        g_binary_selector.scan_engine_directory(engine_dir);
+    } else {
+        // Legacy: flat directory scan
+        std::cout << "[Boot] No engine/ dir, flat scan: " << data_dir << std::endl;
+        g_binary_selector.scan_directory(data_dir);
+        if (data_dir != "." && data_dir != base_dir) {
+            g_binary_selector.scan_directory(base_dir);
+        }
+    }
+    
+    // Always load user-added custom instances
+    g_binary_selector.load_user_instances(user_instances_path);
+    
+    // Load old-format registry for backward compat
     g_binary_selector.load_registry(registry_path);
 
     // ========================================================================
@@ -1565,18 +2839,33 @@ int main(int argc, char* argv[]) {
     // ========================================================================
     {
         const auto& bins = g_binary_selector.get_binaries();
-        if (g_lib_name != "libswordigo.so") {
-            std::cout << "[BinSel] CLI override: " << g_lib_name << std::endl;
+        if (g_lib_name.find("engine/") != std::string::npos || g_lib_name.find("/") != std::string::npos) {
+            // Full path specified (engine/ structure or CLI --lib path)
+            std::cout << "[BinSel] Using: " << g_lib_name << std::endl;
+            g_binary_selector.set_loaded(g_lib_name);
         } else if (!bins.empty()) {
             g_lib_name = g_binary_selector.get_default();
             g_binary_selector.set_loaded(g_lib_name);
-            std::cout << "[BinSel] Using: " << g_lib_name << std::endl;
+            std::cout << "[BinSel] Using default: " << g_lib_name << std::endl;
         }
         g_binary_selector.save_registry(registry_path);
+        g_binary_selector.save_user_instances(user_instances_path);
     }
 
     init_all();
-    load_and_boot();
+
+    // Detect architecture from binary ELF header
+    {
+        std::string so_path = get_data_path(g_lib_name);
+        g_is_arm64 = is_arm64_binary(so_path);
+        std::cout << "[Boot] Architecture: " << (g_is_arm64 ? "ARM64" : "ARM32") << std::endl;
+    }
+    
+    if (g_is_arm64) {
+        load_and_boot_arm64();
+    } else {
+        load_and_boot();
+    }
 
     // Cleanup FBO/Vulkan and background IO thread
     if (g_display_active) {

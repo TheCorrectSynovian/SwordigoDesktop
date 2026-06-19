@@ -12,6 +12,7 @@ enum class FBOScale : int {
     SHARP_BILINEAR = 0,
     NEAREST        = 1,
     CRT_SCANLINE   = 2,
+    FSR            = 3,   // AMD FidelityFX Super Resolution 1.0 (EASU)
 };
 
 // Post-processing effects state
@@ -51,18 +52,27 @@ struct PostFXState {
     bool volumetric_light = false;
     float volumetric_intensity = 0.3f;
     
+    bool bloom = false;
+    float bloom_threshold = 0.7f;       // brightness threshold for bloom extraction
+    float bloom_intensity = 0.35f;      // additive bloom strength
+    
+    bool fake_shadows = false;
+    float shadow_intensity = 0.3f;      // bottom-screen darkening
+    float shadow_height = 0.25f;        // how high up the shadow gradient reaches
+    
     // Preset name (for display)
     const char* preset_name = "Off";
 };
 
 enum class PostFXPreset : int {
     OFF = 0,
+    SW_PLUS,        // Swordigo Plus — enhanced atmospheric with god rays
+    ATMOSPHERIC,    // SSAO + volumetric + vignette
+    ETHEREAL,       // God rays + warm glow
     CINEMATIC,
     RETRO,
     FANTASY,
     NOIR,
-    ETHEREAL,       // God rays + warm glow
-    ATMOSPHERIC,    // SSAO + volumetric + vignette
     CUSTOM,
     COUNT
 };

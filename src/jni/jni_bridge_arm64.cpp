@@ -1,5 +1,12 @@
+// ARM64 port of jni_bridge.cpp — auto-generated
+// Uses EmulatorArm64 with AAPCS64 calling convention:
+//   - Integer args in X0-X7, float args in S0-S7, double args in D0-D7
+//   - Float/int register numbering is INDEPENDENT
+//   - No __aeabi_* helpers (ARM64 has native div instructions)
+
 #include "jni_bridge.h"
-#include "platform/emulator.h"
+#include "jni_bridge_arm64.h"
+#include "platform/emulator_arm64.h"
 #include "platform/io_thread.h"
 #include "platform/data_path.h"
 #include "android/asset_manager.h"
@@ -16,11 +23,14 @@
 #include <dirent.h>
 #endif
 #include <sys/time.h>
+#include <sched.h>
+#include "platform/draw_batcher.h"
 #include <filesystem>
 namespace fs = std::filesystem;
 #include <vorbis/vorbisfile.h>
 #include <time.h>
 #include <unistd.h>
+#include <thread>
 #include <cerrno>
 #define GL_GLEXT_PROTOTYPES
 #include "platform/gl_inc.h"
@@ -34,49 +44,169 @@ extern GraphicsAPI g_graphics_api;
 extern VulkanBackend g_vk_backend;
 #endif
 
-// When true, GL bridge functions call real OpenGL instead of no-ops
-bool g_display_active = false;
-std::string g_save_dir = "./save";  // Default; overwritten by main.cpp at startup
-int g_death_detected_countdown = 0;  // Set when gameover music loads, counted down in game loop
+// These globals are defined in jni_bridge.cpp — use extern here
+extern bool g_display_active;
+extern std::string g_save_dir;
 
+// ============================================================================
+// ARM64 va_list helper
+// AArch64 va_list is a 32-byte struct (NOT a flat pointer like ARM32):
+//   offset 0:  __stack    (8 bytes) — pointer to stack overflow area
+//   offset 8:  __gr_top   (8 bytes) — top of GP register save area
+//   offset 16: __vr_top   (8 bytes) — top of FP/SIMD register save area
+//   offset 24: __gr_offs  (4 bytes) — offset from __gr_top (negative = regs remain)
+//   offset 28: __vr_offs  (4 bytes) — offset from __vr_top (negative = regs remain)
+// ============================================================================
+struct Arm64VaList {
+    uint8_t* memory;
+    uint64_t stack;
+    uint64_t gr_top;
+    uint64_t vr_top;
+    int32_t gr_offs;
+    int32_t vr_offs;
 
-// --- Frame Statistics ---
-FrameStats g_frame_stats;
+    Arm64VaList(uint8_t* mem, uint32_t va_list_ptr) : memory(mem) {
+        stack   = *(uint64_t*)(mem + va_list_ptr);
+        gr_top  = *(uint64_t*)(mem + va_list_ptr + 8);
+        vr_top  = *(uint64_t*)(mem + va_list_ptr + 16);
+        gr_offs = *(int32_t*)(mem + va_list_ptr + 24);
+        vr_offs = *(int32_t*)(mem + va_list_ptr + 28);
+    }
 
-// --- Handle Management (shared between ARM32 and ARM64 bridges) ---
-std::unordered_map<uint32_t, void*> g_handle_to_ptr;
-std::unordered_map<void*, uint32_t> g_ptr_to_handle;
-uint32_t g_next_handle = 0x88880001;
-std::mutex g_handles_mutex;
+    // Read next general-purpose (integer/pointer) argument
+    uint64_t next_gp() {
+        uint64_t val;
+        if (gr_offs < 0) {
+            val = *(uint64_t*)(memory + (uint32_t)(gr_top + gr_offs));
+            gr_offs += 8;
+        } else {
+            val = *(uint64_t*)(memory + (uint32_t)stack);
+            stack += 8;
+        }
+        return val;
+    }
 
-uint32_t register_pointer(void* ptr) {
-    if (!ptr) return 0;
-    std::lock_guard<std::mutex> lock(g_handles_mutex);
-    if (g_ptr_to_handle.count(ptr)) return g_ptr_to_handle[ptr];
-    uint32_t handle = g_next_handle++;
-    g_handle_to_ptr[handle] = ptr;
-    g_ptr_to_handle[ptr] = handle;
-    return handle;
+    // Read next floating-point argument
+    double next_fp() {
+        double val;
+        if (vr_offs < 0) {
+            // FP regs in save area are 16 bytes each (SIMD reg size)
+            val = *(double*)(memory + (uint32_t)(vr_top + vr_offs));
+            vr_offs += 16;
+        } else {
+            val = *(double*)(memory + (uint32_t)stack);
+            stack += 8;
+        }
+        return val;
+    }
+};
+
+// ============================================================================
+// JniBridge64 Class Methods
+// ============================================================================
+JniBridge64::JniBridge64() : next_addr(BRIDGE_BASE_64) {}
+
+uint64_t JniBridge64::get_address(const std::string& name) {
+    if (name_to_addr.count(name)) return name_to_addr[name];
+    
+    uint64_t addr = next_addr;
+    next_addr += 8;  // 8-byte aligned for ARM64
+    
+    name_to_addr[name] = addr;
+    addr_to_func[addr] = {name, addr, nullptr};
+    
+    return addr;
 }
 
-void* get_pointer(uint32_t handle) {
-    if (handle == 0) return nullptr;
-    std::lock_guard<std::mutex> lock(g_handles_mutex);
-    if (g_handle_to_ptr.count(handle)) return g_handle_to_ptr[handle];
-    return (void*)(uintptr_t)handle; 
+std::string JniBridge64::get_name(uint64_t address) {
+    if (addr_to_func.count(address)) return addr_to_func[address].name;
+    return "UnknownBridge64";
 }
 
-void release_pointer(void* ptr) {
-    if (!ptr) return;
-    std::lock_guard<std::mutex> lock(g_handles_mutex);
-    if (g_ptr_to_handle.count(ptr)) {
-        uint32_t handle = g_ptr_to_handle[ptr];
-        g_ptr_to_handle.erase(ptr);
-        g_handle_to_ptr.erase(handle);
+uint64_t JniBridge64::lookup_proc_address(const std::string& name) {
+    auto it = name_to_addr.find(name);
+    if (it == name_to_addr.end()) return 0;
+    uint64_t addr = it->second;
+    auto fit = addr_to_func.find(addr);
+    if (fit == addr_to_func.end() || !fit->second.handler) return 0;
+    return addr;
+}
+
+void JniBridge64::register_handler(const std::string& name, BridgeHandler64 handler) {
+    uint64_t addr = get_address(name);
+    addr_to_func[addr].handler = handler;
+}
+
+void JniBridge64::call_handler(uint64_t address, void* emu_ptr) {
+    if (addr_to_func.count(address)) {
+        BridgeFunction64& func = addr_to_func[address];
+        EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+        if (!emu->quiet_mode) {
+            static const std::unordered_map<std::string, bool> quiet_funcs = {
+                {"memcpy",1},{"memset",1},{"memmove",1},{"memcmp",1},{"memchr",1},
+                {"strlen",1},{"malloc",1},{"calloc",1},{"realloc",1},{"free",1},
+                {"strchr",1},{"strrchr",1},{"strcpy",1},{"strncpy",1},
+                {"strcmp",1},{"strncmp",1},{"strcat",1},{"strstr",1},
+                {"cosf",1},{"sinf",1},{"roundf",1},{"floorf",1},{"ceilf",1},
+                {"sqrtf",1},{"atan2f",1},{"powf",1},{"sincosf",1},{"acosf",1},
+                {"asinf",1},{"atanf",1},{"tanf",1},{"tan",1},{"cos",1},{"sin",1},
+                {"acos",1},{"pow",1},{"round",1},{"fmodf",1},
+                {"strtol",1},{"strtoul",1},{"atoi",1},{"atof",1},{"strtod",1},{"strtof",1},
+                {"wctob",1},{"btowc",1},{"__ctype_get_mb_cur_max",1},
+                {"iscntrl",1},{"isprint",1},{"isgraph",1},{"ispunct",1},{"isxdigit",1},
+                {"isblank",1},{"isalpha",1},{"isdigit",1},{"isalnum",1},{"isspace",1},
+                {"isupper",1},{"islower",1},{"toupper",1},{"tolower",1},
+                {"wctype",1},{"iswctype",1},{"towupper",1},{"towlower",1},
+                {"pthread_mutex_init",1},{"pthread_mutex_lock",1},{"pthread_mutex_unlock",1},
+                {"pthread_mutex_destroy",1},{"pthread_cond_init",1},{"pthread_cond_signal",1},
+                {"pthread_cond_wait",1},{"pthread_cond_destroy",1},{"pthread_cond_broadcast",1},
+                {"pthread_key_create",1},{"pthread_key_delete",1},
+                {"pthread_getspecific",1},{"pthread_setspecific",1},
+                {"pthread_self",1},{"pthread_once",1},{"pthread_create",1},
+                {"__cxa_atexit",1},{"__cxa_finalize",1},{"__cxa_guard_acquire",1},
+                {"__cxa_guard_release",1},{"__errno",1},{"__stack_chk_fail",1},
+                {"__google_potentially_blocking_region_begin",1},
+                {"__google_potentially_blocking_region_end",1},
+                {"sprintf",1},{"snprintf",1},{"sscanf",1},{"printf",1},
+                {"fopen",1},{"fclose",1},{"fread",1},{"fwrite",1},{"fseek",1},{"ftell",1},
+                {"time",1},{"clock",1},{"clock_gettime",1},{"gettimeofday",1},
+                {"nanosleep",1},{"sched_yield",1},{"lrand48",1},
+                {"dl_iterate_phdr",1},{"strerror",1},
+            };
+            if (!quiet_funcs.count(func.name)) {
+                std::cout << "[Bridge64] Call: " << func.name << std::endl;
+            }
+        }
+        if (func.handler) {
+            func.handler(emu_ptr);
+        } else {
+            // ALWAYS log unhandled calls — critical for debugging crashes
+            std::cerr << "[Bridge64] !! UNHANDLED: " << func.name << std::endl;
+            // Return 0 instead of leaving garbage in X0
+            EmulatorArm64* emu2 = (EmulatorArm64*)emu_ptr;
+            emu2->set_reg(0, 0);
+        }
+    } else {
+        std::cerr << "[Bridge64] !! Unknown address: 0x" << std::hex << address << std::dec << std::endl;
+        EmulatorArm64* emu2 = (EmulatorArm64*)emu_ptr;
+        emu2->set_reg(0, 0);
     }
 }
+// These are defined in jni_bridge.cpp — shared between ARM32 and ARM64
+extern int g_death_detected_countdown;
+extern FrameStats g_frame_stats;
+extern std::vector<uint8_t> g_snapshot_data;
 
-// --- Soft-Float Register Conversion Helpers ---
+// Handle management is defined in jni_bridge.cpp but used by bridge functions here
+extern std::unordered_map<uint32_t, void*> g_handle_to_ptr;
+extern std::unordered_map<void*, uint32_t> g_ptr_to_handle;
+extern uint32_t g_next_handle;
+extern std::mutex g_handles_mutex;
+
+// Handle management is shared (defined in jni_bridge.cpp)
+// register_pointer, get_pointer, release_pointer — declared in jni_bridge.h
+
+// Soft-float helpers (not needed for ARM64 but some bridge code may reference them)
 static float uint_to_float(uint32_t u) {
     float f;
     std::memcpy(&f, &u, sizeof(f));
@@ -89,89 +219,13 @@ static uint32_t float_to_uint(float f) {
     return u;
 }
 
-// --- JniBridge Methods ---
-JniBridge::JniBridge() : next_addr(BRIDGE_BASE) {}
-
-uint32_t JniBridge::get_address(const std::string& name) {
-    if (name_to_addr.count(name)) return name_to_addr[name];
-    
-    uint32_t addr = next_addr;
-    next_addr += 4;
-    
-    name_to_addr[name] = addr;
-    addr_to_func[addr] = {name, addr, nullptr};
-    
-    return addr;
-}
-
-std::string JniBridge::get_name(uint32_t address) {
-    if (addr_to_func.count(address)) return addr_to_func[address].name;
-    return "UnknownBridge";
-}
-
-uint32_t JniBridge::lookup_proc_address(const std::string& name) {
-    auto it = name_to_addr.find(name);
-    if (it == name_to_addr.end()) return 0;
-    uint32_t addr = it->second;
-    auto fit = addr_to_func.find(addr);
-    if (fit == addr_to_func.end() || !fit->second.handler) return 0;
-    return addr;
-}
-
-void JniBridge::register_handler(const std::string& name, BridgeHandler handler) {
-    uint32_t addr = get_address(name);
-    addr_to_func[addr].handler = handler;
-}
-
-void JniBridge::call_handler(uint32_t address, void* emu_ptr) {
-    if (addr_to_func.count(address)) {
-        BridgeFunction& func = addr_to_func[address];
-        Emulator* emu = (Emulator*)emu_ptr;
-        // Only log when not in quiet mode, and skip trivial calls
-        if (!emu->quiet_mode) {
-            static const std::unordered_map<std::string, bool> quiet_funcs = {
-                {"memcpy",1},{"memset",1},{"memmove",1},{"memcmp",1},{"memchr",1},
-                {"strlen",1},{"malloc",1},{"calloc",1},{"realloc",1},{"free",1},
-                {"__aeabi_memclr",1},{"__aeabi_memclr4",1},{"__aeabi_memclr8",1},
-                {"__aeabi_memset",1},{"__aeabi_memset4",1},{"__aeabi_memset8",1},
-                {"__aeabi_memcpy",1},{"__aeabi_memcpy4",1},{"__aeabi_memcpy8",1},
-                {"__aeabi_memmove",1},{"__aeabi_memmove4",1},{"__aeabi_memmove8",1},
-                {"__aeabi_uidiv",1},{"__aeabi_idiv",1},{"__aeabi_uidivmod",1},
-                {"__aeabi_idivmod",1},{"__aeabi_ldivmod",1},{"__aeabi_uldivmod",1},
-                {"strchr",1},{"strrchr",1},{"strcpy",1},{"strncpy",1},
-                {"strcmp",1},{"strncmp",1},{"strcat",1},{"strstr",1},
-                {"cosf",1},{"sinf",1},{"roundf",1},{"floorf",1},{"ceilf",1},
-                {"sqrtf",1},{"atan2f",1},{"powf",1},{"sincosf",1},
-                {"strtol",1},{"strtoul",1},{"atoi",1},{"atof",1},
-                {"wctob",1},{"btowc",1},{"__ctype_get_mb_cur_max",1},
-                {"pthread_mutex_init",1},{"pthread_mutex_lock",1},{"pthread_mutex_unlock",1},
-                {"pthread_mutex_destroy",1},{"pthread_cond_init",1},{"pthread_cond_signal",1},
-                {"pthread_cond_wait",1},{"pthread_cond_destroy",1},{"pthread_cond_broadcast",1},
-            };
-            if (!quiet_funcs.count(func.name) || func.name == "GetMethodID") {
-                std::cout << "[Bridge] Call: " << func.name << std::endl;
-            }
-        }
-        if (func.handler) {
-            func.handler(emu_ptr);
-        } else {
-            static std::unordered_set<std::string> warned_funcs;
-            if (!warned_funcs.count(func.name)) {
-                std::cout << "[WARNING] Call to UNIMPLEMENTED bridge function: " << func.name << std::endl;
-                warned_funcs.insert(func.name);
-            }
-        }
-    }
-}
-
-
 
 // --- Memory Allocator Bridges ---
 static uint32_t g_guest_heap_ptr = 0x20000000; // Start heap at 512MB
 static std::unordered_map<uint32_t, uint32_t> g_guest_allocs;
 
-void bridge_malloc(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_malloc(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t size = emu->get_reg(0);
     uint32_t addr = g_guest_heap_ptr;
     g_guest_heap_ptr += (size + 7) & ~7;
@@ -179,8 +233,8 @@ void bridge_malloc(void* emu_ptr) {
     emu->set_reg(0, addr);
 }
 
-void bridge_calloc(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_calloc(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t num = emu->get_reg(0);
     uint32_t size = emu->get_reg(1);
     uint32_t total = num * size;
@@ -191,8 +245,8 @@ void bridge_calloc(void* emu_ptr) {
     emu->set_reg(0, addr);
 }
 
-void bridge_realloc(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_realloc(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t ptr = emu->get_reg(0);
     uint32_t size = emu->get_reg(1);
     if (ptr != 0 && g_guest_allocs.count(ptr) == 0) {
@@ -224,8 +278,8 @@ void bridge_realloc(void* emu_ptr) {
     emu->set_reg(0, addr);
 }
 
-void bridge_free(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_free(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t ptr = emu->get_reg(0);
     if (ptr) {
         g_guest_allocs.erase(ptr);
@@ -233,22 +287,20 @@ void bridge_free(void* emu_ptr) {
 }
 
 // --- Standard C Memory & String Bridges ---
-void bridge_memcpy(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_memcpy(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t dest = emu->get_reg(0);
     uint32_t src = emu->get_reg(1);
     uint32_t n = emu->get_reg(2);
-    if (!emu->quiet_mode) {
-        std::cout << "[MEM] memcpy(dest=0x" << std::hex << dest << ", src=0x" << src << ", n=" << std::dec << n << ")" << std::endl;
-    }
+
     if (n > 0) {
         std::memmove(emu->get_memory_base() + dest, emu->get_memory_base() + src, n);
     }
     emu->set_reg(0, dest);
 }
 
-void bridge_memset(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_memset(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t dest = emu->get_reg(0);
     uint32_t c = emu->get_reg(1);
     uint32_t n = emu->get_reg(2);
@@ -258,32 +310,27 @@ void bridge_memset(void* emu_ptr) {
     emu->set_reg(0, dest);
 }
 
-void bridge_memmove(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_memmove(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t dest = emu->get_reg(0);
     uint32_t src = emu->get_reg(1);
     uint32_t n = emu->get_reg(2);
-    if (!emu->quiet_mode) {
-        std::cout << "[MEM] memmove(dest=0x" << std::hex << dest << ", src=0x" << src << ", n=" << std::dec << n << ")" << std::endl;
-    }
+
     if (n > 0) {
         std::memmove(emu->get_memory_base() + dest, emu->get_memory_base() + src, n);
     }
     emu->set_reg(0, dest);
 }
 
-void bridge_strlen(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_strlen(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t str = emu->get_reg(0);
     const char* s = (const char*)(emu->get_memory_base() + str);
-    if (!emu->quiet_mode) {
-        std::cout << "[STR] strlen(str=0x" << std::hex << str << ") -> \"" << s << "\"" << std::dec << std::endl;
-    }
     emu->set_reg(0, std::strlen(s));
 }
 
-void bridge_memcmp(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_memcmp(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t str1 = emu->get_reg(0);
     uint32_t str2 = emu->get_reg(1);
     uint32_t n = emu->get_reg(2);
@@ -294,371 +341,239 @@ void bridge_memcmp(void* emu_ptr) {
     emu->set_reg(0, res);
 }
 
-// --- EABI Memory Helpers ---
-void bridge_aeabi_memclr(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t dest = emu->get_reg(0);
-    uint32_t n = emu->get_reg(1);
-    if (n > 0) {
-        std::memset(emu->get_memory_base() + dest, 0, n);
-    }
-}
-
-void bridge_aeabi_memset(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t dest = emu->get_reg(0);
-    uint32_t n = emu->get_reg(1);
-    uint32_t c = emu->get_reg(2);
-    if (n > 0) {
-        std::memset(emu->get_memory_base() + dest, c, n);
-    }
-}
-
-void bridge_aeabi_memcpy(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t dest = emu->get_reg(0);
-    uint32_t src = emu->get_reg(1);
-    uint32_t n = emu->get_reg(2);
-    if (n > 0) {
-        std::memmove(emu->get_memory_base() + dest, emu->get_memory_base() + src, n);
-    }
-}
-
-void bridge_aeabi_memmove(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t dest = emu->get_reg(0);
-    uint32_t src = emu->get_reg(1);
-    uint32_t n = emu->get_reg(2);
-    if (n > 0) {
-        std::memmove(emu->get_memory_base() + dest, emu->get_memory_base() + src, n);
-    }
-}
-
-// --- EABI Division Helpers ---
-void bridge_aeabi_uidiv(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t num = emu->get_reg(0);
-    uint32_t den = emu->get_reg(1);
-    emu->set_reg(0, (den == 0) ? 0 : (num / den));
-}
-
-void bridge_aeabi_idiv(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    int32_t num = (int32_t)emu->get_reg(0);
-    int32_t den = (int32_t)emu->get_reg(1);
-    emu->set_reg(0, (den == 0) ? 0 : (num / den));
-}
-
-void bridge_aeabi_uidivmod(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t num = emu->get_reg(0);
-    uint32_t den = emu->get_reg(1);
-    if (den == 0) {
-        emu->set_reg(0, 0);
-        emu->set_reg(1, 0);
-    } else {
-        emu->set_reg(0, num / den);
-        emu->set_reg(1, num % den);
-    }
-}
-
-void bridge_aeabi_idivmod(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    int32_t num = (int32_t)emu->get_reg(0);
-    int32_t den = (int32_t)emu->get_reg(1);
-    if (den == 0) {
-        emu->set_reg(0, 0);
-        emu->set_reg(1, 0);
-    } else {
-        emu->set_reg(0, num / den);
-        emu->set_reg(1, num % den);
-    }
-}
-
-void bridge_aeabi_ldivmod(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint64_t num_low = emu->get_reg(0);
-    uint64_t num_high = emu->get_reg(1);
-    uint64_t den_low = emu->get_reg(2);
-    uint64_t den_high = emu->get_reg(3);
-    int64_t num = (int64_t)((num_high << 32) | num_low);
-    int64_t den = (int64_t)((den_high << 32) | den_low);
-    if (den == 0) {
-        emu->set_reg(0, 0); emu->set_reg(1, 0);
-        emu->set_reg(2, 0); emu->set_reg(3, 0);
-    } else {
-        int64_t quot = num / den;
-        int64_t rem = num % den;
-        emu->set_reg(0, (uint32_t)(quot & 0xFFFFFFFF));
-        emu->set_reg(1, (uint32_t)((quot >> 32) & 0xFFFFFFFF));
-        emu->set_reg(2, (uint32_t)(rem & 0xFFFFFFFF));
-        emu->set_reg(3, (uint32_t)((rem >> 32) & 0xFFFFFFFF));
-    }
-}
-
-void bridge_aeabi_uldivmod(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint64_t num_low = emu->get_reg(0);
-    uint64_t num_high = emu->get_reg(1);
-    uint64_t den_low = emu->get_reg(2);
-    uint64_t den_high = emu->get_reg(3);
-    uint64_t num = ((num_high << 32) | num_low);
-    uint64_t den = ((den_high << 32) | den_low);
-    if (den == 0) {
-        emu->set_reg(0, 0); emu->set_reg(1, 0);
-        emu->set_reg(2, 0); emu->set_reg(3, 0);
-    } else {
-        uint64_t quot = num / den;
-        uint64_t rem = num % den;
-        emu->set_reg(0, (uint32_t)(quot & 0xFFFFFFFF));
-        emu->set_reg(1, (uint32_t)((quot >> 32) & 0xFFFFFFFF));
-        emu->set_reg(2, (uint32_t)(rem & 0xFFFFFFFF));
-        emu->set_reg(3, (uint32_t)((rem >> 32) & 0xFFFFFFFF));
-    }
-}
-
 // --- Soft-Float Math Bridges ---
-void bridge_cosf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    float res = std::cos(x);
-    if (!emu->quiet_mode) {
-        std::cout << "[Math] cosf(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
-    }
-    emu->set_reg(0, float_to_uint(res));
+static void bridge_cosf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    float x = emu->get_sreg(0);
+    emu->set_sreg(0, std::cos(x));
 }
 
-void bridge_sinf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    float res = std::sin(x);
-    if (!emu->quiet_mode) {
-        std::cout << "[Math] sinf(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
-    }
-    emu->set_reg(0, float_to_uint(res));
+static void bridge_sinf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    float x = emu->get_sreg(0);
+    emu->set_sreg(0, std::sin(x));
 }
 
-void bridge_atan2f(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float y = uint_to_float(emu->get_reg(0));
-    float x = uint_to_float(emu->get_reg(1));
-    float res = std::atan2(y, x);
-    if (!emu->quiet_mode) {
-        std::cout << "[Math] atan2f(" << y << ", " << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
-    }
-    emu->set_reg(0, float_to_uint(res));
+static void bridge_atan2f(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    float y = emu->get_sreg(0);
+    float x = emu->get_sreg(1);
+    emu->set_sreg(0, std::atan2(y, x));
 }
 
-void bridge_powf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    float y = uint_to_float(emu->get_reg(1));
-    float res = std::pow(x, y);
-    if (!emu->quiet_mode) {
-        std::cout << "[Math] powf(" << x << ", " << y << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
-    }
-    emu->set_reg(0, float_to_uint(res));
+static void bridge_powf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    float x = emu->get_sreg(0);
+    float y = emu->get_sreg(1);
+    emu->set_sreg(0, std::pow(x, y));
 }
 
-void bridge_pow(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    // ARM softfp ABI: double in R0:R1 (base), R2:R3 (exponent)
-    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
-    uint32_t r2 = emu->get_reg(2), r3 = emu->get_reg(3);
-    double base, exp_val;
-    uint64_t base_i = ((uint64_t)r1 << 32) | r0;
-    uint64_t exp_i  = ((uint64_t)r3 << 32) | r2;
-    memcpy(&base, &base_i, 8);
-    memcpy(&exp_val, &exp_i, 8);
-    double res = std::pow(base, exp_val);
-    uint64_t res_i;
-    memcpy(&res_i, &res, 8);
-    emu->set_reg(0, (uint32_t)res_i);
-    emu->set_reg(1, (uint32_t)(res_i >> 32));
+static void bridge_pow(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    double base = emu->get_dreg(0);
+    double exp_val = emu->get_dreg(1);
+    emu->set_dreg(0, std::pow(base, exp_val));
 }
 
-// Double-precision math bridges (ARM softfp: double in R0:R1, result in R0:R1)
-// These are needed for 3D billboard/rotation calculations on spinning items
-
-void bridge_sin(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
-    double x;
-    uint64_t x_i = ((uint64_t)r1 << 32) | r0;
-    memcpy(&x, &x_i, 8);
-    double res = std::sin(x);
-    uint64_t res_i;
-    memcpy(&res_i, &res, 8);
-    emu->set_reg(0, (uint32_t)res_i);
-    emu->set_reg(1, (uint32_t)(res_i >> 32));
+static void bridge_sin(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::sin(emu->get_dreg(0)));
 }
 
-void bridge_cos(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
-    double x;
-    uint64_t x_i = ((uint64_t)r1 << 32) | r0;
-    memcpy(&x, &x_i, 8);
-    double res = std::cos(x);
-    uint64_t res_i;
-    memcpy(&res_i, &res, 8);
-    emu->set_reg(0, (uint32_t)res_i);
-    emu->set_reg(1, (uint32_t)(res_i >> 32));
+static void bridge_cos(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::cos(emu->get_dreg(0)));
 }
 
-void bridge_acos(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
-    double x;
-    uint64_t x_i = ((uint64_t)r1 << 32) | r0;
-    memcpy(&x, &x_i, 8);
-    double res = std::acos(x);
-    uint64_t res_i;
-    memcpy(&res_i, &res, 8);
-    emu->set_reg(0, (uint32_t)res_i);
-    emu->set_reg(1, (uint32_t)(res_i >> 32));
+static void bridge_acos(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::acos(emu->get_dreg(0)));
 }
 
-void bridge_round(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
-    double x;
-    uint64_t x_i = ((uint64_t)r1 << 32) | r0;
-    memcpy(&x, &x_i, 8);
-    double res = std::round(x);
-    uint64_t res_i;
-    memcpy(&res_i, &res, 8);
-    emu->set_reg(0, (uint32_t)res_i);
-    emu->set_reg(1, (uint32_t)(res_i >> 32));
+static void bridge_round(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::round(emu->get_dreg(0)));
 }
 
-void bridge_tan(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    // Android ARM uses softfp for doubles: R0, R1
-    uint32_t r0 = emu->get_reg(0);
-    uint32_t r1 = emu->get_reg(1);
-    double x;
-    uint64_t x_i = ((uint64_t)r1 << 32) | r0;
-    memcpy(&x, &x_i, 8);
-    double res = std::tan(x);
-    if (!emu->quiet_mode || std::isnan(res)) {
-        std::cout << "[Math] tan(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
-    }
-    uint64_t res_i;
-    memcpy(&res_i, &res, 8);
-    emu->set_reg(0, (uint32_t)res_i);
-    emu->set_reg(1, (uint32_t)(res_i >> 32));
+static void bridge_tan(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::tan(emu->get_dreg(0)));
 }
 
-void bridge_tanf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    float res = std::tan(x);
-    if (!emu->quiet_mode || std::isnan(res)) {
-        std::cout << "[Math] tanf(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
-    }
-    emu->set_reg(0, float_to_uint(res));
+// --- Double-precision math (critical for Lua) ---
+static void bridge_floor(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::floor(emu->get_dreg(0)));
 }
 
-void bridge_roundf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    float res = std::round(x);
-    if (!emu->quiet_mode) {
-        std::cout << "[Math] roundf(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
-    }
-    emu->set_reg(0, float_to_uint(res));
+static void bridge_ceil(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::ceil(emu->get_dreg(0)));
 }
 
-void bridge_floorf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    float res = std::floor(x);
-    if (!emu->quiet_mode) {
-        std::cout << "[Math] floorf(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
-    }
-    emu->set_reg(0, float_to_uint(res));
+static void bridge_sqrt(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::sqrt(emu->get_dreg(0)));
 }
 
-void bridge_ceilf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    float res = std::ceil(x);
-    if (!emu->quiet_mode) {
-        std::cout << "[Math] ceilf(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
-    }
-    emu->set_reg(0, float_to_uint(res));
+static void bridge_fmod(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::fmod(emu->get_dreg(0), emu->get_dreg(1)));
 }
 
-void bridge_sqrtf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    float res = std::sqrt(x);
-    if (!emu->quiet_mode) {
-        std::cout << "[Math] sqrtf(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
-    }
-    emu->set_reg(0, float_to_uint(res));
+static void bridge_fabs(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::fabs(emu->get_dreg(0)));
 }
 
-
-void bridge_acosf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    emu->set_reg(0, float_to_uint(std::acos(x)));
+static void bridge_log(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::log(emu->get_dreg(0)));
 }
 
-void bridge_asinf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    emu->set_reg(0, float_to_uint(std::asin(x)));
+static void bridge_log10(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::log10(emu->get_dreg(0)));
 }
 
-void bridge_atanf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    emu->set_reg(0, float_to_uint(std::atan(x)));
+static void bridge_log2(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::log2(emu->get_dreg(0)));
 }
 
-void bridge_fmodf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    float y = uint_to_float(emu->get_reg(1));
-    emu->set_reg(0, float_to_uint(std::fmod(x, y)));
+static void bridge_exp(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::exp(emu->get_dreg(0)));
 }
 
-void bridge_expf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    emu->set_reg(0, float_to_uint(std::exp(x)));
+static void bridge_ldexp(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    double x = emu->get_dreg(0);
+    int n = (int)emu->get_reg(0);  // AAPCS64: int arg in W0 (separate from FP)
+    emu->set_dreg(0, std::ldexp(x, n));
 }
 
-void bridge_logf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    emu->set_reg(0, float_to_uint(std::log(x)));
+static void bridge_frexp(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    double x = emu->get_dreg(0);
+    uint32_t exp_ptr = emu->get_reg(0);  // int* exp in X0
+    int exp_val;
+    double result = std::frexp(x, &exp_val);
+    if (exp_ptr) *(int*)(memory + exp_ptr) = exp_val;
+    emu->set_dreg(0, result);
 }
 
-void bridge_log10f(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    emu->set_reg(0, float_to_uint(std::log10(x)));
+static void bridge_modf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    double x = emu->get_dreg(0);
+    uint32_t iptr = emu->get_reg(0);  // double* iptr in X0
+    double intpart;
+    double result = std::modf(x, &intpart);
+    if (iptr) *(double*)(memory + iptr) = intpart;
+    emu->set_dreg(0, result);
 }
 
-void bridge_sincosf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float x = uint_to_float(emu->get_reg(0));
-    uint32_t sin_ptr = emu->get_reg(1);
-    uint32_t cos_ptr = emu->get_reg(2);
+static void bridge_asin(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::asin(emu->get_dreg(0)));
+}
+
+static void bridge_atan(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::atan(emu->get_dreg(0)));
+}
+
+static void bridge_atan2(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_dreg(0, std::atan2(emu->get_dreg(0), emu->get_dreg(1)));
+}
+
+static void bridge_tanf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_sreg(0, std::tan(emu->get_sreg(0)));
+}
+
+static void bridge_roundf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_sreg(0, std::round(emu->get_sreg(0)));
+}
+
+static void bridge_floorf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_sreg(0, std::floor(emu->get_sreg(0)));
+}
+
+static void bridge_ceilf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_sreg(0, std::ceil(emu->get_sreg(0)));
+}
+
+static void bridge_sqrtf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_sreg(0, std::sqrt(emu->get_sreg(0)));
+}
+
+static void bridge_acosf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    float x = emu->get_sreg(0);
+    emu->set_sreg(0, std::acos(x));
+}
+
+static void bridge_asinf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    float x = emu->get_sreg(0);
+    emu->set_sreg(0, std::asin(x));
+}
+
+static void bridge_atanf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    float x = emu->get_sreg(0);
+    emu->set_sreg(0, std::atan(x));
+}
+
+static void bridge_fmodf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    float x = emu->get_sreg(0);
+    float y = emu->get_sreg(1);
+    emu->set_sreg(0, std::fmod(x, y));
+}
+
+static void bridge_expf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    float x = emu->get_sreg(0);
+    emu->set_sreg(0, std::exp(x));
+}
+
+static void bridge_logf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    float x = emu->get_sreg(0);
+    emu->set_sreg(0, std::log(x));
+}
+
+static void bridge_log10f(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    float x = emu->get_sreg(0);
+    emu->set_sreg(0, std::log10(x));
+}
+
+static void bridge_sincosf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    // ARM64: float arg in S0, output pointers in X0, X1 (AAPCS64: int/ptr and float regs are independent)
+    float x = emu->get_sreg(0);
+    uint32_t sin_ptr = (uint32_t)emu->get_reg(0);
+    uint32_t cos_ptr = (uint32_t)emu->get_reg(1);
     float s = std::sin(x);
     float c = std::cos(x);
     uint8_t* memory = emu->get_memory_base();
-    *(uint32_t*)(memory + sin_ptr) = float_to_uint(s);
-    *(uint32_t*)(memory + cos_ptr) = float_to_uint(c);
+    memcpy(memory + sin_ptr, &s, 4);
+    memcpy(memory + cos_ptr, &c, 4);
 }
 
 // --- JNI Standard Bridges ---
-void bridge_FindClass(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_FindClass(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t name_ptr = emu->get_reg(1);
     const char* name = (const char*)(memory + name_ptr);
@@ -666,8 +581,8 @@ void bridge_FindClass(void* emu_ptr) {
     emu->set_reg(0, 0x12340001);
 }
 
-void bridge_GetMethodID(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetMethodID(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t name_ptr = emu->get_reg(2);
     const char* name = (const char*)(memory + name_ptr);
@@ -707,13 +622,13 @@ void bridge_GetMethodID(void* emu_ptr) {
     emu->set_reg(0, id);
 }
 
-void bridge_RegisterNatives(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_RegisterNatives(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0);
 }
 
-void bridge_NewGlobalRef(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_NewGlobalRef(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t obj = emu->get_reg(1);
     emu->set_reg(0, obj);
 }
@@ -721,8 +636,8 @@ void bridge_NewGlobalRef(void* emu_ptr) {
 static std::unordered_map<uint32_t, std::string> g_jstrings;
 static uint32_t g_next_jstring = 0x99990001;
 
-void bridge_NewStringUTF(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_NewStringUTF(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t str_ptr = emu->get_reg(1);
     
@@ -737,8 +652,8 @@ void bridge_NewStringUTF(void* emu_ptr) {
     emu->set_reg(0, handle);
 }
 
-void bridge_GetStringUTFChars(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetStringUTFChars(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t jstr = emu->get_reg(1);
     
@@ -757,14 +672,14 @@ void bridge_GetStringUTFChars(void* emu_ptr) {
     }
 }
 
-void bridge_AAssetManager_fromJava(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_AAssetManager_fromJava(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     void* mgr = AAssetManager_fromJava(NULL, NULL);
     emu->set_reg(0, register_pointer(mgr));
 }
 
-void bridge_AAssetManager_open(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_AAssetManager_open(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     AAssetManager* mgr = (AAssetManager*)get_pointer(emu->get_reg(0));
     uint32_t filename_ptr = emu->get_reg(1);
@@ -798,8 +713,8 @@ void bridge_AAssetManager_open(void* emu_ptr) {
 
 
 
-void bridge_AAsset_read(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_AAsset_read(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     AAsset* asset = (AAsset*)get_pointer(emu->get_reg(0));
     void* buf = (void*)(memory + emu->get_reg(1));
@@ -811,21 +726,21 @@ void bridge_AAsset_read(void* emu_ptr) {
     emu->set_reg(0, read);
 }
 
-void bridge_AAsset_close(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_AAsset_close(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     AAsset* asset = (AAsset*)get_pointer(emu->get_reg(0));
     AAsset_close(asset);
     release_pointer(asset);
 }
 
-void bridge_AAsset_getLength(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_AAsset_getLength(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     AAsset* asset = (AAsset*)get_pointer(emu->get_reg(0));
     emu->set_reg(0, (uint32_t)AAsset_getLength(asset));
 }
 
-void bridge_AAsset_openFileDescriptor(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_AAsset_openFileDescriptor(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     AAsset* asset = (AAsset*)get_pointer(emu->get_reg(0));
     off_t* outStart = (off_t*)(memory + emu->get_reg(1));
@@ -838,50 +753,50 @@ void bridge_AAsset_openFileDescriptor(void* emu_ptr) {
 }
 
 // --- RESTORED JNI ENVIRONMENT SHIMS ---
-void bridge_GetJavaVM(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetJavaVM(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t vm_ptr_ptr = emu->get_reg(1);
-    *(uint32_t*)(memory + vm_ptr_ptr) = 0x11000; // Fake VM pointer
+    *(uint64_t*)(memory + vm_ptr_ptr) = 0x11000ULL; // Fake VM pointer (64-bit!)
     emu->set_reg(0, 0); // JNI_OK
 }
 
-void bridge_GetEnv(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetEnv(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t env_ptr_ptr = emu->get_reg(2);
-    *(uint32_t*)(memory + env_ptr_ptr) = 0x10000; // Fake Env pointer
+    *(uint64_t*)(memory + env_ptr_ptr) = 0x10000ULL; // Fake Env pointer (64-bit!)
     emu->set_reg(0, 0); // JNI_OK
 }
 
-void bridge_ThrowNew(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_ThrowNew(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0);
 }
 
-void bridge_PushLocalFrame(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_PushLocalFrame(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0);
 }
 
-void bridge_PopLocalFrame(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_PopLocalFrame(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0);
 }
 
-void bridge_DeleteLocalRef(void* emu_ptr) {
+static void bridge_DeleteLocalRef(void* emu_ptr) {
 }
 
-void bridge_DeleteGlobalRef(void* emu_ptr) {
+static void bridge_DeleteGlobalRef(void* emu_ptr) {
 }
 
-void bridge_NewObjectV(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_NewObjectV(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0x43434343);
 }
 
-void bridge_CallObjectMethodV(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_CallObjectMethodV(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t obj = emu->get_reg(1);
     uint32_t mid = emu->get_reg(2);
@@ -975,9 +890,8 @@ static std::string resolve_jstring(uint32_t handle, uint8_t* memory) {
         return std::string((const char*)(memory + handle));
     return "";
 }
-int g_snapshot_load_pending_count = 0;
-std::vector<uint8_t> g_snapshot_data; // Loaded save data to pass back via snapshotLoaded
-bool g_snapshot_has_data = false; // Whether we have save data to return
+extern int g_snapshot_load_pending_count;
+extern bool g_snapshot_has_data; 
 
 static bool load_wav_to_buffer(const std::string& path, ALuint buffer) {
     FILE* f = fopen(path.c_str(), "rb");
@@ -1062,16 +976,17 @@ static bool load_ogg_to_buffer(const std::string& path, ALuint buffer) {
     return alGetError() == AL_NO_ERROR;
 }
 
-void bridge_CallBooleanMethodV(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_CallBooleanMethodV(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t obj = emu->get_reg(1);
     uint32_t method_id = emu->get_reg(2);
     uint32_t va_list_ptr = emu->get_reg(3);
+    Arm64VaList va(memory, va_list_ptr);
     
     uint32_t res = 0;
     if (method_id == 0x13190001) { // loadFile
-        uint32_t jstr = *(uint32_t*)(memory + va_list_ptr);
+        uint32_t jstr = (uint32_t)va.next_gp();
         std::string fname = "";
         if (g_jstrings.count(jstr) > 0) {
             fname = g_jstrings[jstr];
@@ -1155,8 +1070,8 @@ void bridge_CallBooleanMethodV(void* emu_ptr) {
     emu->set_reg(0, res);
 }
 
-void bridge_CallIntMethodV(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_CallIntMethodV(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t obj = emu->get_reg(1);
     uint32_t method_id = emu->get_reg(2);
     uint32_t res = 0;
@@ -1171,18 +1086,19 @@ void bridge_CallIntMethodV(void* emu_ptr) {
     emu->set_reg(0, res);
 }
 
-void bridge_CallLongMethodV(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_CallLongMethodV(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    // ARM64: 64-bit return value fits in single X0
     emu->set_reg(0, 0);
-    emu->set_reg(1, 0);
 }
 
-void bridge_CallVoidMethodV(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_CallVoidMethodV(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t obj = emu->get_reg(1);
     uint32_t method_id = emu->get_reg(2);
     uint32_t va_list_ptr = emu->get_reg(3);
+    Arm64VaList va(memory, va_list_ptr);
     
     if (method_id == 0x13200001) { // play
         std::cout << "[Music] play()" << std::endl;
@@ -1200,17 +1116,14 @@ void bridge_CallVoidMethodV(void* emu_ptr) {
             alSourceStop(g_music_source);
         }
     } else if (method_id == 0x13230001) { // setLooping
-        uint32_t looping = *(uint32_t*)(memory + va_list_ptr);
+        uint32_t looping = (uint32_t)va.next_gp();
         g_music_looping = (looping != 0);
         if (g_music_source != 0) {
             alSourcei(g_music_source, AL_LOOPING, g_music_looping ? AL_TRUE : AL_FALSE);
         }
     } else if (method_id == 0x13240001) { // setVolume
-        // ARM EABI: double in va_list must be 8-byte aligned
-        // Align va_list_ptr up to next 8-byte boundary for the double
-        uint32_t aligned_ptr = (va_list_ptr + 7) & ~7u;
-        double vol_d;
-        memcpy(&vol_d, memory + aligned_ptr, sizeof(double));
+        // ARM64: double in va_list — use FP register slot
+        double vol_d = va.next_fp();
         g_music_volume = (float)vol_d;
         
         // Clamp: prevent total silence (game uses vol=0 during transitions)
@@ -1223,36 +1136,53 @@ void bridge_CallVoidMethodV(void* emu_ptr) {
         if (g_music_source != 0) {
             alSourcef(g_music_source, AL_GAIN, g_music_volume);
         }
+    } else if (method_id == 0x13190001) { // loadFile
+        // Music loadFile: load a new background music track
+        uint32_t va_list_ptr = emu->get_reg(3);
+        Arm64VaList va2(memory, va_list_ptr);
+        uint32_t str_ref = (uint32_t)va2.next_gp();
+        std::string filename;
+        if (g_jstrings.count(str_ref)) {
+            filename = g_jstrings[str_ref];
+        } else if (str_ref > 0 && str_ref < 0xE0000000) {
+            filename = (const char*)(memory + str_ref);
+        }
+        std::cout << "[Music] loadFile(\"" << filename << "\") — STUBBED" << std::endl;
+    } else {
+        // Log unknown method IDs — critical for debugging loading issues
+        std::cerr << "[JNI] !! UNHANDLED CallVoidMethodV(obj=0x" << std::hex << obj 
+                  << ", mid=0x" << method_id << ")" << std::dec << std::endl;
     }
 }
 
-void bridge_GetObjectClass(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetObjectClass(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0x44444444);
 }
 
-void bridge_GetFieldID(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetFieldID(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0);
 }
 
-void bridge_GetBooleanField(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetBooleanField(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 1);
 }
 
-void bridge_GetIntField(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetIntField(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0);
 }
 
-void bridge_GetFloatField(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    emu->set_reg(0, 0);
+static void bridge_GetFloatField(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    // ARM64: float return in S0
+    emu->set_sreg(0, 0.0f);
 }
 
-void bridge_CallStaticObjectMethodV(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_CallStaticObjectMethodV(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t mid = emu->get_reg(2);
     uint32_t res = 0;
     if (mid == 0x13170006) { // getAnalyticsId
@@ -1267,8 +1197,8 @@ void bridge_CallStaticObjectMethodV(void* emu_ptr) {
     emu->set_reg(0, res);
 }
 
-void bridge_CallStaticBooleanMethodV(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_CallStaticBooleanMethodV(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t mid = emu->get_reg(2);
     uint32_t res = 0;
     if (mid == 0x13170001) { // isAgeKnown
@@ -1286,7 +1216,8 @@ void bridge_CallStaticBooleanMethodV(void* emu_ptr) {
     } else if (mid == 0x13280001) { // getBooleanFromSP(String key)
         uint8_t* memory = emu->get_memory_base();
         uint32_t va_ptr = emu->get_reg(3);
-        uint32_t key_h  = *(uint32_t*)(memory + va_ptr);
+        Arm64VaList va(memory, va_ptr);
+        uint32_t key_h = (uint32_t)va.next_gp();
         std::string key = resolve_jstring(key_h, memory);
         std::string val = pref_get(key, "false");
         res = (val == "true" || val == "1") ? 1 : 0;
@@ -1301,8 +1232,8 @@ void bridge_CallStaticBooleanMethodV(void* emu_ptr) {
     emu->set_reg(0, res);
 }
 
-void bridge_CallStaticIntMethodV(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_CallStaticIntMethodV(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t mid = emu->get_reg(2);
     int res = 0;
     if (mid == 0x13180001) { // getPlatformConsentState — return 3 (OBTAINED)
@@ -1310,7 +1241,8 @@ void bridge_CallStaticIntMethodV(void* emu_ptr) {
     } else if (mid == 0x13280003) { // getIntFromSP(String key)
         uint8_t* memory = emu->get_memory_base();
         uint32_t va_ptr = emu->get_reg(3);
-        uint32_t key_h  = *(uint32_t*)(memory + va_ptr);
+        Arm64VaList va(memory, va_ptr);
+        uint32_t key_h = (uint32_t)va.next_gp();
         std::string key = resolve_jstring(key_h, memory);
         std::string val = pref_get(key, "0");
         try { res = std::stoi(val); } catch (...) { res = 0; }
@@ -1325,27 +1257,28 @@ void bridge_CallStaticIntMethodV(void* emu_ptr) {
     emu->set_reg(0, res);
 }
 
-void bridge_CallStaticLongMethodV(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t mid = emu->get_reg(2);
+static void bridge_CallStaticLongMethodV(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint32_t mid = (uint32_t)emu->get_reg(2);
     if (!emu->quiet_mode) {
         std::cout << "[JNI] CallStaticLongMethodV(mid=0x" << std::hex << mid << ") -> 0" << std::dec << std::endl;
     }
+    // ARM64: 64-bit return value fits in single X0
     emu->set_reg(0, 0);
-    emu->set_reg(1, 0);
 }
 
-void bridge_CallStaticFloatMethodV(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t mid = emu->get_reg(2);
+static void bridge_CallStaticFloatMethodV(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint32_t mid = (uint32_t)emu->get_reg(2);
     if (!emu->quiet_mode) {
         std::cout << "[JNI] CallStaticFloatMethodV(mid=0x" << std::hex << mid << ") -> 0" << std::dec << std::endl;
     }
-    emu->set_reg(0, 0);
+    // ARM64: float return in S0
+    emu->set_sreg(0, 0.0f);
 }
 
-void bridge_CallStaticVoidMethodV(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_CallStaticVoidMethodV(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t mid = emu->get_reg(2);
     if (!emu->quiet_mode) {
         std::cout << "[JNI] CallStaticVoidMethodV(mid=0x" << std::hex << mid << ")" << std::dec << std::endl;
@@ -1354,7 +1287,8 @@ void bridge_CallStaticVoidMethodV(void* emu_ptr) {
     if (mid == 0x13170002) { // enteredAge
         uint8_t* memory = emu->get_memory_base();
         uint32_t va_list_ptr = emu->get_reg(3);
-        int age = *(int*)(memory + va_list_ptr);
+        Arm64VaList va(memory, va_list_ptr);
+        int age = (int)va.next_gp();
         g_saved_age = age;
         std::cout << "[JNI] enteredAge(" << age << ") -> Saved!" << std::endl;
     } else if (mid == 0x13170007) { // receivedPrivacyConsent
@@ -1377,8 +1311,9 @@ void bridge_CallStaticVoidMethodV(void* emu_ptr) {
         // Extract save data from JNI args: saveSnapshot(String name, byte[] data)
         uint8_t* memory = emu->get_memory_base();
         uint32_t va_list_ptr = emu->get_reg(3);
-        uint32_t name_ref = *(uint32_t*)(memory + va_list_ptr);
-        uint32_t data_ref = *(uint32_t*)(memory + va_list_ptr + 4);
+        Arm64VaList va2(memory, va_list_ptr);
+        uint32_t name_ref = (uint32_t)va2.next_gp();
+        uint32_t data_ref = (uint32_t)va2.next_gp();
         std::cout << "[SAVE] saveSnapshot(name=0x" << std::hex << name_ref 
                   << ", data=0x" << data_ref << ")" << std::dec << std::endl;
         
@@ -1401,110 +1336,111 @@ void bridge_CallStaticVoidMethodV(void* emu_ptr) {
     } else if (mid == 0x13280002) { // saveBooleanInSP(String key, boolean val)
         uint8_t* memory = emu->get_memory_base();
         uint32_t va_ptr = emu->get_reg(3);
-        uint32_t key_h  = *(uint32_t*)(memory + va_ptr);
-        uint32_t bval   = *(uint32_t*)(memory + va_ptr + 4);
+        Arm64VaList va(memory, va_ptr);
+        uint32_t key_h = (uint32_t)va.next_gp();
+        uint32_t bval  = (uint32_t)va.next_gp();
         std::string key = resolve_jstring(key_h, memory);
         pref_set(key, bval ? "true" : "false");
     } else if (mid == 0x13280004) { // saveIntInSP(String key, int val)
         uint8_t* memory = emu->get_memory_base();
         uint32_t va_ptr = emu->get_reg(3);
-        uint32_t key_h  = *(uint32_t*)(memory + va_ptr);
-        int ival        = *(int*)(memory + va_ptr + 4);
+        Arm64VaList va(memory, va_ptr);
+        uint32_t key_h = (uint32_t)va.next_gp();
+        int ival       = (int)va.next_gp();
         std::string key = resolve_jstring(key_h, memory);
         pref_set(key, std::to_string(ival));
     } else if (mid == 0x13280006) { // saveLongInSP(String key, long val)
         uint8_t* memory = emu->get_memory_base();
         uint32_t va_ptr = emu->get_reg(3);
-        uint32_t key_h  = *(uint32_t*)(memory + va_ptr);
-        // Long in ARM soft-float va_list: low word then high word
-        uint32_t lo = *(uint32_t*)(memory + va_ptr + 4);
-        uint32_t hi = *(uint32_t*)(memory + va_ptr + 8);
-        int64_t lval = (int64_t)((uint64_t)hi << 32 | lo);
+        Arm64VaList va(memory, va_ptr);
+        uint32_t key_h = (uint32_t)va.next_gp();
+        // ARM64: long is a single 8-byte value in one register slot
+        int64_t lval = (int64_t)va.next_gp();
         std::string key = resolve_jstring(key_h, memory);
         pref_set(key, std::to_string(lval));
     }
 }
 
-void bridge_GetStaticFieldID(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetStaticFieldID(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0);
 }
 
-void bridge_GetStaticObjectField(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetStaticObjectField(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0);
 }
 
-void bridge_GetStringUTFLength(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetStringUTFLength(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t jstr = emu->get_reg(1);
     const char* str = (const char*)(memory + jstr);
     emu->set_reg(0, std::strlen(str));
 }
 
-void bridge_ReleaseStringUTFChars(void* emu_ptr) {
+static void bridge_ReleaseStringUTFChars(void* emu_ptr) {
 }
 
-void bridge_GetArrayLength(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetArrayLength(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0);
 }
 
-void bridge_GetObjectArrayElement(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetObjectArrayElement(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0);
 }
 
-void bridge_NewIntArray(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_NewIntArray(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0);
 }
 
-void bridge_NewByteArray(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_NewByteArray(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     std::cout << "[JNI] NewByteArray() -> 0" << std::endl;
     emu->set_reg(0, 0);
 }
 
-void bridge_GetByteArrayElements(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetByteArrayElements(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t array = emu->get_reg(1);
     std::cout << "[JNI] GetByteArrayElements(array=0x" << std::hex << array << ") -> 0" << std::dec << std::endl;
     emu->set_reg(0, 0); // Return null (no data)
 }
 
-void bridge_ReleaseByteArrayElements(void* emu_ptr) {
+static void bridge_ReleaseByteArrayElements(void* emu_ptr) {
     // No-op — nothing to release
 }
 
-void bridge_GetIntArrayElements(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetIntArrayElements(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0);
 }
 
-void bridge_ReleaseIntArrayElements(void* emu_ptr) {
+static void bridge_ReleaseIntArrayElements(void* emu_ptr) {
 }
 
-void bridge_SetIntArrayRegion(void* emu_ptr) {
+static void bridge_SetIntArrayRegion(void* emu_ptr) {
 }
 
-void bridge_GetStringUTFRegion(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_GetStringUTFRegion(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
-    uint32_t jstr = emu->get_reg(1);
-    uint32_t start = emu->get_reg(2);
-    uint32_t len = emu->get_reg(3);
-    uint32_t sp = emu->get_reg(13);
-    uint32_t buf = *(uint32_t*)(memory + sp);
+    uint32_t jstr = (uint32_t)emu->get_reg(1);
+    uint32_t start = (uint32_t)emu->get_reg(2);
+    uint32_t len = (uint32_t)emu->get_reg(3);
+    // ARM64: 5th arg in X4
+    uint32_t buf = (uint32_t)emu->get_reg(4);
     const char* str = (const char*)(memory + jstr);
     std::memcpy(memory + buf, str + start, len);
     memory[buf + len] = '\0';
 }
 
 // --- Additional C String Bridges ---
-void bridge_strchr(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_strchr(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t str = emu->get_reg(0);
     int c = (int)(emu->get_reg(1) & 0xFF);
@@ -1517,8 +1453,8 @@ void bridge_strchr(void* emu_ptr) {
     }
 }
 
-void bridge_strrchr(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_strrchr(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t str = emu->get_reg(0);
     int c = (int)(emu->get_reg(1) & 0xFF);
@@ -1531,8 +1467,8 @@ void bridge_strrchr(void* emu_ptr) {
     }
 }
 
-void bridge_strcpy(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_strcpy(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t dest = emu->get_reg(0);
     uint32_t src = emu->get_reg(1);
@@ -1540,8 +1476,8 @@ void bridge_strcpy(void* emu_ptr) {
     emu->set_reg(0, dest);
 }
 
-void bridge_strncpy(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_strncpy(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t dest = emu->get_reg(0);
     uint32_t src = emu->get_reg(1);
@@ -1550,8 +1486,8 @@ void bridge_strncpy(void* emu_ptr) {
     emu->set_reg(0, dest);
 }
 
-void bridge_strcmp(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_strcmp(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t s1 = emu->get_reg(0);
     uint32_t s2 = emu->get_reg(1);
@@ -1559,8 +1495,8 @@ void bridge_strcmp(void* emu_ptr) {
     emu->set_reg(0, (uint32_t)result);
 }
 
-void bridge_strncmp(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_strncmp(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t s1 = emu->get_reg(0);
     uint32_t s2 = emu->get_reg(1);
@@ -1569,8 +1505,8 @@ void bridge_strncmp(void* emu_ptr) {
     emu->set_reg(0, (uint32_t)result);
 }
 
-void bridge_strcat(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_strcat(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t dest = emu->get_reg(0);
     uint32_t src = emu->get_reg(1);
@@ -1578,27 +1514,8 @@ void bridge_strcat(void* emu_ptr) {
     emu->set_reg(0, dest);
 }
 
-void bridge_strncat(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint8_t* memory = emu->get_memory_base();
-    uint32_t dest = emu->get_reg(0);
-    uint32_t src = emu->get_reg(1);
-    uint32_t n = emu->get_reg(2);
-    std::strncat((char*)(memory + dest), (const char*)(memory + src), (size_t)n);
-    emu->set_reg(0, dest);
-}
-
-void bridge_strcspn(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint8_t* memory = emu->get_memory_base();
-    uint32_t s = emu->get_reg(0);
-    uint32_t reject = emu->get_reg(1);
-    size_t result = std::strcspn((const char*)(memory + s), (const char*)(memory + reject));
-    emu->set_reg(0, (uint32_t)result);
-}
-
-void bridge_strstr(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_strstr(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t haystack = emu->get_reg(0);
     uint32_t needle = emu->get_reg(1);
@@ -1612,15 +1529,12 @@ void bridge_strstr(void* emu_ptr) {
     }
 }
 
-void bridge_memchr_impl(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_memchr_impl(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t ptr = emu->get_reg(0);
     int c = (int)(emu->get_reg(1) & 0xFF);
     uint32_t n = emu->get_reg(2);
-    if (!emu->quiet_mode) {
-        std::cout << "[MEM] memchr(ptr=0x" << std::hex << ptr << ", c=" << c << ", n=" << std::dec << n << ")" << std::endl;
-    }
     if (ptr == 0) {
         emu->set_reg(0, 0);
         return;
@@ -1633,8 +1547,8 @@ void bridge_memchr_impl(void* emu_ptr) {
     }
 }
 
-void bridge_strtol(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_strtol(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t str = emu->get_reg(0);
     uint32_t endptr_ptr = emu->get_reg(1);
@@ -1642,14 +1556,14 @@ void bridge_strtol(void* emu_ptr) {
     char* endptr = nullptr;
     long result = std::strtol((const char*)(memory + str), &endptr, base);
     if (endptr_ptr && endptr) {
-        uint32_t offset = (uint32_t)(endptr - (char*)(memory + str));
-        *(uint32_t*)(memory + endptr_ptr) = str + offset;
+        uint64_t offset = (uint64_t)(endptr - (char*)(memory + str));
+        *(uint64_t*)(memory + endptr_ptr) = (uint64_t)(str + offset);  // ARM64: 64-bit pointers!
     }
     emu->set_reg(0, (uint32_t)result);
 }
 
-void bridge_strtoul(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_strtoul(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t str = emu->get_reg(0);
     uint32_t endptr_ptr = emu->get_reg(1);
@@ -1657,47 +1571,660 @@ void bridge_strtoul(void* emu_ptr) {
     char* endptr = nullptr;
     unsigned long result = std::strtoul((const char*)(memory + str), &endptr, base);
     if (endptr_ptr && endptr) {
-        uint32_t offset = (uint32_t)(endptr - (char*)(memory + str));
-        *(uint32_t*)(memory + endptr_ptr) = str + offset;
+        uint64_t offset = (uint64_t)(endptr - (char*)(memory + str));
+        *(uint64_t*)(memory + endptr_ptr) = (uint64_t)(str + offset);  // ARM64: 64-bit pointers!
     }
     emu->set_reg(0, (uint32_t)result);
 }
 
-void bridge_atoi(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_atoi(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t str = emu->get_reg(0);
     emu->set_reg(0, (uint32_t)std::atoi((const char*)(memory + str)));
 }
 
-void bridge_atof(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_atof(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
-    uint32_t str_ptr = emu->get_reg(0);
+    uint32_t str_ptr = (uint32_t)emu->get_reg(0);
     const char* str = (const char*)(memory + str_ptr);
-    float res = (float)std::atof(str);
-    if (std::isnan(res)) std::cout << "[Math] atof(\"" << str << "\") -> NaN!" << std::endl;
-    if (!emu->quiet_mode) std::cout << "[Math] atof(\"" << str << "\") -> " << res << std::endl;
-    emu->set_reg(0, float_to_uint(res));
+    double res = std::atof(str);
+    // atof returns double; ARM64 returns in D0
+    emu->set_dreg(0, res);
 }
 
 // --- Wide Character / CType Bridges ---
 #include <cwchar>
-void bridge_wctob(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_wctob(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     wint_t wc = (wint_t)emu->get_reg(0);
     emu->set_reg(0, (uint32_t)std::wctob(wc));
 }
 
-void bridge_btowc(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_btowc(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     int c = (int)emu->get_reg(0);
     emu->set_reg(0, (uint32_t)std::btowc(c));
 }
 
-void bridge_ctype_cur_max(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_ctype_cur_max(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 1); // Return 1 for MB_CUR_MAX (simple ASCII/UTF-8 single byte for now)
+}
+
+// --- ctype character classification bridges ---
+static void bridge_iscntrl(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, iscntrl(c) ? 1 : 0);
+}
+
+static void bridge_isprint(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, isprint(c) ? 1 : 0);
+}
+
+static void bridge_isgraph(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, isgraph(c) ? 1 : 0);
+}
+
+static void bridge_ispunct(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, ispunct(c) ? 1 : 0);
+}
+
+static void bridge_isxdigit(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, isxdigit(c) ? 1 : 0);
+}
+
+static void bridge_isblank(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, isblank(c) ? 1 : 0);
+}
+
+static void bridge_isalpha(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, isalpha(c) ? 1 : 0);
+}
+
+static void bridge_isdigit(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, isdigit(c) ? 1 : 0);
+}
+
+static void bridge_isalnum(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, isalnum(c) ? 1 : 0);
+}
+
+static void bridge_isspace(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, isspace(c) ? 1 : 0);
+}
+
+static void bridge_isupper(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, isupper(c) ? 1 : 0);
+}
+
+static void bridge_islower(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, islower(c) ? 1 : 0);
+}
+
+static void bridge_toupper(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, (uint64_t)toupper(c));
+}
+
+static void bridge_tolower(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, (uint64_t)tolower(c));
+}
+
+// --- wide character bridges ---
+#include <wctype.h>
+static void bridge_wctype(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t name_ptr = emu->get_reg(0);
+    const char* name = (const char*)(memory + name_ptr);
+    wctype_t result = wctype(name);
+    emu->set_reg(0, (uint64_t)result);
+}
+
+static void bridge_iswctype(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    wint_t wc = (wint_t)emu->get_reg(0);
+    wctype_t desc = (wctype_t)emu->get_reg(1);
+    emu->set_reg(0, iswctype(wc, desc) ? 1 : 0);
+}
+
+static void bridge_towupper(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    wint_t wc = (wint_t)emu->get_reg(0);
+    emu->set_reg(0, (uint64_t)towupper(wc));
+}
+
+static void bridge_towlower(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    wint_t wc = (wint_t)emu->get_reg(0);
+    emu->set_reg(0, (uint64_t)towlower(wc));
+}
+
+// --- dl_iterate_phdr: needed for C++ exception unwinding ---
+// Return 0 = success, tells the unwinder "no more shared objects"
+static void bridge_dl_iterate_phdr(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, 0);
+}
+
+// --- __cxa_throw / __cxa_begin_catch / __cxa_end_catch ---
+// Stub C++ exception handling to prevent abort
+static void bridge_cxa_throw(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    std::cerr << "[Bridge64] C++ exception thrown (stubbed)" << std::endl;
+    emu->set_reg(0, 0);
+}
+
+static void bridge_cxa_begin_catch(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, emu->get_reg(0)); // return exception object as-is
+}
+
+static void bridge_cxa_end_catch(void* emu_ptr) {
+    // no-op
+}
+
+// --- setjmp/longjmp for Lua error handling ---
+#include <csetjmp>
+
+// setjmp: save callee-saved registers + SP + LR into guest jmp_buf
+// ARM64 jmp_buf layout (Android/bionic):
+//   [0]:  sigflag/mask
+//   [8]:  X19
+//   [16]: X20
+//   ...
+//   [88]: X29 (FP)
+//   [96]: X30 (LR) — return address for setjmp
+//   [104]: SP
+//   [112]: D8 ... D15 (8 × 8 = 64 bytes)
+// Total ~176 bytes. We use a simplified layout: save 13 GP regs + SP + 8 SIMD = 22 × 8 = 176 bytes.
+static void bridge_setjmp(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint64_t buf_ptr = emu->get_reg(0);  // jmp_buf pointer
+    uint64_t* buf = (uint64_t*)(memory + buf_ptr);
+    
+    // Save callee-saved GP registers: X19-X29 (11 regs), LR (X30), SP
+    buf[0] = 0;  // sigflag (unused)
+    for (int i = 19; i <= 29; i++) {
+        buf[i - 19 + 1] = emu->get_reg(i);  // buf[1] = X19, buf[2] = X20, ..., buf[11] = X29
+    }
+    buf[12] = emu->get_lr();    // LR (return address — where to resume on longjmp)
+    buf[13] = emu->get_reg(31); // SP
+    
+    // Save callee-saved SIMD registers: D8-D15
+    for (int i = 8; i <= 15; i++) {
+        uint64_t dreg;
+        // Read the double register as raw bits
+        double d = emu->get_dreg(i);
+        memcpy(&dreg, &d, sizeof(dreg));
+        buf[14 + (i - 8)] = dreg;  // buf[14] = D8, ..., buf[21] = D15
+    }
+    
+    // setjmp returns 0 on first call
+    emu->set_reg(0, 0);
+}
+
+// longjmp: restore saved registers and jump back to setjmp return point
+static void bridge_longjmp(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint64_t buf_ptr = emu->get_reg(0);  // jmp_buf pointer
+    int val = (int)emu->get_reg(1);      // return value
+    if (val == 0) val = 1;               // longjmp must return non-zero
+    
+    uint64_t* buf = (uint64_t*)(memory + buf_ptr);
+    
+    // Restore callee-saved GP registers
+    for (int i = 19; i <= 29; i++) {
+        emu->set_reg(i, buf[i - 19 + 1]);
+    }
+    uint64_t saved_lr = buf[12];
+    uint64_t saved_sp = buf[13];
+    
+    // Restore SP
+    emu->set_reg(31, saved_sp);
+    
+    // Restore callee-saved SIMD registers: D8-D15
+    for (int i = 8; i <= 15; i++) {
+        double d;
+        uint64_t dreg = buf[14 + (i - 8)];
+        memcpy(&d, &dreg, sizeof(d));
+        emu->set_dreg(i, d);
+    }
+    
+    // Set return value (setjmp will appear to return this value)
+    emu->set_reg(0, (uint64_t)val);
+    
+    // Use redirect_pc so handle_bridge_call doesn't overwrite our PC!
+    // set_pc() alone gets clobbered by handle_bridge_call's "set_pc(lr)" afterward.
+    emu->redirect_pc = saved_lr;
+    
+    std::cerr << "[Bridge64] longjmp -> resuming at 0x" << std::hex << saved_lr 
+              << " with val=" << std::dec << val << std::endl;
+}
+
+// --- strerror ---
+static void bridge_strerror(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    // Return a pointer to a static "unknown error" string in guest memory
+    static uint32_t err_addr = 0;
+    if (err_addr == 0) {
+        err_addr = g_guest_heap_ptr;
+        g_guest_heap_ptr += 32;
+        const char* msg = "unknown error";
+        memcpy(emu->get_memory_base() + err_addr, msg, strlen(msg) + 1);
+    }
+    emu->set_reg(0, err_addr);
+}
+
+// --- sscanf (simplified) ---
+static void bridge_sscanf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t str_ptr = emu->get_reg(0);
+    uint32_t fmt_ptr = emu->get_reg(1);
+    const char* str = (const char*)(memory + str_ptr);
+    const char* fmt = (const char*)(memory + fmt_ptr);
+    // Simple case: "%d" reading single int
+    if (strcmp(fmt, "%d") == 0 || strcmp(fmt, "%i") == 0) {
+        uint32_t out_ptr = emu->get_reg(2);
+        int val = 0;
+        int result = sscanf(str, fmt, &val);
+        if (result > 0) {
+            *(int*)(memory + out_ptr) = val;
+        }
+        emu->set_reg(0, result);
+    } else if (strcmp(fmt, "%f") == 0) {
+        uint32_t out_ptr = emu->get_reg(2);
+        float val = 0;
+        int result = sscanf(str, fmt, &val);
+        if (result > 0) {
+            *(float*)(memory + out_ptr) = val;
+        }
+        emu->set_reg(0, result);
+    } else {
+        // Unsupported format
+        emu->set_reg(0, 0);
+    }
+}
+
+// --- sprintf / snprintf / vsprintf / fprintf / printf ---
+// These are CRITICAL for Lua's internal error messages and string formatting
+
+static void bridge_sprintf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t dst_ptr = emu->get_reg(0);
+    uint32_t fmt_ptr = emu->get_reg(1);
+    char* dst = (char*)(memory + dst_ptr);
+    const char* fmt = (const char*)(memory + fmt_ptr);
+    
+    // Handle common format strings used by Lua
+    if (strchr(fmt, '%') == nullptr) {
+        // No format specifiers — just copy
+        strcpy(dst, fmt);
+        emu->set_reg(0, strlen(fmt));
+    } else if (strcmp(fmt, "%s") == 0) {
+        uint32_t arg_ptr = emu->get_reg(2);
+        const char* arg = (const char*)(memory + arg_ptr);
+        int n = sprintf(dst, "%s", arg);
+        emu->set_reg(0, n);
+    } else if (strcmp(fmt, "%d") == 0 || strcmp(fmt, "%i") == 0) {
+        int arg = (int)emu->get_reg(2);
+        int n = sprintf(dst, fmt, arg);
+        emu->set_reg(0, n);
+    } else if (strcmp(fmt, "%u") == 0) {
+        uint32_t arg = (uint32_t)emu->get_reg(2);
+        int n = sprintf(dst, fmt, arg);
+        emu->set_reg(0, n);
+    } else if (strcmp(fmt, "%p") == 0) {
+        uint64_t arg = emu->get_reg(2);
+        int n = sprintf(dst, "0x%lx", arg);
+        emu->set_reg(0, n);
+    } else if (strcmp(fmt, "%f") == 0 || strcmp(fmt, "%g") == 0 || strcmp(fmt, "%e") == 0) {
+        double arg = emu->get_dreg(0);
+        int n = sprintf(dst, fmt, arg);
+        emu->set_reg(0, n);
+    } else if (strcmp(fmt, "%.14g") == 0 || strcmp(fmt, "%.7g") == 0) {
+        // Lua's default number format
+        double arg = emu->get_dreg(0);
+        int n = sprintf(dst, fmt, arg);
+        emu->set_reg(0, n);
+    } else if (strcmp(fmt, "%c") == 0) {
+        int arg = (int)emu->get_reg(2);
+        int n = sprintf(dst, fmt, arg);
+        emu->set_reg(0, n);
+    } else if (strcmp(fmt, "%x") == 0 || strcmp(fmt, "%X") == 0) {
+        uint32_t arg = (uint32_t)emu->get_reg(2);
+        int n = sprintf(dst, fmt, arg);
+        emu->set_reg(0, n);
+    } else {
+        // Fallback: try to handle as string format with one arg
+        // Just copy the format string as-is to avoid crashes
+        strcpy(dst, fmt);
+        emu->set_reg(0, strlen(fmt));
+    }
+}
+
+static void bridge_snprintf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t dst_ptr = emu->get_reg(0);
+    uint64_t maxlen = emu->get_reg(1);
+    uint32_t fmt_ptr = emu->get_reg(2);
+    char* dst = (char*)(memory + dst_ptr);
+    const char* fmt = (const char*)(memory + fmt_ptr);
+    
+    if (strchr(fmt, '%') == nullptr) {
+        int n = snprintf(dst, maxlen, "%s", fmt);
+        emu->set_reg(0, n);
+    } else if (strcmp(fmt, "%s") == 0) {
+        uint32_t arg_ptr = emu->get_reg(3);
+        const char* arg = (const char*)(memory + arg_ptr);
+        int n = snprintf(dst, maxlen, "%s", arg);
+        emu->set_reg(0, n);
+    } else if (strcmp(fmt, "%d") == 0 || strcmp(fmt, "%i") == 0) {
+        int arg = (int)emu->get_reg(3);
+        int n = snprintf(dst, maxlen, fmt, arg);
+        emu->set_reg(0, n);
+    } else if (strcmp(fmt, "%.14g") == 0 || strcmp(fmt, "%.7g") == 0 ||
+               strcmp(fmt, "%f") == 0 || strcmp(fmt, "%g") == 0) {
+        double arg = emu->get_dreg(0);
+        int n = snprintf(dst, maxlen, fmt, arg);
+        emu->set_reg(0, n);
+    } else {
+        int n = snprintf(dst, maxlen, "%s", fmt);
+        emu->set_reg(0, n);
+    }
+}
+
+static void bridge_fprintf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t fmt_ptr = emu->get_reg(1);
+    const char* fmt = (const char*)(memory + fmt_ptr);
+    // Just print to host stderr for debugging
+    std::cerr << "[fprintf] " << fmt << std::endl;
+    emu->set_reg(0, strlen(fmt));
+}
+
+static void bridge_printf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t fmt_ptr = emu->get_reg(0);
+    const char* fmt = (const char*)(memory + fmt_ptr);
+    std::cout << "[printf] " << fmt;
+    emu->set_reg(0, strlen(fmt));
+}
+
+static void bridge_fputs(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t str_ptr = emu->get_reg(0);
+    const char* str = (const char*)(memory + str_ptr);
+    std::cerr << str;
+    emu->set_reg(0, 0); // success
+}
+
+static void bridge_fputc(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, c); // return the char
+}
+
+static void bridge_puts(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t str_ptr = emu->get_reg(0);
+    const char* str = (const char*)(memory + str_ptr);
+    std::cout << str << std::endl;
+    emu->set_reg(0, 0);
+}
+
+static void bridge_getc(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, (uint64_t)-1); // EOF
+}
+
+static void bridge_ungetc(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, emu->get_reg(0)); // return the char
+}
+
+static void bridge_feof(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, 0); // not EOF
+}
+
+static void bridge_ferror(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, 0); // no error
+}
+
+static void bridge_fileno(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, 1); // return stdout fd
+}
+
+static void bridge_setvbuf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, 0); // success
+}
+
+// __sF: stdio FILE* array. On Android/bionic, __sF is an array of 3 FILE structs
+// for stdin, stdout, stderr. We allocate fake FILE structs in guest memory.
+static uint32_t g_sF_addr = 0;
+static void bridge__sF(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    if (g_sF_addr == 0) {
+        g_sF_addr = g_guest_heap_ptr;
+        g_guest_heap_ptr += 512; // 3 fake FILE structs
+        memset(emu->get_memory_base() + g_sF_addr, 0, 512);
+    }
+    emu->set_reg(0, g_sF_addr);
+}
+
+// __errno: return pointer to errno in guest memory
+static uint32_t g_errno_addr = 0;
+static void bridge__errno(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    if (g_errno_addr == 0) {
+        g_errno_addr = g_guest_heap_ptr;
+        g_guest_heap_ptr += 8;
+        *(int*)(emu->get_memory_base() + g_errno_addr) = 0;
+    }
+    emu->set_reg(0, g_errno_addr);
+}
+
+// __stack_chk_fail: stack canary check. Just log and continue.
+static void bridge__stack_chk_fail(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    std::cerr << "[WARN] __stack_chk_fail at PC=0x" << std::hex << emu->get_pc() << std::dec << std::endl;
+    // Don't abort — just continue
+}
+
+static void bridge_setlocale(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    // Return a pointer to "C" locale string in guest memory
+    static uint32_t locale_addr = 0;
+    if (locale_addr == 0) {
+        locale_addr = g_guest_heap_ptr;
+        g_guest_heap_ptr += 8;
+        memcpy(emu->get_memory_base() + locale_addr, "C\0", 2);
+    }
+    emu->set_reg(0, locale_addr);
+}
+
+static void bridge_rand(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, rand());
+}
+
+static void bridge_clock(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, (uint64_t)clock());
+}
+
+static void bridge_strtold(void* emu_ptr) {
+    // strtold same as strtod for our purposes
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t str_ptr = emu->get_reg(0);
+    uint32_t endptr_ptr = emu->get_reg(1);
+    const char* str = (const char*)(memory + str_ptr);
+    char* endp = nullptr;
+    double result = strtod(str, &endp);
+    if (endptr_ptr != 0 && endp != nullptr) {
+        uint64_t offset = (uint64_t)(endp - (char*)memory);
+        *(uint64_t*)(memory + endptr_ptr) = offset;
+    }
+    emu->set_dreg(0, result);
+}
+
+static void bridge_remove(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t path_ptr = emu->get_reg(0);
+    const char* path = (const char*)(memory + path_ptr);
+    emu->set_reg(0, remove(path));
+}
+
+static void bridge_vsprintf(void* emu_ptr) {
+    // vsprintf with va_list is complex; just stub it
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t dst_ptr = emu->get_reg(0);
+    uint32_t fmt_ptr = emu->get_reg(1);
+    const char* fmt = (const char*)(memory + fmt_ptr);
+    strcpy((char*)(memory + dst_ptr), fmt);
+    emu->set_reg(0, strlen(fmt));
+}
+
+// --- strtod / strtof ---
+static void bridge_strtod(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t str_ptr = emu->get_reg(0);
+    uint32_t endptr_ptr = emu->get_reg(1);
+    const char* str = (const char*)(memory + str_ptr);
+    char* endp = nullptr;
+    double result = strtod(str, &endp);
+    if (endptr_ptr != 0 && endp != nullptr) {
+        uint64_t offset = (uint64_t)(endp - (char*)memory);
+        *(uint64_t*)(memory + endptr_ptr) = offset;  // ARM64: 64-bit pointers!
+    }
+    // ARM64 returns double in D0
+    emu->set_dreg(0, result);
+}
+
+static void bridge_strtof(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t str_ptr = emu->get_reg(0);
+    uint32_t endptr_ptr = emu->get_reg(1);
+    const char* str = (const char*)(memory + str_ptr);
+    char* endp = nullptr;
+    float result = strtof(str, &endp);
+    if (endptr_ptr != 0 && endp != nullptr) {
+        uint64_t offset = (uint64_t)(endp - (char*)memory);
+        *(uint64_t*)(memory + endptr_ptr) = offset;  // ARM64: 64-bit pointers!
+    }
+    emu->set_sreg(0, result);
+}
+
+// --- pthread TLS (Thread-Local Storage) ---
+static std::unordered_map<uint32_t, uint64_t> g_tls_values;
+static uint32_t g_next_tls_key = 1;
+
+static void bridge_pthread_key_create(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t key_ptr = emu->get_reg(0);
+    // Allocate a TLS key
+    uint32_t key = g_next_tls_key++;
+    *(uint32_t*)(memory + key_ptr) = key;
+    g_tls_values[key] = 0;
+    emu->set_reg(0, 0); // success
+}
+
+static void bridge_pthread_key_delete(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint32_t key = emu->get_reg(0);
+    g_tls_values.erase(key);
+    emu->set_reg(0, 0);
+}
+
+static void bridge_pthread_getspecific(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint32_t key = emu->get_reg(0);
+    uint64_t val = g_tls_values.count(key) ? g_tls_values[key] : 0;
+    emu->set_reg(0, val);
+}
+
+static void bridge_pthread_setspecific(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint32_t key = emu->get_reg(0);
+    uint64_t val = emu->get_reg(1);
+    g_tls_values[key] = val;
+    emu->set_reg(0, 0);
+}
+
+// --- nanosleep ---
+static void bridge_nanosleep(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint64_t req_ptr = emu->get_reg(0);
+    
+    if (req_ptr) {
+        int64_t tv_sec = *(int64_t*)(memory + req_ptr);
+        int64_t tv_nsec = *(int64_t*)(memory + req_ptr + 8);
+        
+        // Cap sleep to 100ms max to avoid blocking the game
+        long total_ns = tv_sec * 1000000000L + tv_nsec;
+        if (total_ns > 100000000L) total_ns = 100000000L; // 100ms max
+        
+        struct timespec ts;
+        ts.tv_sec = total_ns / 1000000000L;
+        ts.tv_nsec = total_ns % 1000000000L;
+        nanosleep(&ts, nullptr);
+    }
+    emu->set_reg(0, 0);
+}
+
+// --- sched_yield ---
+static void bridge_sched_yield(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    std::this_thread::yield();
+    emu->set_reg(0, 0);
 }
 
 #include <zlib.h>
@@ -1707,8 +2234,8 @@ static std::unordered_map<uint32_t, FILE*> g_file_handles;
 static std::unordered_map<uint32_t, gzFile> g_gz_handles;
 static uint32_t g_next_file_handle = 0x70000001;
 
-void bridge_lseek(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_lseek(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     int fd = emu->get_reg(0);
     off_t offset = (off_t)emu->get_reg(1);
     int whence = emu->get_reg(2);
@@ -1723,8 +2250,8 @@ void bridge_lseek(void* emu_ptr) {
     }
 }
 
-void bridge_gzdopen(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gzdopen(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     int fd = emu->get_reg(0);
     uint32_t mode_ptr = emu->get_reg(1);
@@ -1753,8 +2280,8 @@ void bridge_gzdopen(void* emu_ptr) {
     }
 }
 
-void bridge_gzread(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gzread(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t handle = emu->get_reg(0);
     uint32_t buf = emu->get_reg(1);
@@ -1778,8 +2305,8 @@ void bridge_gzread(void* emu_ptr) {
     }
 }
 
-void bridge_gzclose(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gzclose(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t handle = emu->get_reg(0);
     if (g_gz_handles.count(handle)) {
         gzclose(g_gz_handles[handle]);
@@ -1790,8 +2317,8 @@ void bridge_gzclose(void* emu_ptr) {
     }
 }
 
-void bridge_fopen(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_fopen(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t path_ptr = emu->get_reg(0);
     uint32_t mode_ptr = emu->get_reg(1);
@@ -1822,8 +2349,8 @@ void bridge_fopen(void* emu_ptr) {
     }
 }
 
-void bridge_fclose(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_fclose(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t handle = emu->get_reg(0);
     if (g_file_handles.count(handle)) {
         fflush(g_file_handles[handle]);  // Ensure data written to disk before close
@@ -1835,8 +2362,8 @@ void bridge_fclose(void* emu_ptr) {
     }
 }
 
-void bridge_fflush(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_fflush(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t handle = emu->get_reg(0);
     if (handle == 0) {
         fflush(NULL); // flush all streams
@@ -1848,8 +2375,8 @@ void bridge_fflush(void* emu_ptr) {
     }
 }
 
-void bridge_fread(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_fread(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t buf = emu->get_reg(0);
     uint32_t elem_size = emu->get_reg(1);
@@ -1863,8 +2390,8 @@ void bridge_fread(void* emu_ptr) {
     }
 }
 
-void bridge_fwrite(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_fwrite(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t buf = emu->get_reg(0);
     uint32_t elem_size = emu->get_reg(1);
@@ -1876,13 +2403,14 @@ void bridge_fwrite(void* emu_ptr) {
         std::cout << "[File] fwrite(handle=" << handle << ", size=" << elem_size 
                   << ", count=" << count << ") -> wrote " << written << std::endl;
     } else {
-        emu->set_reg(0, 0);
-        std::cout << "[File] fwrite(handle=" << handle << ") -> INVALID HANDLE" << std::endl;
+        // Unknown handle (likely stderr/stdout guest pointers) — pretend success
+        // to prevent cascading abort() calls
+        emu->set_reg(0, count);
     }
 }
 
-void bridge_fseek(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_fseek(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t handle = emu->get_reg(0);
     int32_t offset = (int32_t)emu->get_reg(1);
     int whence = (int)emu->get_reg(2);
@@ -1893,8 +2421,8 @@ void bridge_fseek(void* emu_ptr) {
     }
 }
 
-void bridge_ftell(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_ftell(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t handle = emu->get_reg(0);
     if (g_file_handles.count(handle)) {
         emu->set_reg(0, (uint32_t)ftell(g_file_handles[handle]));
@@ -1904,8 +2432,8 @@ void bridge_ftell(void* emu_ptr) {
 }
 
 // --- Directory / System Bridges ---
-void bridge_mkdir(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_mkdir(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t path_ptr = emu->get_reg(0);
     uint32_t mode = emu->get_reg(1);
@@ -1922,8 +2450,8 @@ void bridge_mkdir(void* emu_ptr) {
     emu->set_reg(0, (uint32_t)result);
 }
 
-void bridge_rename(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_rename(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     const char* old_path = (const char*)(memory + emu->get_reg(0));
     const char* new_path = (const char*)(memory + emu->get_reg(1));
@@ -1936,19 +2464,9 @@ void bridge_rename(void* emu_ptr) {
     emu->set_reg(0, (uint32_t)result);
 }
 
-void bridge_remove(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint8_t* memory = emu->get_memory_base();
-    const char* path = (const char*)(memory + emu->get_reg(0));
-    int result = remove(path);
-    if (result != 0 && errno != ENOENT) {
-        std::cerr << "[File] remove(\"" << path << "\") FAILED: " << strerror(errno) << std::endl;
-    }
-    emu->set_reg(0, (uint32_t)result);
-}
 
-void bridge_access(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_access(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     const char* path = (const char*)(memory + emu->get_reg(0));
     int mode = (int)emu->get_reg(1);
@@ -1956,26 +2474,65 @@ void bridge_access(void* emu_ptr) {
     emu->set_reg(0, (uint32_t)result);
 }
 
-void bridge_unlink(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_unlink(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     const char* path = (const char*)(memory + emu->get_reg(0));
     int result = unlink(path);
     emu->set_reg(0, (uint32_t)result);
 }
 
-void bridge_abort(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    std::cerr << "[FATAL] guest called abort() at PC=0x" << std::hex << emu->get_pc() << std::dec << std::endl;
-    exit(1);
+static int g_abort_count = 0;
+static void bridge_abort(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    g_abort_count++;
+    
+    if (g_abort_count <= 3) {
+        uint8_t* memory = emu->get_memory_base();
+        uint64_t lr = emu->get_lr();
+        std::cerr << "[WARN] abort() #" << g_abort_count 
+                  << " PC=0x" << std::hex << emu->get_pc()
+                  << " LR=0x" << lr
+                  << " SP=0x" << emu->get_reg(31) << std::dec << std::endl;
+        
+        // Dump registers for debugging
+        std::cerr << "  X0=0x" << std::hex << emu->get_reg(0)
+                  << " X1=0x" << emu->get_reg(1)
+                  << " X19=0x" << emu->get_reg(19)
+                  << " X20=0x" << emu->get_reg(20) << std::dec << std::endl;
+        
+        // If called from the parser assert (LR near 0x15812e4), dump the object
+        uint64_t x19 = emu->get_reg(19);
+        if (x19 > 0x1000 && x19 < 0xF0000000) {
+            uint64_t val792 = *(uint64_t*)(memory + (uint32_t)x19 + 792);
+            uint64_t val832 = *(uint64_t*)(memory + (uint32_t)x19 + 832);
+            std::cerr << "  object[792]=0x" << std::hex << val792
+                      << " object[832]=0x" << val832 << std::dec << std::endl;
+            // Try to read what's at the code address in object[792]
+            if (val792 > 0x1000000 && val792 < 0x2000000) {
+                uint32_t code1 = *(uint32_t*)(memory + (uint32_t)val792);
+                uint32_t code2 = *(uint32_t*)(memory + (uint32_t)val792 + 4);
+                std::cerr << "  code@[792]: 0x" << std::hex << code1 
+                          << " 0x" << code2 << std::dec << std::endl;
+            }
+        }
+    }
+    
+    if (g_abort_count > 50) {
+        std::cerr << "[FATAL] abort() loop detected (" << g_abort_count 
+                  << " calls). Killing process." << std::endl;
+        exit(1);
+    }
+    
+    emu->set_reg(0, 0);
 }
 
-void bridge_localtime(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_localtime(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t timer_ptr = emu->get_reg(0);
     time_t timer;
-    if (timer_ptr) timer = (time_t)*(uint32_t*)(memory + timer_ptr);
+    if (timer_ptr) timer = (time_t)*(uint64_t*)(memory + timer_ptr); // ARM64: time_t is 64-bit
     else timer = time(NULL);
     
     struct tm* t = localtime(&timer);
@@ -1995,51 +2552,16 @@ void bridge_localtime(void* emu_ptr) {
     emu->set_reg(0, tm_guest_ptr);
 }
 
-void bridge_clock(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    clock_t res = clock();
-    emu->set_reg(0, (uint32_t)res);
-}
 
-void bridge_lrand48(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_lrand48(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     long int res = lrand48();
     emu->set_reg(0, (uint32_t)res);
 }
 
-void bridge_fputs(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint8_t* memory = emu->get_memory_base();
-    uint32_t str_ptr = emu->get_reg(0);
-    uint32_t handle = emu->get_reg(1);
-    const char* s = (const char*)(memory + str_ptr);
-    
-    // Check if handle matches __sF (stdout/stderr)
-    // In our loader, __sF is at globals_base (0x50000)
-    // __sF[0] = stdin, __sF[1] = stdout, __sF[2] = stderr
-    // Each FILE struct is usually ~84-148 bytes, but we just check the pointer.
-    if (handle == 0x50000 + 0 || handle == 0x50000 + 1*128 || handle == 0x50000 + 2*128) {
-         std::cout << "[guest log] " << s;
-         emu->set_reg(0, 0);
-         return;
-    }
 
-    if (g_file_handles.count(handle)) {
-        int res = fputs(s, g_file_handles[handle]);
-        emu->set_reg(0, res >= 0 ? 0 : -1);
-    } else {
-        // Fallback: if it looks like a low handle, it might be raw fd or someone's stdout
-        if (handle < 10) {
-            std::cout << "[guest log fd=" << handle << "] " << s;
-            emu->set_reg(0, 0);
-        } else {
-            emu->set_reg(0, -1);
-        }
-    }
-}
-
-void bridge_exidx(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_exidx(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t pc = emu->get_reg(0);
     uint32_t pcount_ptr = emu->get_reg(1);
@@ -2056,8 +2578,8 @@ void bridge_exidx(void* emu_ptr) {
     emu->set_reg(0, exidx_start);
 }
 
-void bridge_stat(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_stat(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t path_ptr = emu->get_reg(0);
     uint32_t stat_buf_ptr = emu->get_reg(1);
@@ -2122,8 +2644,8 @@ struct GuestDir {
     uint32_t guest_dirent_addr;
 };
 
-void bridge_opendir(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_opendir(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t name_ptr = emu->get_reg(0);
     
@@ -2161,8 +2683,8 @@ void bridge_opendir(void* emu_ptr) {
     emu->set_reg(0, handle);
 }
 
-void bridge_readdir(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_readdir(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t handle = emu->get_reg(0);
     
@@ -2188,8 +2710,8 @@ void bridge_readdir(void* emu_ptr) {
     emu->set_reg(0, addr);
 }
 
-void bridge_closedir(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_closedir(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t handle = emu->get_reg(0);
     
     if (g_handle_to_ptr.count(handle) == 0) {
@@ -2204,20 +2726,9 @@ void bridge_closedir(void* emu_ptr) {
     emu->set_reg(0, 0);
 }
 
-// --- printf / logging ---
-void bridge_printf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_android_log_print(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
-    uint32_t fmt_ptr = emu->get_reg(0);
-    const char* fmt = (const char*)(memory + fmt_ptr);
-    std::cout << "[guest printf] " << fmt;
-    emu->set_reg(0, 0);
-}
-
-void bridge_android_log_print(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint8_t* memory = emu->get_memory_base();
-    // int __android_log_print(int prio, const char* tag, const char* fmt, ...)
     uint32_t tag_ptr = emu->get_reg(1);
     uint32_t fmt_ptr = emu->get_reg(2);
     const char* tag = (const char*)(memory + tag_ptr);
@@ -2226,59 +2737,74 @@ void bridge_android_log_print(void* emu_ptr) {
     emu->set_reg(0, 0);
 }
 
-void bridge_snprintf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint8_t* memory = emu->get_memory_base();
-    uint32_t buf = emu->get_reg(0);
-    uint32_t size = emu->get_reg(1);
-    uint32_t fmt_ptr = emu->get_reg(2);
-    const char* fmt = (const char*)(memory + fmt_ptr);
-    // Simple: just copy the format string as-is (no varargs handling)
-    std::strncpy((char*)(memory + buf), fmt, size);
-    if (size > 0) memory[buf + size - 1] = '\0';
-    emu->set_reg(0, (uint32_t)std::strlen((char*)(memory + buf)));
-}
-
-void bridge_sprintf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint8_t* memory = emu->get_memory_base();
-    uint32_t buf = emu->get_reg(0);
-    uint32_t fmt_ptr = emu->get_reg(1);
-    const char* fmt = (const char*)(memory + fmt_ptr);
-    // Simple: just copy the format string as-is
-    std::strcpy((char*)(memory + buf), fmt);
-    emu->set_reg(0, (uint32_t)std::strlen((char*)(memory + buf)));
-}
-
 // --- OpenAL Stubs (Now Real wrappers) ---
 static ALCdevice* g_alc_device = nullptr;
 static ALCcontext* g_alc_context = nullptr;
 
-void bridge_alcOpenDevice(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alcOpenDevice(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_alc_device = alcOpenDevice(nullptr);
     emu->set_reg(0, g_alc_device ? 1 : 0);
 }
 
-void bridge_alcCreateContext(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alcCreateContext(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_alc_context = alcCreateContext(g_alc_device, nullptr);
     emu->set_reg(0, g_alc_context ? 2 : 0);
 }
 
-void bridge_alcMakeContextCurrent(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alcMakeContextCurrent(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     ALCboolean res = alcMakeContextCurrent(g_alc_context);
     emu->set_reg(0, res ? 1 : 0);
 }
 
-void bridge_alGetError(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alGetError(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, alGetError());
 }
 
-void bridge_alGenSources(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alcSuspendContext(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    if (g_alc_context) alcSuspendContext(g_alc_context);
+}
+
+static void bridge_alcProcessContext(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    if (g_alc_context) alcProcessContext(g_alc_context);
+}
+
+static void bridge_alcResume(void* emu_ptr) {
+    // alcResume is an Android extension (not standard OpenAL)
+    // Just make context current again as a substitute
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    if (g_alc_context) alcMakeContextCurrent(g_alc_context);
+}
+
+static void bridge_alcSuspend(void* emu_ptr) {
+    // alcSuspend is an Android extension — no-op
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    (void)emu;
+}
+
+static void bridge_alcDestroyContext(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    if (g_alc_context) {
+        alcDestroyContext(g_alc_context);
+        g_alc_context = nullptr;
+    }
+}
+
+static void bridge_alcCloseDevice(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    if (g_alc_device) {
+        alcCloseDevice(g_alc_device);
+        g_alc_device = nullptr;
+    }
+}
+
+static void bridge_alGenSources(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t n = emu->get_reg(0);
     uint32_t sources_ptr = emu->get_reg(1);
@@ -2288,8 +2814,8 @@ void bridge_alGenSources(void* emu_ptr) {
     std::memcpy(memory + sources_ptr, host_sources.data(), n * sizeof(ALuint));
 }
 
-void bridge_alGenBuffers(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alGenBuffers(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t n = emu->get_reg(0);
     uint32_t buffers_ptr = emu->get_reg(1);
@@ -2299,71 +2825,67 @@ void bridge_alGenBuffers(void* emu_ptr) {
     std::memcpy(memory + buffers_ptr, host_buffers.data(), n * sizeof(ALuint));
 }
 
-void bridge_alSourcePlay(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alSourcePlay(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t source = emu->get_reg(0);
     alSourcePlay(source);
 }
 
-void bridge_alSourceStop(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alSourceStop(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t source = emu->get_reg(0);
     alSourceStop(source);
 }
 
-void bridge_alSourcePause(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alSourcePause(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t source = emu->get_reg(0);
     alSourcePause(source);
 }
 
-void bridge_alSourcei(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alSourcei(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t source = emu->get_reg(0);
     uint32_t param = emu->get_reg(1);
     uint32_t value = emu->get_reg(2);
     alSourcei(source, param, value);
 }
 
-void bridge_alSourcef(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t source = emu->get_reg(0);
-    uint32_t param = emu->get_reg(1);
-    uint32_t val_i = emu->get_reg(2);
-    float val_f;
-    std::memcpy(&val_f, &val_i, 4);
+static void bridge_alSourcef(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint32_t source = (uint32_t)emu->get_reg(0);
+    uint32_t param = (uint32_t)emu->get_reg(1);
+    // ARM64 AAPCS64: float arg in S0 (independent of integer regs)
+    float val_f = emu->get_sreg(0);
     alSourcef(source, param, val_f);
 }
 
-void bridge_alSource3f(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint8_t* memory = emu->get_memory_base();
-    uint32_t source = emu->get_reg(0);
-    uint32_t param = emu->get_reg(1);
-    uint32_t v1_i = emu->get_reg(2);
-    uint32_t v2_i = emu->get_reg(3);
-    uint32_t v3_i = *(uint32_t*)(memory + emu->get_reg(13)); // SP
-    float v1, v2, v3;
-    std::memcpy(&v1, &v1_i, 4);
-    std::memcpy(&v2, &v2_i, 4);
-    std::memcpy(&v3, &v3_i, 4);
+static void bridge_alSource3f(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint32_t source = (uint32_t)emu->get_reg(0);
+    uint32_t param = (uint32_t)emu->get_reg(1);
+    // ARM64 AAPCS64: float args in S0, S1, S2 (independent of integer regs)
+    float v1 = emu->get_sreg(0);
+    float v2 = emu->get_sreg(1);
+    float v3 = emu->get_sreg(2);
     alSource3f(source, param, v1, v2, v3);
 }
 
-void bridge_alBufferData(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alBufferData(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
-    uint32_t buffer = emu->get_reg(0);
-    uint32_t format = emu->get_reg(1);
-    uint32_t data_ptr = emu->get_reg(2);
-    uint32_t size = emu->get_reg(3);
-    uint32_t freq = *(uint32_t*)(memory + emu->get_reg(13)); // SP
+    uint32_t buffer = (uint32_t)emu->get_reg(0);
+    uint32_t format = (uint32_t)emu->get_reg(1);
+    uint32_t data_ptr = (uint32_t)emu->get_reg(2);
+    uint32_t size = (uint32_t)emu->get_reg(3);
+    // ARM64: 5th arg in X4 (8 integer regs available)
+    uint32_t freq = (uint32_t)emu->get_reg(4);
     
     alBufferData(buffer, format, memory + data_ptr, size, freq);
 }
 
-void bridge_alSourceQueueBuffers(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alSourceQueueBuffers(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t source = emu->get_reg(0);
     uint32_t nb = emu->get_reg(1);
@@ -2374,8 +2896,8 @@ void bridge_alSourceQueueBuffers(void* emu_ptr) {
     alSourceQueueBuffers(source, nb, host_buffers.data());
 }
 
-void bridge_alSourceUnqueueBuffers(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alSourceUnqueueBuffers(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t source = emu->get_reg(0);
     uint32_t nb = emu->get_reg(1);
@@ -2386,8 +2908,8 @@ void bridge_alSourceUnqueueBuffers(void* emu_ptr) {
     std::memcpy(memory + buffers_ptr, host_buffers.data(), nb * sizeof(ALuint));
 }
 
-void bridge_alGetSourcei(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alGetSourcei(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t source = emu->get_reg(0);
     uint32_t param = emu->get_reg(1);
@@ -2398,8 +2920,8 @@ void bridge_alGetSourcei(void* emu_ptr) {
     *(ALint*)(memory + value_ptr) = host_val;
 }
 
-void bridge_alDeleteSources(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alDeleteSources(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t n = emu->get_reg(0);
     uint32_t sources_ptr = emu->get_reg(1);
@@ -2409,8 +2931,8 @@ void bridge_alDeleteSources(void* emu_ptr) {
     alDeleteSources(n, host_sources.data());
 }
 
-void bridge_alDeleteBuffers(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alDeleteBuffers(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t n = emu->get_reg(0);
     uint32_t buffers_ptr = emu->get_reg(1);
@@ -2420,35 +2942,370 @@ void bridge_alDeleteBuffers(void* emu_ptr) {
     alDeleteBuffers(n, host_buffers.data());
 }
 
-void bridge_alListenerf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t param = emu->get_reg(0);
-    uint32_t val_i = emu->get_reg(1);
-    float val_f;
-    std::memcpy(&val_f, &val_i, 4);
+static void bridge_alListenerf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint32_t param = (uint32_t)emu->get_reg(0);
+    // ARM64 AAPCS64: float arg in S0
+    float val_f = emu->get_sreg(0);
     alListenerf(param, val_f);
 }
 
-void bridge_alListener3f(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t param = emu->get_reg(0);
-    uint32_t v1_i = emu->get_reg(1);
-    uint32_t v2_i = emu->get_reg(2);
-    uint32_t v3_i = emu->get_reg(3);
-    float v1, v2, v3;
-    std::memcpy(&v1, &v1_i, 4);
-    std::memcpy(&v2, &v2_i, 4);
-    std::memcpy(&v3, &v3_i, 4);
+static void bridge_alListener3f(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint32_t param = (uint32_t)emu->get_reg(0);
+    // ARM64 AAPCS64: float args in S0, S1, S2
+    float v1 = emu->get_sreg(0);
+    float v2 = emu->get_sreg(1);
+    float v3 = emu->get_sreg(2);
     alListener3f(param, v1, v2, v3);
 }
 
-void bridge_alDistanceModel(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_alDistanceModel(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t distanceModel = emu->get_reg(0);
     alDistanceModel(distanceModel);
 }
 
-void bridge_al_noop(void* emu_ptr) {
+// --- Missing OpenAL bridges ---
+
+static void bridge_alGetSourcef(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t source = emu->get_reg(0);
+    uint32_t param = emu->get_reg(1);
+    uint32_t value_ptr = emu->get_reg(2);
+    ALfloat val = 0.0f;
+    alGetSourcef(source, param, &val);
+    if (value_ptr) *(float*)(memory + value_ptr) = val;
+}
+
+static void bridge_alListenerfv(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t param = emu->get_reg(0);
+    uint32_t values_ptr = emu->get_reg(1);
+    // Most common: AL_ORIENTATION = 6 floats, AL_POSITION/VELOCITY = 3 floats
+    float host_values[6];
+    int count = (param == AL_ORIENTATION) ? 6 : 3;
+    memcpy(host_values, memory + values_ptr, count * sizeof(float));
+    alListenerfv(param, host_values);
+}
+
+static void bridge_alSourceRewind(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint32_t source = emu->get_reg(0);
+    alSourceRewind(source);
+}
+
+static void bridge_alcGetCurrentContext(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    // Return a non-zero fake handle if we have a context
+    emu->set_reg(0, g_alc_context ? 1 : 0);
+}
+
+// --- Missing libc/Android bridges ---
+
+static void bridge_exit(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    int code = (int)emu->get_reg(0);
+    std::cout << "[Bridge] exit(" << code << ") called" << std::endl;
+    exit(code);
+}
+
+static void bridge_read(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    // Stub — we don't support raw fd reads from guest
+    emu->set_reg(0, (uint64_t)-1);
+}
+
+static void bridge_write(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t fd = emu->get_reg(0);
+    uint32_t buf_ptr = emu->get_reg(1);
+    uint32_t count = emu->get_reg(2);
+    if (fd == 1 || fd == 2) { // stdout/stderr
+        std::string s((char*)(memory + buf_ptr), count);
+        if (fd == 1) std::cout << s;
+        else std::cerr << s;
+        emu->set_reg(0, count);
+    } else {
+        emu->set_reg(0, (uint64_t)-1);
+    }
+}
+
+static void bridge_writev(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    // Stub
+    emu->set_reg(0, (uint64_t)-1);
+}
+
+static void bridge_fstat(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    // Stub — return error
+    emu->set_reg(0, (uint64_t)-1);
+}
+
+static void bridge_poll(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, 0); // no events
+}
+
+static void bridge_ioctl(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, 0); // success no-op
+}
+
+static void bridge_perror(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t str_ptr = emu->get_reg(0);
+    if (str_ptr) {
+        std::cerr << "[Guest] perror: " << (char*)(memory + str_ptr) << std::endl;
+    }
+}
+
+static void bridge_syscall(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint64_t sysno = emu->get_reg(0);
+    std::cout << "[Bridge] syscall(" << sysno << ") stubbed" << std::endl;
+    emu->set_reg(0, (uint64_t)-1);
+}
+
+// Android _ctype_ table — provides character classification for ctype.h
+static const unsigned short g_android_ctype_table[256] = {
+    // Control chars 0x00-0x1F
+    0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20, 0x20,0x01,0x01,0x01,0x01,0x01,0x20,0x20,
+    0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20, 0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,
+    // Space, punct, digits
+    0x08,0x10,0x10,0x10,0x10,0x10,0x10,0x10, 0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x10,
+    0x04,0x04,0x04,0x04,0x04,0x04,0x04,0x04, 0x04,0x04,0x10,0x10,0x10,0x10,0x10,0x10,
+    // @, A-Z
+    0x10,0x41,0x41,0x41,0x41,0x41,0x41,0x01, 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+    0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01, 0x01,0x01,0x01,0x10,0x10,0x10,0x10,0x10,
+    // `, a-z
+    0x10,0x42,0x42,0x42,0x42,0x42,0x42,0x02, 0x02,0x02,0x02,0x02,0x02,0x02,0x02,0x02,
+    0x02,0x02,0x02,0x02,0x02,0x02,0x02,0x02, 0x02,0x02,0x02,0x10,0x10,0x10,0x10,0x20,
+    // 0x80-0xFF (high bytes)
+    0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+};
+
+static void bridge_ctype_(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    // Write the ctype table to a known guest address and return pointer to it
+    static uint32_t ctype_addr = 0x50000000;
+    static bool written = false;
+    if (!written) {
+        memcpy(emu->get_memory_base() + ctype_addr, g_android_ctype_table, sizeof(g_android_ctype_table));
+        written = true;
+    }
+    emu->set_reg(0, ctype_addr);
+}
+
+// String functions
+static void bridge_strftime(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t buf_ptr = emu->get_reg(0);
+    uint32_t maxsize = emu->get_reg(1);
+    uint32_t fmt_ptr = emu->get_reg(2);
+    uint32_t tm_ptr = emu->get_reg(3);
+    // Simple stub — write empty string
+    if (buf_ptr && maxsize > 0) {
+        memory[buf_ptr] = '\0';
+    }
+    emu->set_reg(0, 0);
+}
+
+static void bridge_strncat(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t dest_ptr = emu->get_reg(0);
+    uint32_t src_ptr = emu->get_reg(1);
+    uint32_t n = emu->get_reg(2);
+    strncat((char*)(memory + dest_ptr), (const char*)(memory + src_ptr), n);
+    emu->set_reg(0, dest_ptr);
+}
+
+static void bridge_fdopen(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, 0); // stub — return NULL
+}
+
+static void bridge_freopen(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, 0); // stub — return NULL
+}
+
+// --- Wide character bridges ---
+
+static void bridge_wcslen(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t str_ptr = emu->get_reg(0);
+    // Android wchar_t is 4 bytes
+    size_t len = 0;
+    uint32_t* ws = (uint32_t*)(memory + str_ptr);
+    while (ws[len]) len++;
+    emu->set_reg(0, len);
+}
+
+static void bridge_wmemcpy(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t dst = emu->get_reg(0);
+    uint32_t src = emu->get_reg(1);
+    uint32_t n = emu->get_reg(2);
+    memcpy(memory + dst, memory + src, n * 4); // wchar_t = 4 bytes
+    emu->set_reg(0, dst);
+}
+
+static void bridge_wmemmove(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t dst = emu->get_reg(0);
+    uint32_t src = emu->get_reg(1);
+    uint32_t n = emu->get_reg(2);
+    memmove(memory + dst, memory + src, n * 4);
+    emu->set_reg(0, dst);
+}
+
+static void bridge_wmemset(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t dst = emu->get_reg(0);
+    uint32_t wc = emu->get_reg(1);
+    uint32_t n = emu->get_reg(2);
+    uint32_t* d = (uint32_t*)(memory + dst);
+    for (uint32_t i = 0; i < n; i++) d[i] = wc;
+    emu->set_reg(0, dst);
+}
+
+static void bridge_wmemcmp(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t s1 = emu->get_reg(0);
+    uint32_t s2 = emu->get_reg(1);
+    uint32_t n = emu->get_reg(2);
+    int res = memcmp(memory + s1, memory + s2, n * 4);
+    emu->set_reg(0, (uint64_t)(int64_t)res);
+}
+
+static void bridge_wmemchr(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t s = emu->get_reg(0);
+    uint32_t wc = emu->get_reg(1);
+    uint32_t n = emu->get_reg(2);
+    uint32_t* ws = (uint32_t*)(memory + s);
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (ws[i] == wc) { result = s + i * 4; break; }
+    }
+    emu->set_reg(0, result);
+}
+
+static void bridge_mbrtowc(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t pwc = emu->get_reg(0);
+    uint32_t s = emu->get_reg(1);
+    uint32_t n = emu->get_reg(2);
+    if (s == 0 || n == 0) { emu->set_reg(0, 0); return; }
+    uint8_t c = memory[s];
+    if (pwc) *(uint32_t*)(memory + pwc) = (uint32_t)c;
+    emu->set_reg(0, c ? 1 : 0);
+}
+
+static void bridge_wcrtomb(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t s = emu->get_reg(0);
+    uint32_t wc = emu->get_reg(1);
+    if (s) memory[s] = (uint8_t)(wc & 0xFF);
+    emu->set_reg(0, 1);
+}
+
+static void bridge_getwc(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, (uint64_t)-1); // WEOF
+}
+
+static void bridge_putwc(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint32_t wc = emu->get_reg(0);
+    emu->set_reg(0, wc); // success
+}
+
+static void bridge_ungetwc(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, (uint64_t)-1); // WEOF — can't unget
+}
+
+// String comparison/search
+static void bridge_strcoll(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t s1 = emu->get_reg(0);
+    uint32_t s2 = emu->get_reg(1);
+    int res = strcmp((const char*)(memory + s1), (const char*)(memory + s2));
+    emu->set_reg(0, (uint64_t)(int64_t)res);
+}
+
+static void bridge_strcspn(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t s = emu->get_reg(0);
+    uint32_t reject = emu->get_reg(1);
+    size_t res = strcspn((const char*)(memory + s), (const char*)(memory + reject));
+    emu->set_reg(0, res);
+}
+
+static void bridge_strpbrk(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t s = emu->get_reg(0);
+    uint32_t accept = emu->get_reg(1);
+    const char* res = strpbrk((const char*)(memory + s), (const char*)(memory + accept));
+    emu->set_reg(0, res ? (uint64_t)(res - (const char*)memory) : 0);
+}
+
+static void bridge_strxfrm(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t dst = emu->get_reg(0);
+    uint32_t src = emu->get_reg(1);
+    uint32_t n = emu->get_reg(2);
+    // Simple implementation: just copy
+    size_t len = strlen((const char*)(memory + src));
+    if (n > 0) strncpy((char*)(memory + dst), (const char*)(memory + src), n);
+    emu->set_reg(0, len);
+}
+
+// Wide string stubs
+static void bridge_wcscoll(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, 0); // equal
+}
+static void bridge_wcsxfrm(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, 0);
+}
+static void bridge_wcsftime(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, 0);
+}
+
+static void bridge_gzwrite(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint32_t len = emu->get_reg(2);
+    emu->set_reg(0, len); // pretend we wrote everything
+}
+
+static void bridge_al_noop(void* emu_ptr) {
     // Generic no-op
 }
 
@@ -2457,8 +3314,8 @@ void bridge_al_noop(void* emu_ptr) {
 // Guest memory pointers are translated via (memory + guest_offset).
 
 // Diagnostic: log GL calls on first 3 frames to debug black screen
-int g_gl_diag_frame = 0;
-bool g_gl_diag_enabled = true;
+extern int g_gl_diag_frame;
+extern bool g_gl_diag_enabled;
 #define GL_DIAG(...) do { if (g_gl_diag_enabled && g_gl_diag_frame < 3) { printf("[GL F%d] ", g_gl_diag_frame); printf(__VA_ARGS__); printf("\n"); fflush(stdout); } } while(0)
 #define TEX_LOG(...) do { if (g_gl_diag_enabled && g_gl_diag_frame < 3) { printf("[TEX F%d] ", g_gl_diag_frame); printf(__VA_ARGS__); printf("\n"); fflush(stdout); } } while(0)
 #define VERTEX_LOG(...) do { if (g_gl_diag_enabled && g_gl_diag_frame < 3) { printf("[VERTEX F%d] ", g_gl_diag_frame); printf(__VA_ARGS__); printf("\n"); fflush(stdout); } } while(0)
@@ -2467,19 +3324,19 @@ bool g_gl_diag_enabled = true;
 
 static std::unordered_set<uint32_t> g_matrix_dumped_ptrs;
 
-static void log_matrix_once(Emulator* emu, uint32_t ptr, const GLfloat* m) {
+static void log_matrix_once(EmulatorArm64* emu, uint32_t ptr, const GLfloat* m) {
     if (!g_gl_diag_enabled || g_gl_diag_frame >= 3) return;
     if (g_matrix_dumped_ptrs.count(ptr)) return;
     g_matrix_dumped_ptrs.insert(ptr);
     uint8_t* memory = emu->get_memory_base();
-    MATRIX_LOG("glLoadMatrixf ptr=0x%x host=%p sp=0x%x", ptr, (void*)(memory + ptr), emu->get_reg(13));
+    MATRIX_LOG("glLoadMatrixf ptr=0x%x host=%p sp=0x%x", ptr, (void*)(memory + ptr), emu->get_reg(31));
     MATRIX_LOG("  row0 [%.4f %.4f %.4f %.4f]", m[0], m[1], m[2], m[3]);
     MATRIX_LOG("  row1 [%.4f %.4f %.4f %.4f]", m[4], m[5], m[6], m[7]);
     MATRIX_LOG("  row2 [%.4f %.4f %.4f %.4f]", m[8], m[9], m[10], m[11]);
     MATRIX_LOG("  row3 [%.4f %.4f %.4f %.4f]", m[12], m[13], m[14], m[15]);
 }
 
-static void log_vertex_sample(Emulator* emu, uint32_t ptr, uint32_t size, uint32_t type, uint32_t stride, const char* label) {
+static void log_vertex_sample(EmulatorArm64* emu, uint32_t ptr, uint32_t size, uint32_t type, uint32_t stride, const char* label) {
     if (!g_gl_diag_enabled || g_gl_diag_frame >= 3) return;
     VERTEX_LOG("%s ptr=0x%x size=%u stride=%d type=0x%x", label, ptr, size, stride, type);
     if (ptr == 0) {
@@ -2507,17 +3364,16 @@ static void log_vertex_sample(Emulator* emu, uint32_t ptr, uint32_t size, uint32
     }
 }
 
-void bridge_gl_noop(void* emu_ptr) {
+static void bridge_gl_noop(void* emu_ptr) {
     g_frame_stats.state_changes++;
 }
 
 // --- Fog (water color, atmosphere, depth haze) ---
-void bridge_glFogf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glFogf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     GLenum pname = (GLenum)emu->get_reg(0);
-    uint32_t param_bits = emu->get_reg(1);
-    float param;
-    memcpy(&param, &param_bits, 4);
+    // ARM64 AAPCS64: float arg in S0
+    float param = emu->get_sreg(0);
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.fogf(pname, param);
@@ -2527,8 +3383,8 @@ void bridge_glFogf(void* emu_ptr) {
     if (g_display_active) glFogf(pname, param);
 }
 
-void bridge_glFogfv(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glFogfv(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     GLenum pname = (GLenum)emu->get_reg(0);
     uint32_t params_ptr = emu->get_reg(1);
@@ -2549,8 +3405,8 @@ void bridge_glFogfv(void* emu_ptr) {
     }
 }
 
-void bridge_glFogi(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glFogi(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     GLenum pname = (GLenum)emu->get_reg(0);
     GLint param = (GLint)emu->get_reg(1);
 #ifdef VULKAN_BACKEND
@@ -2561,15 +3417,20 @@ void bridge_glFogi(void* emu_ptr) {
 #endif
     if (g_display_active) glFogi(pname, param);
 }
-
 // --- Lighting ---
-void bridge_glLightf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glLightf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     GLenum light = (GLenum)emu->get_reg(0);
     GLenum pname = (GLenum)emu->get_reg(1);
-    uint32_t param_bits = emu->get_reg(2);
-    float param;
-    memcpy(&param, &param_bits, 4);
+    // ARM64 AAPCS64: float arg in S0
+    float param = emu->get_sreg(0);
+    
+    static int lf_diag = 0;
+    if (lf_diag < 10) {
+        std::cout << "[GL64-LIGHT] glLightf(light=0x" << std::hex << light 
+                  << ", pname=0x" << pname << std::dec << ", param=" << param << ")" << std::endl;
+        lf_diag++;
+    }
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.lightf(light, pname, param);
@@ -2579,12 +3440,22 @@ void bridge_glLightf(void* emu_ptr) {
     if (g_display_active) glLightf(light, pname, param);
 }
 
-void bridge_glLightfv(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glLightfv(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     GLenum light = (GLenum)emu->get_reg(0);
     GLenum pname = (GLenum)emu->get_reg(1);
     uint32_t params_ptr = emu->get_reg(2);
+    
+    static int lfv_diag = 0;
+    if (lfv_diag < 10 && params_ptr != 0) {
+        float p[4];
+        memcpy(p, memory + params_ptr, 16);
+        std::cout << "[GL64-LIGHT] glLightfv(light=0x" << std::hex << light 
+                  << ", pname=0x" << pname << std::dec 
+                  << ", vals=[" << p[0] << ", " << p[1] << ", " << p[2] << ", " << p[3] << "])" << std::endl;
+        lfv_diag++;
+    }
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         if (params_ptr != 0) {
@@ -2602,12 +3473,11 @@ void bridge_glLightfv(void* emu_ptr) {
     }
 }
 
-void bridge_glLightModelf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glLightModelf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     GLenum pname = (GLenum)emu->get_reg(0);
-    uint32_t param_bits = emu->get_reg(1);
-    float param;
-    memcpy(&param, &param_bits, 4);
+    // ARM64 AAPCS64: float arg in S0
+    float param = emu->get_sreg(0);
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.light_modelf(pname, param);
@@ -2617,8 +3487,8 @@ void bridge_glLightModelf(void* emu_ptr) {
     if (g_display_active) glLightModelf(pname, param);
 }
 
-void bridge_glLightModelfv(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glLightModelfv(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     GLenum pname = (GLenum)emu->get_reg(0);
     uint32_t params_ptr = emu->get_reg(1);
@@ -2640,13 +3510,12 @@ void bridge_glLightModelfv(void* emu_ptr) {
 }
 
 // --- Materials ---
-void bridge_glMaterialf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glMaterialf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     GLenum face = (GLenum)emu->get_reg(0);
     GLenum pname = (GLenum)emu->get_reg(1);
-    uint32_t param_bits = emu->get_reg(2);
-    float param;
-    memcpy(&param, &param_bits, 4);
+    // ARM64 AAPCS64: float arg in S0
+    float param = emu->get_sreg(0);
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.materialf(face, pname, param);
@@ -2656,12 +3525,23 @@ void bridge_glMaterialf(void* emu_ptr) {
     if (g_display_active) glMaterialf(face, pname, param);
 }
 
-void bridge_glMaterialfv(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glMaterialfv(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     GLenum face = (GLenum)emu->get_reg(0);
     GLenum pname = (GLenum)emu->get_reg(1);
     uint32_t params_ptr = emu->get_reg(2);
+    
+    static int mat_diag = 0;
+    if (mat_diag < 15 && params_ptr != 0) {
+        float p[4];
+        memcpy(p, memory + params_ptr, 16);
+        std::cout << "[GL64-MAT] glMaterialfv(face=0x" << std::hex << face 
+                  << ", pname=0x" << pname << std::dec 
+                  << ", ptr=0x" << std::hex << params_ptr << std::dec
+                  << ", vals=[" << p[0] << ", " << p[1] << ", " << p[2] << ", " << p[3] << "])" << std::endl;
+        mat_diag++;
+    }
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         if (params_ptr != 0) {
@@ -2680,8 +3560,8 @@ void bridge_glMaterialfv(void* emu_ptr) {
 }
 
 // --- Vertex Color ---
-void bridge_glColor4ub(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glColor4ub(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     GLubyte r = (GLubyte)emu->get_reg(0);
     GLubyte g = (GLubyte)emu->get_reg(1);
     GLubyte b = (GLubyte)emu->get_reg(2);
@@ -2696,11 +3576,18 @@ void bridge_glColor4ub(void* emu_ptr) {
 }
 
 // --- Texture Environment ---
-void bridge_glTexEnvi(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glTexEnvi(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     GLenum target = (GLenum)emu->get_reg(0);
     GLenum pname = (GLenum)emu->get_reg(1);
     GLint param = (GLint)emu->get_reg(2);
+    
+    static int tei_diag = 0;
+    if (tei_diag < 10) {
+        std::cout << "[GL64-TEX] glTexEnvi(target=0x" << std::hex << target 
+                  << ", pname=0x" << pname << ", param=0x" << param << std::dec << ")" << std::endl;
+        tei_diag++;
+    }
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.tex_envi(target, pname, param);
@@ -2710,12 +3597,22 @@ void bridge_glTexEnvi(void* emu_ptr) {
     if (g_display_active) glTexEnvi(target, pname, param);
 }
 
-void bridge_glTexEnvfv(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glTexEnvfv(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     GLenum target = (GLenum)emu->get_reg(0);
     GLenum pname = (GLenum)emu->get_reg(1);
     uint32_t params_ptr = emu->get_reg(2);
+    
+    static int tefv_diag = 0;
+    if (tefv_diag < 10 && params_ptr != 0) {
+        float p[4];
+        memcpy(p, memory + params_ptr, 16);
+        std::cout << "[GL64-TEX] glTexEnvfv(target=0x" << std::hex << target 
+                  << ", pname=0x" << pname << std::dec 
+                  << ", vals=[" << p[0] << ", " << p[1] << ", " << p[2] << ", " << p[3] << "])" << std::endl;
+        tefv_diag++;
+    }
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         if (params_ptr != 0) {
@@ -2734,8 +3631,8 @@ void bridge_glTexEnvfv(void* emu_ptr) {
 }
 
 // --- Misc rendering ---
-void bridge_glCullFace(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glCullFace(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     GLenum mode = (GLenum)emu->get_reg(0);
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
@@ -2746,8 +3643,8 @@ void bridge_glCullFace(void* emu_ptr) {
     if (g_display_active) glCullFace(mode);
 }
 
-void bridge_glHint(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glHint(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     GLenum target = (GLenum)emu->get_reg(0);
     GLenum mode = (GLenum)emu->get_reg(1);
 #ifdef VULKAN_BACKEND
@@ -2759,11 +3656,10 @@ void bridge_glHint(void* emu_ptr) {
     if (g_display_active) glHint(target, mode);
 }
 
-void bridge_glPointSize(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t size_bits = emu->get_reg(0);
-    float size;
-    memcpy(&size, &size_bits, 4);
+static void bridge_glPointSize(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    // ARM64 AAPCS64: float arg in S0
+    float size = emu->get_sreg(0);
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.point_size(size);
@@ -2774,8 +3670,8 @@ void bridge_glPointSize(void* emu_ptr) {
 }
 
 // --- Stencil (needed for shadows/water reflections) ---
-void bridge_glStencilFunc(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glStencilFunc(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     GLenum func = (GLenum)emu->get_reg(0);
     GLint ref = (GLint)emu->get_reg(1);
     GLuint mask = (GLuint)emu->get_reg(2);
@@ -2788,8 +3684,8 @@ void bridge_glStencilFunc(void* emu_ptr) {
     if (g_display_active) glStencilFunc(func, ref, mask);
 }
 
-void bridge_glStencilMask(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glStencilMask(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     GLuint mask = (GLuint)emu->get_reg(0);
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
@@ -2800,8 +3696,8 @@ void bridge_glStencilMask(void* emu_ptr) {
     if (g_display_active) glStencilMask(mask);
 }
 
-void bridge_glStencilOp(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glStencilOp(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     GLenum sfail = (GLenum)emu->get_reg(0);
     GLenum dpfail = (GLenum)emu->get_reg(1);
     GLenum dppass = (GLenum)emu->get_reg(2);
@@ -2814,8 +3710,8 @@ void bridge_glStencilOp(void* emu_ptr) {
     if (g_display_active) glStencilOp(sfail, dpfail, dppass);
 }
 
-void bridge_glClearStencil(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glClearStencil(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     GLint s = (GLint)emu->get_reg(0);
     if (g_display_active) glClearStencil(s);
 }
@@ -2823,8 +3719,8 @@ void bridge_glClearStencil(void* emu_ptr) {
 
 // --- Phase 1: Clear/Viewport ---
 
-void bridge_gl_clear(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_clear(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.clear_calls++;
     GL_DIAG("glClear(0x%x)", emu->get_reg(0));
 #ifdef VULKAN_BACKEND
@@ -2838,14 +3734,18 @@ void bridge_gl_clear(void* emu_ptr) {
     }
 }
 
-void bridge_gl_clear_color(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_clear_color(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
-    uint32_t r = emu->get_reg(0), g = emu->get_reg(1);
-    uint32_t b = emu->get_reg(2), a = emu->get_reg(3);
-    float fr, fg, fb, fa;
-    memcpy(&fr, &r, 4); memcpy(&fg, &g, 4);
-    memcpy(&fb, &b, 4); memcpy(&fa, &a, 4);
+    // ARM64 AAPCS64: all-float args in S0-S3
+    float fr = emu->get_sreg(0), fg = emu->get_sreg(1);
+    float fb = emu->get_sreg(2), fa = emu->get_sreg(3);
+    
+    static int cc_diag = 0;
+    if (cc_diag < 10) {
+        std::cout << "[GL64-DIAG] glClearColor(" << fr << ", " << fg << ", " << fb << ", " << fa << ")" << std::endl;
+        cc_diag++;
+    }
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.clear_color(fr, fg, fb, fa);
@@ -2859,14 +3759,21 @@ void bridge_gl_clear_color(void* emu_ptr) {
 }
 
 // Global window dimensions — updated by main.cpp when window resizes or goes fullscreen
-int g_win_w = 1920;   // Logical window size (for mouse coordinate mapping)
-int g_win_h = 1080;
-int g_draw_w = 1920;  // Physical drawable size in pixels (for glViewport / FBO blit)
-int g_draw_h = 1080;
+extern int g_win_w;
+extern int g_win_h;
+extern int g_draw_w;
+extern int g_draw_h;
 
-void bridge_gl_viewport(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_viewport(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.viewport_calls++;
+    
+    static int vp_diag = 0;
+    if (vp_diag < 10) {
+        std::cout << "[GL64-DIAG] glViewport(" << emu->get_reg(0) << ", " << emu->get_reg(1) 
+                  << ", " << emu->get_reg(2) << ", " << emu->get_reg(3) << ")" << std::endl;
+        vp_diag++;
+    }
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.viewport(emu->get_reg(0), emu->get_reg(1), emu->get_reg(2), emu->get_reg(3));
@@ -2880,11 +3787,16 @@ void bridge_gl_viewport(void* emu_ptr) {
     }
 }
 
+// Forward declarations for draw batcher (defined later with GL state)
+static DrawBatcher g_batcher;
+static bool g_batching_enabled = false; // Disabled: causes tearing — re-enable after fix
+static BatchState g_current_batch_state = {};
+
 // Track current matrix mode so we can apply correct fallback for zero matrices
 static GLenum g_current_matrix_mode = GL_MODELVIEW;
 
-void bridge_gl_matrix_mode(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_matrix_mode(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.matrix_ops++;
     g_current_matrix_mode = (GLenum)emu->get_reg(0);
     GL_DIAG("glMatrixMode(0x%x) %s", emu->get_reg(0), emu->get_reg(0)==0x1701?"PROJECTION":emu->get_reg(0)==0x1700?"MODELVIEW":"OTHER");
@@ -2899,8 +3811,8 @@ void bridge_gl_matrix_mode(void* emu_ptr) {
     }
 }
 
-void bridge_gl_load_identity(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_load_identity(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     GL_DIAG("glLoadIdentity()");
     g_frame_stats.matrix_ops++;
 #ifdef VULKAN_BACKEND
@@ -2912,8 +3824,8 @@ void bridge_gl_load_identity(void* emu_ptr) {
     if (g_display_active) glLoadIdentity();
 }
 
-void bridge_gl_load_matrixf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_load_matrixf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.matrix_ops++;
     uint8_t* memory = emu->get_memory_base();
     uint32_t ptr = emu->get_reg(0);
@@ -2991,13 +3903,25 @@ void bridge_gl_load_matrixf(void* emu_ptr) {
 
     log_matrix_once(emu, ptr, m);
     GL_DIAG("glLoadMatrixf(@0x%x) [%.2f %.2f %.2f %.2f / %.2f %.2f %.2f %.2f / ...]", ptr, m[0],m[1],m[2],m[3],m[4],m[5],m[6],m[7]);
+    
+    // Capture matrices for draw batcher (CPU-side transform)
+    if (g_batching_enabled) {
+        if (g_current_matrix_mode == GL_MODELVIEW) {
+            g_batcher.flush(); // Matrix changed → flush pending batch
+            g_batcher.set_modelview(m);
+        } else if (g_current_matrix_mode == GL_PROJECTION) {
+            g_batcher.flush();
+            g_batcher.set_projection(m);
+        }
+    }
+    
     if (g_display_active) {
         glLoadMatrixf(m);
     }
 }
 
-void bridge_gl_mult_matrixf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_mult_matrixf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.matrix_ops++;
     uint8_t* memory = emu->get_memory_base();
     uint32_t ptr = emu->get_reg(0);
@@ -3035,8 +3959,8 @@ void bridge_gl_mult_matrixf(void* emu_ptr) {
 
 static int g_gl_matrix_stack_depth = 0;
 
-void bridge_gl_push_matrix(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_push_matrix(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_gl_matrix_stack_depth++;
     GL_DIAG("glPushMatrix() depth=%d", g_gl_matrix_stack_depth);
     g_frame_stats.matrix_ops++;
@@ -3049,8 +3973,8 @@ void bridge_gl_push_matrix(void* emu_ptr) {
     if (g_display_active) glPushMatrix();
 }
 
-void bridge_gl_pop_matrix(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_pop_matrix(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_gl_matrix_stack_depth--;
     GL_DIAG("glPopMatrix() depth=%d", g_gl_matrix_stack_depth);
     g_frame_stats.matrix_ops++;
@@ -3063,21 +3987,20 @@ void bridge_gl_pop_matrix(void* emu_ptr) {
     if (g_display_active) glPopMatrix();
 }
 
-void bridge_gl_orthof(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_orthof(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.matrix_ops++;
-    // Soft-float: 6 floats in R0-R3 + stack
-    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
-    uint32_t r2 = emu->get_reg(2), r3 = emu->get_reg(3);
-    float l, r_, b, t;
-    memcpy(&l, &r0, 4); memcpy(&r_, &r1, 4);
-    memcpy(&b, &r2, 4); memcpy(&t, &r3, 4);
-    // near/far on stack
-    uint8_t* memory = emu->get_memory_base();
-    uint32_t sp = emu->get_reg(13);
-    float n, f;
-    memcpy(&n, memory + sp, 4);
-    memcpy(&f, memory + sp + 4, 4);
+    // ARM64 AAPCS64: all 6 float args in S0-S5
+    float l = emu->get_sreg(0), r_ = emu->get_sreg(1);
+    float b = emu->get_sreg(2), t = emu->get_sreg(3);
+    float n = emu->get_sreg(4), f = emu->get_sreg(5);
+    
+    static int ortho_diag = 0;
+    if (ortho_diag < 10) {
+        std::cout << "[GL64-DIAG] glOrthof(l=" << l << ", r=" << r_ << ", b=" << b 
+                  << ", t=" << t << ", n=" << n << ", f=" << f << ")" << std::endl;
+        ortho_diag++;
+    }
     GL_DIAG("glOrthof(l=%f, r=%f, b=%f, t=%f, n=%f, f=%f)", l, r_, b, t, n, f);
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
@@ -3094,12 +4017,11 @@ void bridge_gl_orthof(void* emu_ptr) {
 }
 
 
-void bridge_gl_translatef(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_translatef(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.matrix_ops++;
-    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1), r2 = emu->get_reg(2);
-    float x, y, z;
-    memcpy(&x, &r0, 4); memcpy(&y, &r1, 4); memcpy(&z, &r2, 4);
+    // ARM64 AAPCS64: all-float args in S0-S2
+    float x = emu->get_sreg(0), y = emu->get_sreg(1), z = emu->get_sreg(2);
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.translatef(x, y, z);
@@ -3111,14 +4033,12 @@ void bridge_gl_translatef(void* emu_ptr) {
     }
 }
 
-void bridge_gl_rotatef(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_rotatef(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.matrix_ops++;
-    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
-    uint32_t r2 = emu->get_reg(2), r3 = emu->get_reg(3);
-    float angle, x, y, z;
-    memcpy(&angle, &r0, 4); memcpy(&x, &r1, 4);
-    memcpy(&y, &r2, 4); memcpy(&z, &r3, 4);
+    // ARM64 AAPCS64: all-float args in S0-S3
+    float angle = emu->get_sreg(0), x = emu->get_sreg(1);
+    float y = emu->get_sreg(2), z = emu->get_sreg(3);
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.rotatef(angle, x, y, z);
@@ -3130,12 +4050,11 @@ void bridge_gl_rotatef(void* emu_ptr) {
     }
 }
 
-void bridge_gl_scalef(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_scalef(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.matrix_ops++;
-    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1), r2 = emu->get_reg(2);
-    float x, y, z;
-    memcpy(&x, &r0, 4); memcpy(&y, &r1, 4); memcpy(&z, &r2, 4);
+    // ARM64 AAPCS64: all-float args in S0-S2
+    float x = emu->get_sreg(0), y = emu->get_sreg(1), z = emu->get_sreg(2);
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.scalef(x, y, z);
@@ -3147,19 +4066,20 @@ void bridge_gl_scalef(void* emu_ptr) {
     }
 }
 
-void bridge_gl_frustumf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_frustumf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.matrix_ops++;
-    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
-    uint32_t r2 = emu->get_reg(2), r3 = emu->get_reg(3);
-    float l, r_, b, t;
-    memcpy(&l, &r0, 4); memcpy(&r_, &r1, 4);
-    memcpy(&b, &r2, 4); memcpy(&t, &r3, 4);
-    uint8_t* memory = emu->get_memory_base();
-    uint32_t sp = emu->get_reg(13);
-    float n, f;
-    memcpy(&n, memory + sp, 4);
-    memcpy(&f, memory + sp + 4, 4);
+    // ARM64 AAPCS64: all 6 float args in S0-S5
+    float l = emu->get_sreg(0), r_ = emu->get_sreg(1);
+    float b = emu->get_sreg(2), t = emu->get_sreg(3);
+    float n = emu->get_sreg(4), f = emu->get_sreg(5);
+    
+    static int frust_diag = 0;
+    if (frust_diag < 10) {
+        std::cout << "[GL64-DIAG] glFrustumf(l=" << l << ", r=" << r_ << ", b=" << b 
+                  << ", t=" << t << ", n=" << n << ", f=" << f << ")" << std::endl;
+        frust_diag++;
+    }
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.frustumf(l, r_, b, t, n, f);
@@ -3190,9 +4110,12 @@ struct {
     GLsizei nptr_stride;
 } g_gl_state;
 
-bool g_gl_force_white = false;
-bool g_gl_force_identity = false;
-bool g_gl_hide_hud = false;  // When true, swap controls atlas with modified copy
+// Color pointer tracking for draw batcher
+static bool g_color_array_enabled = false;
+static uint32_t g_color_ptr = 0;
+static GLsizei g_color_stride = 0;
+extern bool g_gl_force_identity;
+extern bool g_gl_hide_hud;
 static GLuint g_controls_atlas_tex_id = 0;    // Original atlas texture ID
 static GLuint g_controls_hidden_tex = 0;       // Modified copy with controls zeroed out
 
@@ -3265,8 +4188,8 @@ static void create_hidden_controls_atlas(GLenum target, GLint level, GLint ifmt,
            g_controls_hidden_tex, NUM_CONTROL_RECTS);
 }
 
-void bridge_gl_draw_arrays(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_draw_arrays(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t mode = emu->get_reg(0);
     uint32_t first = emu->get_reg(1);
     uint32_t count = emu->get_reg(2);
@@ -3289,13 +4212,40 @@ void bridge_gl_draw_arrays(void* emu_ptr) {
         }
     }
 
-    if (g_display_active) {
-        glDrawArrays(mode, first, count);
+    if (!g_display_active) return;
+
+    // Try draw call batching
+    if (g_batching_enabled && g_batcher.initialized && 
+        g_gl_state.vptr_addr && g_gl_state.vptr_type == GL_FLOAT) {
+        
+        // Update batch state (blend is tracked via glEnable/glBlendFunc hooks)
+        uint8_t* memory = emu->get_memory_base();
+        
+        bool batched = g_batcher.try_batch(
+            g_current_batch_state, memory,
+            g_gl_state.vptr_addr, g_gl_state.vptr_size, g_gl_state.vptr_stride,
+            g_gl_state.tptr_addr, g_gl_state.tptr_size, g_gl_state.tptr_stride,
+            g_color_ptr, g_color_stride, g_color_array_enabled,
+            mode, first, count);
+        
+        if (batched) return; // Successfully batched — will be drawn later
+        // Fall through to direct draw if can't batch
     }
+
+    // Direct draw (fallback)
+    GLboolean was_lit = glIsEnabled(GL_LIGHTING);
+    if (was_lit) {
+        glDisable(GL_LIGHTING);
+        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    }
+    
+    glDrawArrays(mode, first, count);
+    
+    if (was_lit) glEnable(GL_LIGHTING);
 }
 
-void bridge_gl_draw_elements(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_draw_elements(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t mode = emu->get_reg(0);
     uint32_t count = emu->get_reg(1);
     uint32_t type = emu->get_reg(2);
@@ -3310,6 +4260,128 @@ void bridge_gl_draw_elements(void* emu_ptr) {
     }
 #endif
 
+    // ===== COMPREHENSIVE GL STATE DUMP on first 3 draw calls =====
+    static int draw_diag_count = 0;
+    if (draw_diag_count < 3 && g_display_active) {
+        std::cout << "\n========== [GL64-STATE] Draw call #" << draw_diag_count << " ==========" << std::endl;
+        std::cout << "  mode=0x" << std::hex << mode << " count=" << std::dec << count 
+                  << " type=0x" << std::hex << type << " indices=0x" << indices_ptr << std::dec << std::endl;
+        
+        // Current bound texture
+        GLint bound_tex = 0;
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound_tex);
+        std::cout << "  Bound texture: " << bound_tex << std::endl;
+        
+        // Enabled states
+        std::cout << "  GL_TEXTURE_2D: " << (glIsEnabled(GL_TEXTURE_2D) ? "ON" : "OFF") << std::endl;
+        std::cout << "  GL_DEPTH_TEST: " << (glIsEnabled(GL_DEPTH_TEST) ? "ON" : "OFF") << std::endl;
+        std::cout << "  GL_BLEND: " << (glIsEnabled(GL_BLEND) ? "ON" : "OFF") << std::endl;
+        std::cout << "  GL_CULL_FACE: " << (glIsEnabled(GL_CULL_FACE) ? "ON" : "OFF") << std::endl;
+        std::cout << "  GL_LIGHTING: " << (glIsEnabled(GL_LIGHTING) ? "ON" : "OFF") << std::endl;
+        std::cout << "  GL_ALPHA_TEST: " << (glIsEnabled(GL_ALPHA_TEST) ? "ON" : "OFF") << std::endl;
+        std::cout << "  GL_SCISSOR_TEST: " << (glIsEnabled(GL_SCISSOR_TEST) ? "ON" : "OFF") << std::endl;
+        std::cout << "  GL_COLOR_ARRAY: " << (glIsEnabled(GL_COLOR_ARRAY) ? "ON" : "OFF") << std::endl;
+        std::cout << "  GL_VERTEX_ARRAY: " << (glIsEnabled(GL_VERTEX_ARRAY) ? "ON" : "OFF") << std::endl;
+        std::cout << "  GL_TEXTURE_COORD_ARRAY: " << (glIsEnabled(GL_TEXTURE_COORD_ARRAY) ? "ON" : "OFF") << std::endl;
+        std::cout << "  GL_NORMAL_ARRAY: " << (glIsEnabled(GL_NORMAL_ARRAY) ? "ON" : "OFF") << std::endl;
+        
+        // Texture environment mode
+        GLint tex_env_mode;
+        glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &tex_env_mode);
+        std::cout << "  TEX_ENV_MODE: 0x" << std::hex << tex_env_mode << std::dec 
+                  << " (" << (tex_env_mode == 0x2100 ? "MODULATE" : 
+                             tex_env_mode == 0x1E01 ? "REPLACE" :
+                             tex_env_mode == 0x0104 ? "ADD" :
+                             tex_env_mode == 0x2101 ? "DECAL" : 
+                             tex_env_mode == 0x8570 ? "COMBINE" : "?") << ")" << std::endl;
+        
+        // GL_COLOR_MATERIAL
+        std::cout << "  GL_COLOR_MATERIAL: " << (glIsEnabled(GL_COLOR_MATERIAL) ? "ON" : "OFF") << std::endl;
+        
+        // Color mask
+        GLboolean cm[4];
+        glGetBooleanv(GL_COLOR_WRITEMASK, cm);
+        std::cout << "  ColorMask: R=" << (int)cm[0] << " G=" << (int)cm[1] 
+                  << " B=" << (int)cm[2] << " A=" << (int)cm[3] << std::endl;
+        
+        // Viewport
+        GLint vp[4];
+        glGetIntegerv(GL_VIEWPORT, vp);
+        std::cout << "  Viewport: " << vp[0] << "," << vp[1] << " " << vp[2] << "x" << vp[3] << std::endl;
+        
+        // Current color
+        GLfloat cc[4];
+        glGetFloatv(GL_CURRENT_COLOR, cc);
+        std::cout << "  Current color: " << cc[0] << ", " << cc[1] << ", " << cc[2] << ", " << cc[3] << std::endl;
+        
+        // Matrix mode
+        GLint mm;
+        glGetIntegerv(GL_MATRIX_MODE, &mm);
+        std::cout << "  Matrix mode: 0x" << std::hex << mm << std::dec << std::endl;
+        
+        // Projection matrix (first row to see if it's identity/zero/valid)
+        GLfloat proj[16];
+        glGetFloatv(GL_PROJECTION_MATRIX, proj);
+        std::cout << "  Proj matrix row0: " << proj[0] << " " << proj[4] << " " << proj[8] << " " << proj[12] << std::endl;
+        std::cout << "  Proj matrix row1: " << proj[1] << " " << proj[5] << " " << proj[9] << " " << proj[13] << std::endl;
+        std::cout << "  Proj matrix row2: " << proj[2] << " " << proj[6] << " " << proj[10] << " " << proj[14] << std::endl;
+        std::cout << "  Proj matrix row3: " << proj[3] << " " << proj[7] << " " << proj[11] << " " << proj[15] << std::endl;
+        
+        // Modelview matrix (first row)
+        GLfloat mv[16];
+        glGetFloatv(GL_MODELVIEW_MATRIX, mv);
+        std::cout << "  MV matrix row0: " << mv[0] << " " << mv[4] << " " << mv[8] << " " << mv[12] << std::endl;
+        std::cout << "  MV matrix row1: " << mv[1] << " " << mv[5] << " " << mv[9] << " " << mv[13] << std::endl;
+        std::cout << "  MV matrix row2: " << mv[2] << " " << mv[6] << " " << mv[10] << " " << mv[14] << std::endl;
+        std::cout << "  MV matrix row3: " << mv[3] << " " << mv[7] << " " << mv[11] << " " << mv[15] << std::endl;
+        
+        // Vertex data sample
+        uint8_t* memory = emu->get_memory_base();
+        if (g_gl_state.vptr_addr && g_gl_state.vptr_type == GL_FLOAT) {
+            const float* v = (const float*)(memory + g_gl_state.vptr_addr);
+            std::cout << "  VPtr @ 0x" << std::hex << g_gl_state.vptr_addr << std::dec 
+                      << " size=" << g_gl_state.vptr_size << " stride=" << g_gl_state.vptr_stride << std::endl;
+            std::cout << "  First verts: [" << v[0] << " " << v[1] << " " << v[2] << "] [" 
+                      << v[3] << " " << v[4] << " " << v[5] << "]" << std::endl;
+        }
+        
+        // Bound FBO (should be our FBO, not 0)
+        GLint fbo;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
+        std::cout << "  Bound FBO: " << fbo << std::endl;
+        
+        // Which lights are enabled?
+        for (int i = 0; i < 8; i++) {
+            if (glIsEnabled(GL_LIGHT0 + i)) {
+                std::cout << "  GL_LIGHT" << i << ": ENABLED" << std::endl;
+                // Query this light's properties
+                GLfloat pos[4], amb[4], dif[4];
+                glGetLightfv(GL_LIGHT0 + i, GL_POSITION, pos);
+                glGetLightfv(GL_LIGHT0 + i, GL_AMBIENT, amb);
+                glGetLightfv(GL_LIGHT0 + i, GL_DIFFUSE, dif);
+                std::cout << "    Position: " << pos[0] << ", " << pos[1] << ", " << pos[2] << ", " << pos[3] << std::endl;
+                std::cout << "    Ambient: " << amb[0] << ", " << amb[1] << ", " << amb[2] << ", " << amb[3] << std::endl;
+                std::cout << "    Diffuse: " << dif[0] << ", " << dif[1] << ", " << dif[2] << ", " << dif[3] << std::endl;
+            }
+        }
+        if (!glIsEnabled(GL_LIGHT0) && !glIsEnabled(GL_LIGHT1)) {
+            std::cout << "  *** NO LIGHTS ENABLED! This explains black rendering! ***" << std::endl;
+        }
+        
+        // Material properties
+        GLfloat mat_amb[4], mat_dif[4];
+        glGetMaterialfv(GL_FRONT, GL_AMBIENT, mat_amb);
+        glGetMaterialfv(GL_FRONT, GL_DIFFUSE, mat_dif);
+        std::cout << "  Material ambient: " << mat_amb[0] << ", " << mat_amb[1] << ", " << mat_amb[2] << ", " << mat_amb[3] << std::endl;
+        std::cout << "  Material diffuse: " << mat_dif[0] << ", " << mat_dif[1] << ", " << mat_dif[2] << ", " << mat_dif[3] << std::endl;
+        
+        // GL errors
+        GLenum err = glGetError();
+        std::cout << "  GL error: " << err << std::endl;
+        std::cout << "=========================================\n" << std::endl;
+        draw_diag_count++;
+    }
+
     if (g_gl_diag_enabled && g_gl_diag_frame < 3) {
         printf("[GL F%d] glDrawElements(mode=0x%x, count=%d, type=0x%x, indices=@0x%x)\n", g_gl_diag_frame, mode, count, type, indices_ptr);
         uint8_t* memory = emu->get_memory_base();
@@ -3320,15 +4392,24 @@ void bridge_gl_draw_elements(void* emu_ptr) {
     }
 
     if (g_display_active) {
+        // Fix: Disable lighting, set white color so MODULATE shows textures as-is
+        GLboolean was_lit = glIsEnabled(GL_LIGHTING);
+        if (was_lit) {
+            glDisable(GL_LIGHTING);
+            glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+        }
+        
         uint8_t* memory = emu->get_memory_base();
         glDrawElements(mode, count, type, (const void*)(memory + indices_ptr));
+        
+        if (was_lit) glEnable(GL_LIGHTING);
     }
 }
 
 
 // glVertexPointer(GLint size, GLenum type, GLsizei stride, const void* pointer)
-void bridge_gl_vertex_pointer(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_vertex_pointer(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.vertex_pointer_calls++;
     
     uint32_t size = emu->get_reg(0);
@@ -3357,8 +4438,8 @@ void bridge_gl_vertex_pointer(void* emu_ptr) {
 }
 
 
-void bridge_gl_texcoord_pointer(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_texcoord_pointer(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.texcoord_pointer_calls++;
     
     uint32_t size = emu->get_reg(0);
@@ -3386,13 +4467,15 @@ void bridge_gl_texcoord_pointer(void* emu_ptr) {
     }
 }
 
-void bridge_gl_color_pointer(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_color_pointer(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.color_pointer_calls++;
     uint32_t size = emu->get_reg(0);
     uint32_t type = emu->get_reg(1);
     uint32_t stride = emu->get_reg(2);
     uint32_t ptr = emu->get_reg(3);
+    g_color_ptr = ptr;
+    g_color_stride = stride;
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.color_pointer(size, type, stride, ptr);
@@ -3406,8 +4489,8 @@ void bridge_gl_color_pointer(void* emu_ptr) {
     }
 }
 
-void bridge_gl_normal_pointer(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_normal_pointer(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
     
     uint32_t type = emu->get_reg(0);
@@ -3431,8 +4514,8 @@ void bridge_gl_normal_pointer(void* emu_ptr) {
     }
 }
 
-void bridge_gl_enable_client_state(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_enable_client_state(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
     GL_DIAG("glEnableClientState(0x%x) %s", emu->get_reg(0), emu->get_reg(0)==0x8074?"VERTEX_ARRAY":emu->get_reg(0)==0x8078?"TEXTURE_COORD_ARRAY":"OTHER");
 #ifdef VULKAN_BACKEND
@@ -3441,11 +4524,13 @@ void bridge_gl_enable_client_state(void* emu_ptr) {
         return;
     }
 #endif
-    if (g_display_active) glEnableClientState(emu->get_reg(0));
+    GLenum arr = emu->get_reg(0);
+    if (g_batching_enabled && arr == GL_COLOR_ARRAY) g_color_array_enabled = true;
+    if (g_display_active) glEnableClientState(arr);
 }
 
-void bridge_gl_disable_client_state(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_disable_client_state(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
     GL_DIAG("glDisableClientState(0x%x)", emu->get_reg(0));
 #ifdef VULKAN_BACKEND
@@ -3454,7 +4539,9 @@ void bridge_gl_disable_client_state(void* emu_ptr) {
         return;
     }
 #endif
-    if (g_display_active) glDisableClientState(emu->get_reg(0));
+    GLenum arr = emu->get_reg(0);
+    if (g_batching_enabled && arr == GL_COLOR_ARRAY) g_color_array_enabled = false;
+    if (g_display_active) glDisableClientState(arr);
 }
 
 // --- Phase 4: Textures ---
@@ -3463,8 +4550,8 @@ static std::unordered_map<uint32_t, bool> g_seen_textures;
 
 extern bool g_gl_force_white;
 
-void bridge_gl_bind_texture(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_bind_texture(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t target = emu->get_reg(0);
     uint32_t tex_id = emu->get_reg(1);
     g_frame_stats.texture_binds++;
@@ -3475,6 +4562,14 @@ void bridge_gl_bind_texture(void* emu_ptr) {
     }
     GL_DIAG("glBindTexture(target=0x%x, id=%d)", target, tex_id);
     TEX_LOG("glBindTexture(target=0x%x, id=%u)", target, tex_id);
+    
+    // Track texture for draw batcher
+    if (g_batching_enabled && target == GL_TEXTURE_2D) {
+        if (g_current_batch_state.texture_id != tex_id) {
+            g_batcher.flush(); // Texture changed → flush pending batch
+        }
+        g_current_batch_state.texture_id = tex_id;
+    }
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.bind_texture(target, tex_id);
@@ -3509,20 +4604,23 @@ void bridge_gl_bind_texture(void* emu_ptr) {
 
 // glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels)
 // R0=target, R1=level, R2=internalformat, R3=width, stack: height, border, format, type, pixels
-void bridge_gl_tex_image_2d(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_tex_image_2d(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.tex_uploads++;
     uint8_t* memory = emu->get_memory_base();
-    uint32_t target = emu->get_reg(0);
-    uint32_t level = emu->get_reg(1);
-    uint32_t internalformat = emu->get_reg(2);
-    uint32_t width = emu->get_reg(3);
-    uint32_t sp = emu->get_reg(13);
-    uint32_t height = *(uint32_t*)(memory + sp);
-    uint32_t border = *(uint32_t*)(memory + sp + 4);
-    uint32_t format = *(uint32_t*)(memory + sp + 8);
-    uint32_t type = *(uint32_t*)(memory + sp + 12);
-    uint32_t pixels_ptr = *(uint32_t*)(memory + sp + 16);
+    // ARM64: 9 args. X0-X7 hold first 8, 9th on stack
+    uint32_t target = (uint32_t)emu->get_reg(0);
+    uint32_t level = (uint32_t)emu->get_reg(1);
+    uint32_t internalformat = (uint32_t)emu->get_reg(2);
+    uint32_t width = (uint32_t)emu->get_reg(3);
+    uint32_t height = (uint32_t)emu->get_reg(4);
+    uint32_t border = (uint32_t)emu->get_reg(5);
+    uint32_t format = (uint32_t)emu->get_reg(6);
+    uint32_t type = (uint32_t)emu->get_reg(7);
+    // 9th arg on stack
+    // ARM64: SP is register 31, NOT 13 (13 is ARM32's SP)
+    uint64_t sp = emu->get_reg(31);
+    uint32_t pixels_ptr = (uint32_t)*(uint64_t*)(memory + sp); // ARM64: 8-byte stack slots
     TEX_LOG("glTexImage2D(%ux%u level=%u ifmt=0x%x fmt=0x%x type=0x%x pixels=0x%x)",
             width, height, level, internalformat, format, type, pixels_ptr);
 #ifdef VULKAN_BACKEND
@@ -3549,20 +4647,23 @@ void bridge_gl_tex_image_2d(void* emu_ptr) {
     }
 }
 
-void bridge_gl_tex_sub_image_2d(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_tex_sub_image_2d(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.tex_uploads++;
     uint8_t* memory = emu->get_memory_base();
-    uint32_t target = emu->get_reg(0);
-    uint32_t level = emu->get_reg(1);
-    uint32_t xoff = emu->get_reg(2);
-    uint32_t yoff = emu->get_reg(3);
-    uint32_t sp = emu->get_reg(13);
-    uint32_t width = *(uint32_t*)(memory + sp);
-    uint32_t height = *(uint32_t*)(memory + sp + 4);
-    uint32_t format = *(uint32_t*)(memory + sp + 8);
-    uint32_t type = *(uint32_t*)(memory + sp + 12);
-    uint32_t pixels_ptr = *(uint32_t*)(memory + sp + 16);
+    // ARM64: 9 args. X0-X7 hold first 8, 9th on stack
+    uint32_t target = (uint32_t)emu->get_reg(0);
+    uint32_t level = (uint32_t)emu->get_reg(1);
+    uint32_t xoff = (uint32_t)emu->get_reg(2);
+    uint32_t yoff = (uint32_t)emu->get_reg(3);
+    uint32_t width = (uint32_t)emu->get_reg(4);
+    uint32_t height = (uint32_t)emu->get_reg(5);
+    uint32_t format = (uint32_t)emu->get_reg(6);
+    uint32_t type = (uint32_t)emu->get_reg(7);
+    // 9th arg on stack
+    // ARM64: SP is register 31, NOT 13 (13 is ARM32's SP)
+    uint64_t sp = emu->get_reg(31);
+    uint32_t pixels_ptr = (uint32_t)*(uint64_t*)(memory + sp); // ARM64: 8-byte stack slots
     TEX_LOG("glTexSubImage2D(%ux%u @%u,%u level=%u fmt=0x%x type=0x%x pixels=0x%x)",
             width, height, xoff, yoff, level, format, type, pixels_ptr);
 #ifdef VULKAN_BACKEND
@@ -3653,19 +4754,19 @@ static void decode_etc1_block(const uint8_t* src, uint8_t* dst, int dst_stride) 
     }
 }
 
-void bridge_gl_compressed_tex_image_2d(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_compressed_tex_image_2d(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.tex_uploads++;
     uint8_t* memory = emu->get_memory_base();
-    uint32_t target = emu->get_reg(0);
-    uint32_t level = emu->get_reg(1);
-    uint32_t internalformat = emu->get_reg(2);
-    uint32_t width = emu->get_reg(3);
-    uint32_t sp = emu->get_reg(13);
-    uint32_t height = *(uint32_t*)(memory + sp);
-    uint32_t border = *(uint32_t*)(memory + sp + 4);
-    uint32_t image_size = *(uint32_t*)(memory + sp + 8);
-    uint32_t data_ptr = *(uint32_t*)(memory + sp + 12);
+    // ARM64: 8 args all fit in X0-X7
+    uint32_t target = (uint32_t)emu->get_reg(0);
+    uint32_t level = (uint32_t)emu->get_reg(1);
+    uint32_t internalformat = (uint32_t)emu->get_reg(2);
+    uint32_t width = (uint32_t)emu->get_reg(3);
+    uint32_t height = (uint32_t)emu->get_reg(4);
+    uint32_t border = (uint32_t)emu->get_reg(5);
+    uint32_t image_size = (uint32_t)emu->get_reg(6);
+    uint32_t data_ptr = (uint32_t)emu->get_reg(7);
     
     // ETC1_RGB8_OES = 0x8D64
     if (!g_display_active || data_ptr == 0) return;
@@ -3704,8 +4805,8 @@ void bridge_gl_compressed_tex_image_2d(void* emu_ptr) {
     }
 }
 
-void bridge_gl_tex_parameteri(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_tex_parameteri(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
@@ -3718,11 +4819,11 @@ void bridge_gl_tex_parameteri(void* emu_ptr) {
     }
 }
 
-void bridge_gl_tex_parameterf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_tex_parameterf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
-    uint32_t r2 = emu->get_reg(2);
-    float val; memcpy(&val, &r2, 4);
+    // ARM64 AAPCS64: float arg in S0
+    float val = emu->get_sreg(0);
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.tex_parameterf(emu->get_reg(0), emu->get_reg(1), val);
@@ -3736,21 +4837,40 @@ void bridge_gl_tex_parameterf(void* emu_ptr) {
 
 // --- Phase 5: State & Blending ---
 
-void bridge_gl_enable(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_enable(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
-    GL_DIAG("glEnable(0x%x)", emu->get_reg(0));
+    GLenum cap = (GLenum)emu->get_reg(0);
+    GL_DIAG("glEnable(0x%x)", cap);
+    
+    // Log light-related enables (GL_LIGHT0=0x4000 .. GL_LIGHT7=0x4007, GL_LIGHTING=0x0B50)
+    static int en_diag = 0;
+    if (en_diag < 20 && (cap >= 0x4000 && cap <= 0x4007 || cap == 0x0B50)) {
+        std::cout << "[GL64-LIGHT] glEnable(0x" << std::hex << cap << std::dec << ") = "
+                  << (cap == 0x0B50 ? "GL_LIGHTING" : "GL_LIGHT") << (cap >= 0x4000 ? (int)(cap - 0x4000) : -1) << std::endl;
+        en_diag++;
+    }
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
-        g_vk_backend.enable(emu->get_reg(0));
+        g_vk_backend.enable(cap);
         return;
     }
 #endif
-    if (g_display_active) glEnable(emu->get_reg(0));
+    // Track blend/alpha state for batcher
+    if (g_batching_enabled) {
+        if (cap == GL_BLEND) {
+            if (!g_current_batch_state.blend_enabled) g_batcher.flush();
+            g_current_batch_state.blend_enabled = true;
+        } else if (cap == GL_ALPHA_TEST) {
+            if (!g_current_batch_state.alpha_test_enabled) g_batcher.flush();
+            g_current_batch_state.alpha_test_enabled = true;
+        }
+    }
+    if (g_display_active) glEnable(cap);
 }
 
-void bridge_gl_disable(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_disable(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
     GL_DIAG("glDisable(0x%x)", emu->get_reg(0));
 #ifdef VULKAN_BACKEND
@@ -3759,11 +4879,21 @@ void bridge_gl_disable(void* emu_ptr) {
         return;
     }
 #endif
-    if (g_display_active) glDisable(emu->get_reg(0));
+    GLenum cap = emu->get_reg(0);
+    if (g_batching_enabled) {
+        if (cap == GL_BLEND) {
+            if (g_current_batch_state.blend_enabled) g_batcher.flush();
+            g_current_batch_state.blend_enabled = false;
+        } else if (cap == GL_ALPHA_TEST) {
+            if (g_current_batch_state.alpha_test_enabled) g_batcher.flush();
+            g_current_batch_state.alpha_test_enabled = false;
+        }
+    }
+    if (g_display_active) glDisable(cap);
 }
 
-void bridge_gl_blend_func(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_blend_func(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
@@ -3771,11 +4901,19 @@ void bridge_gl_blend_func(void* emu_ptr) {
         return;
     }
 #endif
-    if (g_display_active) glBlendFunc(emu->get_reg(0), emu->get_reg(1));
+    GLenum src = emu->get_reg(0), dst = emu->get_reg(1);
+    if (g_batching_enabled) {
+        if (g_current_batch_state.blend_src != src || g_current_batch_state.blend_dst != dst) {
+            g_batcher.flush();
+        }
+        g_current_batch_state.blend_src = src;
+        g_current_batch_state.blend_dst = dst;
+    }
+    if (g_display_active) glBlendFunc(src, dst);
 }
 
-void bridge_gl_depth_func(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_depth_func(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
@@ -3786,8 +4924,8 @@ void bridge_gl_depth_func(void* emu_ptr) {
     if (g_display_active) glDepthFunc(emu->get_reg(0));
 }
 
-void bridge_gl_depth_mask(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_depth_mask(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
@@ -3798,14 +4936,18 @@ void bridge_gl_depth_mask(void* emu_ptr) {
     if (g_display_active) glDepthMask(emu->get_reg(0));
 }
 
-void bridge_gl_color4f(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_color4f(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
-    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
-    uint32_t r2 = emu->get_reg(2), r3 = emu->get_reg(3);
-    float r, g, b, a;
-    memcpy(&r, &r0, 4); memcpy(&g, &r1, 4);
-    memcpy(&b, &r2, 4); memcpy(&a, &r3, 4);
+    // ARM64 AAPCS64: all-float args in S0-S3
+    float r = emu->get_sreg(0), g = emu->get_sreg(1);
+    float b = emu->get_sreg(2), a = emu->get_sreg(3);
+    
+    static int c4f_diag = 0;
+    if (c4f_diag < 10) {
+        std::cout << "[GL64-DIAG] glColor4f(" << r << ", " << g << ", " << b << ", " << a << ")" << std::endl;
+        c4f_diag++;
+    }
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.color4f(r, g, b, a);
@@ -3818,8 +4960,8 @@ void bridge_gl_color4f(void* emu_ptr) {
     }
 }
 
-void bridge_gl_scissor(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_scissor(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
@@ -3830,8 +4972,8 @@ void bridge_gl_scissor(void* emu_ptr) {
     if (g_display_active) glScissor(emu->get_reg(0), emu->get_reg(1), emu->get_reg(2), emu->get_reg(3));
 }
 
-void bridge_gl_color_mask(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_color_mask(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
@@ -3842,8 +4984,8 @@ void bridge_gl_color_mask(void* emu_ptr) {
     if (g_display_active) glColorMask(emu->get_reg(0), emu->get_reg(1), emu->get_reg(2), emu->get_reg(3));
 }
 
-void bridge_gl_pixel_storei(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_pixel_storei(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
@@ -3854,11 +4996,11 @@ void bridge_gl_pixel_storei(void* emu_ptr) {
     if (g_display_active) glPixelStorei(emu->get_reg(0), emu->get_reg(1));
 }
 
-void bridge_gl_alpha_func(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_alpha_func(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
-    uint32_t r1 = emu->get_reg(1);
-    float ref; memcpy(&ref, &r1, 4);
+    // ARM64 AAPCS64: float arg in S0
+    float ref = emu->get_sreg(0);
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.alpha_func(emu->get_reg(0), ref);
@@ -3870,8 +5012,8 @@ void bridge_gl_alpha_func(void* emu_ptr) {
     }
 }
 
-void bridge_gl_shade_model(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_shade_model(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
@@ -3882,11 +5024,11 @@ void bridge_gl_shade_model(void* emu_ptr) {
     if (g_display_active) glShadeModel(emu->get_reg(0));
 }
 
-void bridge_gl_clear_depthf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_clear_depthf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
-    uint32_t r0 = emu->get_reg(0);
-    float d; memcpy(&d, &r0, 4);
+    // ARM64 AAPCS64: float arg in S0
+    float d = emu->get_sreg(0);
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.clear_depthf(d);
@@ -3898,11 +5040,11 @@ void bridge_gl_clear_depthf(void* emu_ptr) {
     }
 }
 
-void bridge_gl_line_width(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_line_width(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
-    uint32_t r0 = emu->get_reg(0);
-    float w; memcpy(&w, &r0, 4);
+    // ARM64 AAPCS64: float arg in S0
+    float w = emu->get_sreg(0);
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.line_width(w);
@@ -3914,8 +5056,8 @@ void bridge_gl_line_width(void* emu_ptr) {
     }
 }
 
-void bridge_gl_active_texture(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_active_texture(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
@@ -3926,8 +5068,8 @@ void bridge_gl_active_texture(void* emu_ptr) {
     if (g_display_active) glActiveTexture(emu->get_reg(0));
 }
 
-void bridge_gl_client_active_texture(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_client_active_texture(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
@@ -3942,8 +5084,8 @@ void bridge_gl_client_active_texture(void* emu_ptr) {
 // --- Queries & Gen ---
 
 // eglGetProcAddress(const char* procname) -> void* func
-void bridge_eglGetProcAddress(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_eglGetProcAddress(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t name_ptr = emu->get_reg(0);
     const char* procname = name_ptr ? (const char*)(memory + name_ptr) : "";
@@ -3968,8 +5110,8 @@ void bridge_eglGetProcAddress(void* emu_ptr) {
     emu->set_reg(0, addr);
 }
 
-void bridge_glGetError(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glGetError(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     if (g_display_active) {
         emu->set_reg(0, glGetError());
     } else {
@@ -3977,8 +5119,8 @@ void bridge_glGetError(void* emu_ptr) {
     }
 }
 
-void bridge_glGenTextures(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glGenTextures(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t n = emu->get_reg(0);
     uint32_t textures_ptr = emu->get_reg(1);
@@ -4015,8 +5157,8 @@ void bridge_glGenTextures(void* emu_ptr) {
     }
 }
 
-void bridge_glGenBuffers(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glGenBuffers(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t n = emu->get_reg(0);
     uint32_t buffers_ptr = emu->get_reg(1);
@@ -4035,8 +5177,8 @@ void bridge_glGenBuffers(void* emu_ptr) {
     }
 }
 
-void bridge_glGetIntegerv(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glGetIntegerv(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t pname = emu->get_reg(0);
     uint32_t params_ptr = emu->get_reg(1);
@@ -4049,8 +5191,8 @@ void bridge_glGetIntegerv(void* emu_ptr) {
     }
 }
 
-void bridge_glGetFloatv(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glGetFloatv(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t pname = emu->get_reg(0);
     uint32_t params_ptr = emu->get_reg(1);
@@ -4070,8 +5212,8 @@ void bridge_glGetFloatv(void* emu_ptr) {
     }
 }
 
-void bridge_glGetString(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_glGetString(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     static bool initialized = false;
     uint8_t* memory = emu->get_memory_base();
     if (!initialized) {
@@ -4094,8 +5236,8 @@ void bridge_glGetString(void* emu_ptr) {
 
 // --- Misc GL stubs (things that need GL but are less critical) ---
 
-void bridge_gl_delete_textures(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_delete_textures(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t n = emu->get_reg(0);
     uint32_t textures_ptr = emu->get_reg(1);
@@ -4110,8 +5252,8 @@ void bridge_gl_delete_textures(void* emu_ptr) {
     }
 }
 
-void bridge_gl_delete_buffers(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_delete_buffers(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     if (g_display_active) {
         uint8_t* memory = emu->get_memory_base();
         uint32_t n = emu->get_reg(0);
@@ -4120,14 +5262,14 @@ void bridge_gl_delete_buffers(void* emu_ptr) {
     }
 }
 
-void bridge_gl_bind_buffer(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_bind_buffer(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
     if (g_display_active) glBindBuffer(emu->get_reg(0), emu->get_reg(1));
 }
 
-void bridge_gl_buffer_data(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_buffer_data(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     g_frame_stats.state_changes++;
     if (g_display_active) {
         uint8_t* memory = emu->get_memory_base();
@@ -4140,7 +5282,7 @@ void bridge_gl_buffer_data(void* emu_ptr) {
     }
 }
 
-void bridge_gl_flush(void* emu_ptr) {
+static void bridge_gl_flush(void* emu_ptr) {
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.flush();
@@ -4150,7 +5292,7 @@ void bridge_gl_flush(void* emu_ptr) {
     if (g_display_active) glFlush();
 }
 
-void bridge_gl_finish(void* emu_ptr) {
+static void bridge_gl_finish(void* emu_ptr) {
 #ifdef VULKAN_BACKEND
     if (g_graphics_api == GraphicsAPI::VULKAN) {
         g_vk_backend.finish();
@@ -4160,14 +5302,14 @@ void bridge_gl_finish(void* emu_ptr) {
     if (g_display_active) glFinish();
 }
 
-void bridge_gl_framebuffer_status(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gl_framebuffer_status(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0x8CD5); // GL_FRAMEBUFFER_COMPLETE
 }
 
 
-void bridge_matrix4_mul(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_matrix4_mul(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     const float* a = (const float*)(memory + emu->get_reg(0));
     const float* b = (const float*)(memory + emu->get_reg(1));
@@ -4204,17 +5346,17 @@ void bridge_matrix4_mul(void* emu_ptr) {
 // [sp+0]=top, [sp+4]=near, [sp+8]=far (float args via integer regs/stack).
 // We log the params and compute the matrix natively so it's always correct.
 // -------------------------------------------------------------------------
-void bridge_matrix4_ortho(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_matrix4_ortho(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
-    uint32_t dst_ptr = emu->get_reg(0);  // Matrix4* this
-    float left   = uint_to_float(emu->get_reg(1));
-    float right  = uint_to_float(emu->get_reg(2));
-    float bottom = uint_to_float(emu->get_reg(3));
-    uint32_t sp  = emu->get_reg(13);
-    float top    = uint_to_float(*(uint32_t*)(memory + sp));
-    float near_  = uint_to_float(*(uint32_t*)(memory + sp + 4));
-    float far_   = uint_to_float(*(uint32_t*)(memory + sp + 8));
+    uint32_t dst_ptr = (uint32_t)emu->get_reg(0);  // Matrix4* this (X0)
+    // ARM64 AAPCS64: float args in S0-S5
+    float left   = emu->get_sreg(0);
+    float right  = emu->get_sreg(1);
+    float bottom = emu->get_sreg(2);
+    float top    = emu->get_sreg(3);
+    float near_  = emu->get_sreg(4);
+    float far_   = emu->get_sreg(5);
 
     static int ortho_count = 0;
     ortho_count++;
@@ -4248,15 +5390,15 @@ void bridge_matrix4_ortho(void* emu_ptr) {
 // Matrix4::PerspectiveFov spy — logs FOV params for 3D projection.
 // ARM: r0=this(Matrix4*), r1=fov(deg), r2=aspect, r3=near, [sp]=far
 // -------------------------------------------------------------------------
-void bridge_matrix4_perspective(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_matrix4_perspective(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
-    uint32_t dst_ptr = emu->get_reg(0);
-    float fov    = uint_to_float(emu->get_reg(1));  // in degrees
-    float aspect = uint_to_float(emu->get_reg(2));
-    float near_  = uint_to_float(emu->get_reg(3));
-    uint32_t sp  = emu->get_reg(13);
-    float far_   = uint_to_float(*(uint32_t*)(memory + sp));
+    uint32_t dst_ptr = (uint32_t)emu->get_reg(0);  // Matrix4* this (X0)
+    // ARM64 AAPCS64: float args in S0-S3
+    float fov    = emu->get_sreg(0);  // in degrees
+    float aspect = emu->get_sreg(1);
+    float near_  = emu->get_sreg(2);
+    float far_   = emu->get_sreg(3);
 
     static int persp_count = 0;
     persp_count++;
@@ -4281,38 +5423,38 @@ void bridge_matrix4_perspective(void* emu_ptr) {
 
 
 static const uint32_t GUEST_ERRNO_ADDR = 0x41000; // Reserved area
-void bridge_errno(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_errno(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, GUEST_ERRNO_ADDR);
 }
 
-void bridge_google_blocking(void* emu_ptr) {
+static void bridge_google_blocking(void* emu_ptr) {
     // __google_potentially_blocking_region_begin/end - no-op
 }
 
-void bridge_cxa_atexit(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_cxa_atexit(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0);
 }
 
 
-void bridge_stack_chk_fail(void* emu_ptr) {
+static void bridge_stack_chk_fail(void* emu_ptr) {
     std::cerr << "[FATAL] __stack_chk_fail called!" << std::endl;
 }
 
-void bridge_cxa_guard(void* emu_ptr) {
+static void bridge_cxa_guard(void* emu_ptr) {
     // __cxa_guard_acquire/release/abort - just succeed
-    Emulator* emu = (Emulator*)emu_ptr;
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 1);
 }
 
-void bridge_pthread_mutex(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_pthread_mutex(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0); // success
 }
 
-void bridge_pthread_once(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_pthread_once(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t once_control_ptr = emu->get_reg(0);
     uint32_t init_routine = emu->get_reg(1);
@@ -4324,71 +5466,125 @@ void bridge_pthread_once(void* emu_ptr) {
 
     uint32_t once_val = *(uint32_t*)(memory + once_control_ptr);
     if (once_val != 2) { // not initialized
-        // Mark as initialized/completed to avoid recursion/reentry issues
         *(uint32_t*)(memory + once_control_ptr) = 2;
         if (init_routine != 0) {
-            std::cout << "[Bridge] pthread_once calling init_routine at 0x" << std::hex << init_routine << std::dec << std::endl;
-            emu->call(init_routine, {});
+            // Known issue: init_routine hangs at Windcliffe Campsite on ARM64
+            // because it internally spawns threads that deadlock in
+            // single-threaded emulation. Use ARM32 for full game playthrough.
+            emu->redirect_pc = init_routine;
         }
     }
     emu->set_reg(0, 0); // success
 }
 
-void bridge_pthread_cond(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_pthread_cond(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 0); // success
 }
 
-void bridge_pthread_create(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    // Can't actually create threads in guest - return error
-    std::cout << "[Bridge] pthread_create called (stubbed)" << std::endl;
-    emu->set_reg(0, 0); // pretend success
+static void bridge_pthread_create(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    
+    // pthread_create(pthread_t* thread, const pthread_attr_t* attr, 
+    //                void* (*start_routine)(void*), void* arg)
+    // ARM64 ABI: X0=thread, X1=attr, X2=start_routine, X3=arg
+    uint64_t thread_ptr = emu->get_reg(0);
+    uint64_t attr = emu->get_reg(1);
+    uint64_t start_routine = emu->get_reg(2);
+    uint64_t arg = emu->get_reg(3);
+    
+    // Write a fake thread ID if thread_ptr is valid
+    if (thread_ptr) {
+        static uint64_t next_tid = 0x1001;
+        *(uint64_t*)(memory + thread_ptr) = next_tid++;
+    }
+    
+    // DISCARD: Match ARM32 behavior — don't run the thread function at all.
+    // ARM32's pthread_create is a pure no-op (never runs thread functions)
+    // and works perfectly through the entire game. The deferred queue caused
+    // deadlocks: updateApp polls for results from threads that haven't run yet.
+    if (start_routine != 0) {
+        std::cerr << "[Bridge64] pthread_create: DISCARDING thread func 0x" 
+                  << std::hex << start_routine << " arg=0x" << arg 
+                  << std::dec << " (ARM32-compatible)" << std::endl;
+    }
+    
+    emu->set_reg(0, 0); // success
 }
 
-void bridge_pthread_self(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_pthread_self(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     emu->set_reg(0, 1); // fake thread id
 }
 
-void bridge_time(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_pthread_join(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    // Threads run inline, so by the time join is called, they're already done
+    std::cout << "[Bridge] pthread_join (no-op — threads run inline)" << std::endl;
+    emu->set_reg(0, 0); // success
+}
+
+static void bridge_pthread_detach(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, 0); // success
+}
+
+
+static void bridge_usleep(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint64_t usec = emu->get_reg(0);
+    // Cap at 100ms
+    if (usec > 100000) usec = 100000;
+    if (usec > 0) {
+        struct timespec ts;
+        ts.tv_sec  = usec / 1000000;
+        ts.tv_nsec = (usec % 1000000) * 1000;
+        nanosleep(&ts, nullptr);
+    }
+    emu->set_reg(0, 0);
+}
+
+static void bridge_time(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t t_ptr = emu->get_reg(0);
     time_t t = time(nullptr);
     if (t_ptr) {
-        *(uint32_t*)(memory + t_ptr) = (uint32_t)t;
+        *(uint64_t*)(memory + t_ptr) = (uint64_t)t; // ARM64: time_t is 64-bit
     }
-    emu->set_reg(0, (uint32_t)t);
+    emu->set_reg(0, (uint64_t)t);
 }
 
-void bridge_clock_gettime(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_clock_gettime(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t tp_ptr = emu->get_reg(1);
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     if (tp_ptr) {
-        *(uint32_t*)(memory + tp_ptr) = (uint32_t)ts.tv_sec;
-        *(uint32_t*)(memory + tp_ptr + 4) = (uint32_t)ts.tv_nsec;
+        // ARM64 struct timespec: { int64_t tv_sec; int64_t tv_nsec; }
+        *(int64_t*)(memory + tp_ptr)     = (int64_t)ts.tv_sec;
+        *(int64_t*)(memory + tp_ptr + 8) = (int64_t)ts.tv_nsec;
     }
     emu->set_reg(0, 0);
 }
 
-void bridge_gettimeofday(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
+static void bridge_gettimeofday(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t tv_ptr = emu->get_reg(0);
     struct timeval tv;
     gettimeofday(&tv, nullptr);
     if (tv_ptr) {
-        *(uint32_t*)(memory + tv_ptr) = (uint32_t)tv.tv_sec;
-        *(uint32_t*)(memory + tv_ptr + 4) = (uint32_t)tv.tv_usec;
+        // ARM64 struct timeval: { int64_t tv_sec; int64_t tv_usec; }
+        *(int64_t*)(memory + tv_ptr)     = (int64_t)tv.tv_sec;
+        *(int64_t*)(memory + tv_ptr + 8) = (int64_t)tv.tv_usec;
     }
     emu->set_reg(0, 0);
 }
 
-void JniBridge::init_standard_bridges() {
+void JniBridge64::init_standard_bridges() {
     register_handler("malloc", bridge_malloc);
     register_handler("calloc", bridge_calloc);
     register_handler("realloc", bridge_realloc);
@@ -4419,25 +5615,77 @@ void JniBridge::init_standard_bridges() {
     register_handler("btowc", bridge_btowc);
     register_handler("__ctype_get_mb_cur_max", bridge_ctype_cur_max);
 
-    register_handler("__aeabi_memclr", bridge_aeabi_memclr);
-    register_handler("__aeabi_memclr4", bridge_aeabi_memclr);
-    register_handler("__aeabi_memclr8", bridge_aeabi_memclr);
-    register_handler("__aeabi_memset", bridge_aeabi_memset);
-    register_handler("__aeabi_memset4", bridge_aeabi_memset);
-    register_handler("__aeabi_memset8", bridge_aeabi_memset);
-    register_handler("__aeabi_memcpy", bridge_aeabi_memcpy);
-    register_handler("__aeabi_memcpy4", bridge_aeabi_memcpy);
-    register_handler("__aeabi_memcpy8", bridge_aeabi_memcpy);
-    register_handler("__aeabi_memmove", bridge_aeabi_memmove);
-    register_handler("__aeabi_memmove4", bridge_aeabi_memmove);
-    register_handler("__aeabi_memmove8", bridge_aeabi_memmove);
+    // ctype character classification
+    register_handler("iscntrl", bridge_iscntrl);
+    register_handler("isprint", bridge_isprint);
+    register_handler("isgraph", bridge_isgraph);
+    register_handler("ispunct", bridge_ispunct);
+    register_handler("isxdigit", bridge_isxdigit);
+    register_handler("isblank", bridge_isblank);
+    register_handler("isalpha", bridge_isalpha);
+    register_handler("isdigit", bridge_isdigit);
+    register_handler("isalnum", bridge_isalnum);
+    register_handler("isspace", bridge_isspace);
+    register_handler("isupper", bridge_isupper);
+    register_handler("islower", bridge_islower);
+    register_handler("toupper", bridge_toupper);
+    register_handler("tolower", bridge_tolower);
 
-    register_handler("__aeabi_uidiv", bridge_aeabi_uidiv);
-    register_handler("__aeabi_idiv", bridge_aeabi_idiv);
-    register_handler("__aeabi_uidivmod", bridge_aeabi_uidivmod);
-    register_handler("__aeabi_idivmod", bridge_aeabi_idivmod);
-    register_handler("__aeabi_ldivmod", bridge_aeabi_ldivmod);
-    register_handler("__aeabi_uldivmod", bridge_aeabi_uldivmod);
+    // wide character
+    register_handler("wctype", bridge_wctype);
+    register_handler("iswctype", bridge_iswctype);
+    register_handler("towupper", bridge_towupper);
+    register_handler("towlower", bridge_towlower);
+
+    // C++ exception handling stubs
+    register_handler("dl_iterate_phdr", bridge_dl_iterate_phdr);
+    register_handler("__cxa_throw", bridge_cxa_throw);
+    register_handler("__cxa_begin_catch", bridge_cxa_begin_catch);
+    register_handler("__cxa_end_catch", bridge_cxa_end_catch);
+
+    // setjmp/longjmp (Lua error handling)
+    register_handler("setjmp", bridge_setjmp);
+    register_handler("_setjmp", bridge_setjmp);
+    register_handler("sigsetjmp", bridge_setjmp);
+    register_handler("longjmp", bridge_longjmp);
+    register_handler("siglongjmp", bridge_longjmp);
+
+    // misc libc
+    register_handler("strerror", bridge_strerror);
+    register_handler("sscanf", bridge_sscanf);
+    register_handler("strtod", bridge_strtod);
+    register_handler("strtof", bridge_strtof);
+    register_handler("strtold", bridge_strtold);
+    register_handler("sprintf", bridge_sprintf);
+    register_handler("snprintf", bridge_snprintf);
+    register_handler("vsprintf", bridge_vsprintf);
+    register_handler("fprintf", bridge_fprintf);
+    register_handler("printf", bridge_printf);
+    register_handler("fputs", bridge_fputs);
+    register_handler("fputc", bridge_fputc);
+    register_handler("putc", bridge_fputc);
+    register_handler("puts", bridge_puts);
+    register_handler("getc", bridge_getc);
+    register_handler("ungetc", bridge_ungetc);
+    register_handler("feof", bridge_feof);
+    register_handler("ferror", bridge_ferror);
+    register_handler("fileno", bridge_fileno);
+    register_handler("setvbuf", bridge_setvbuf);
+    register_handler("__sF", bridge__sF);
+    register_handler("__errno", bridge__errno);
+    register_handler("__stack_chk_fail", bridge__stack_chk_fail);
+    register_handler("setlocale", bridge_setlocale);
+    register_handler("rand", bridge_rand);
+    register_handler("clock", bridge_clock);
+    register_handler("remove", bridge_remove);
+    register_handler("nanosleep", bridge_nanosleep);
+    register_handler("sched_yield", bridge_sched_yield);
+
+    // pthread TLS
+    register_handler("pthread_key_create", bridge_pthread_key_create);
+    register_handler("pthread_key_delete", bridge_pthread_key_delete);
+    register_handler("pthread_getspecific", bridge_pthread_getspecific);
+    register_handler("pthread_setspecific", bridge_pthread_setspecific);
 
     register_handler("cosf", bridge_cosf);
     register_handler("sinf", bridge_sinf);
@@ -4456,6 +5704,21 @@ void JniBridge::init_standard_bridges() {
     register_handler("sin", bridge_sin);
     register_handler("cos", bridge_cos);
     register_handler("acos", bridge_acos);
+    register_handler("floor", bridge_floor);
+    register_handler("ceil", bridge_ceil);
+    register_handler("sqrt", bridge_sqrt);
+    register_handler("fmod", bridge_fmod);
+    register_handler("fabs", bridge_fabs);
+    register_handler("log", bridge_log);
+    register_handler("log10", bridge_log10);
+    register_handler("log2", bridge_log2);
+    register_handler("exp", bridge_exp);
+    register_handler("ldexp", bridge_ldexp);
+    register_handler("frexp", bridge_frexp);
+    register_handler("modf", bridge_modf);
+    register_handler("asin", bridge_asin);
+    register_handler("atan", bridge_atan);
+    register_handler("atan2", bridge_atan2);
 
     register_handler("powf", bridge_powf);
     register_handler("pow", bridge_pow);
@@ -4533,6 +5796,13 @@ void JniBridge::init_standard_bridges() {
     register_handler("pthread_create", bridge_pthread_create);
     register_handler("pthread_self", bridge_pthread_self);
     register_handler("pthread_once", bridge_pthread_once);
+    register_handler("pthread_join", bridge_pthread_join);
+    register_handler("pthread_detach", bridge_pthread_detach);
+
+    // Sleep / yield
+    register_handler("nanosleep", bridge_nanosleep);
+    register_handler("sched_yield", bridge_sched_yield);
+    register_handler("usleep", bridge_usleep);
 
     // JNI
     register_handler("FindClass", bridge_FindClass);
@@ -4613,6 +5883,57 @@ void JniBridge::init_standard_bridges() {
     register_handler("alListenerf", bridge_alListenerf);
     register_handler("alListener3f", bridge_alListener3f);
     register_handler("alDistanceModel", bridge_alDistanceModel);
+    register_handler("alcSuspendContext", bridge_alcSuspendContext);
+    register_handler("alcProcessContext", bridge_alcProcessContext);
+    register_handler("alcResume", bridge_alcResume);
+    register_handler("alcSuspend", bridge_alcSuspend);
+    register_handler("alcDestroyContext", bridge_alcDestroyContext);
+    register_handler("alcCloseDevice", bridge_alcCloseDevice);
+    register_handler("alGetSourcef", bridge_alGetSourcef);
+    register_handler("alListenerfv", bridge_alListenerfv);
+    register_handler("alSourceRewind", bridge_alSourceRewind);
+    register_handler("alcGetCurrentContext", bridge_alcGetCurrentContext);
+
+    // libc / Android
+    register_handler("exit", bridge_exit);
+    register_handler("read", bridge_read);
+    register_handler("write", bridge_write);
+    register_handler("writev", bridge_writev);
+    register_handler("fstat", bridge_fstat);
+    register_handler("poll", bridge_poll);
+    register_handler("ioctl", bridge_ioctl);
+    register_handler("perror", bridge_perror);
+    register_handler("syscall", bridge_syscall);
+    register_handler("_ctype_", bridge_ctype_);
+    register_handler("strftime", bridge_strftime);
+    register_handler("strncat", bridge_strncat);
+    register_handler("fdopen", bridge_fdopen);
+    register_handler("freopen", bridge_freopen);
+
+    // Wide character bridges
+    register_handler("wcslen", bridge_wcslen);
+    register_handler("wmemcpy", bridge_wmemcpy);
+    register_handler("wmemmove", bridge_wmemmove);
+    register_handler("wmemset", bridge_wmemset);
+    register_handler("wmemcmp", bridge_wmemcmp);
+    register_handler("wmemchr", bridge_wmemchr);
+    register_handler("mbrtowc", bridge_mbrtowc);
+    register_handler("wcrtomb", bridge_wcrtomb);
+    register_handler("getwc", bridge_getwc);
+    register_handler("putwc", bridge_putwc);
+    register_handler("ungetwc", bridge_ungetwc);
+    register_handler("wcscoll", bridge_wcscoll);
+    register_handler("wcsxfrm", bridge_wcsxfrm);
+    register_handler("wcsftime", bridge_wcsftime);
+
+    // String comparison/search
+    register_handler("strcoll", bridge_strcoll);
+    register_handler("strcspn", bridge_strcspn);
+    register_handler("strpbrk", bridge_strpbrk);
+    register_handler("strxfrm", bridge_strxfrm);
+
+    // Compression
+    register_handler("gzwrite", bridge_gzwrite);
 
     // GLES real bridge functions
     register_handler("glViewport", bridge_gl_viewport);
@@ -4708,5 +6029,27 @@ void JniBridge::init_standard_bridges() {
     register_handler("eglGetProcAddress", bridge_eglGetProcAddress);
 }
 
+// ======================= DRAW BATCHER API =======================
 
+void draw_batcher_init() {
+    g_batcher.init();
+    std::cout << "[Batcher] Draw call batcher initialized (VBO=" << g_batcher.vbo 
+              << ", max_verts=" << BATCH_MAX_VERTS << ")" << std::endl;
+}
 
+void draw_batcher_flush() {
+    if (g_batcher.initialized) {
+        g_batcher.flush();
+    }
+}
+
+void draw_batcher_print_stats() {
+    if (!g_batcher.initialized) return;
+    if (g_batcher.total_input_draws > 0) {
+        std::cout << "[Batcher] Input draws=" << g_batcher.total_input_draws
+                  << " -> Batched flushes=" << g_batcher.flushed_draws
+                  << " (reduction: " << g_batcher.total_input_draws << " -> " << g_batcher.flushed_draws << ")"
+                  << std::endl;
+    }
+    g_batcher.reset_stats();
+}
