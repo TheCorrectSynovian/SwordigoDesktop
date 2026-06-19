@@ -8,8 +8,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20x86__64-purple.svg)](#)
-[![Version](https://img.shields.io/badge/Version-v2.0r-00e5ff.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases)
-[![Engine](https://img.shields.io/badge/Engine-SRE%20v2.0-8b3dff.svg)](#-sre-architecture)
+[![Version](https://img.shields.io/badge/Version-v4.5r-00e5ff.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases)
+[![Engine](https://img.shields.io/badge/Engine-SRE%20v4.5-8b3dff.svg)](#-sre-architecture)
 
 [Website](https://thecorrectsynovian.github.io/SwordigoDesktop/web/) · [Download](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases) · [Research](https://thecorrectsynovian.github.io/SwordigoDesktop/web/research.html) · [Changelog](https://thecorrectsynovian.github.io/SwordigoDesktop/web/changelog.html)
 
@@ -17,9 +17,9 @@
 
 ---
 
-**Swordigo Desktop** is a native Linux port of the beloved mobile action-adventure platformer by Touch Foo. Rather than running through Android emulation layers, this project uses the **Swordigo Runtime Environment (SRE)** — a surgical ARM ELF loader powered by Unicorn Engine that executes the game's original native code directly, bridging it with host-native OpenGL, OpenAL, and SDL2 for a true desktop experience.
+**Swordigo Desktop** is a native Linux port of the beloved mobile action-adventure platformer by Touch Foo. Rather than running through Android emulation layers, this project uses the **Swordigo Runtime Environment (SRE)** — a surgical ARM ELF loader powered by Unicorn Engine that executes the game's original native code directly, bridging it with host-native OpenGL, OpenAL, and SDL3 for a true desktop experience.
 
-v2.0r introduces a multi-pass rendering pipeline with SSAO, God Rays, Volumetric Light Shafts, and 7 visual presets.
+v4.5r features **dual-architecture support** (ARM32 + ARM64), a revamped **launcher-integrated save editor**, and draw call batching for improved GPU performance.
 
 ---
 
@@ -28,7 +28,7 @@ v2.0r introduces a multi-pass rendering pipeline with SSAO, God Rays, Volumetric
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  🎮  Your Linux Desktop                                │
-│      SDL2 window · OpenGL context · OpenAL audio        │
+│      SDL3 window · OpenGL context · OpenAL audio        │
 ├─────────────────────────────────────────────────────────┤
 │  🔧  SRE Bridge         │  🎨  SRE PostFX              │
 │      JNI compat layer   │      SSAO, God Rays, FX      │
@@ -36,7 +36,7 @@ v2.0r introduces a multi-pass rendering pipeline with SSAO, God Rays, Volumetric
 ├─────────────────────────┼───────────────────────────────┤
 │  ⚙️  SRE Core           │  📦  SRE Loader              │
 │      Unicorn Engine     │      ELF parser + relocator   │
-│      ARMv7 execution    │      Symbol resolution        │
+│      ARMv7 + ARM64      │      Symbol resolution        │
 ├─────────────────────────────────────────────────────────┤
 │  📜  libswordigo.so (Original ARM Binary)               │
 │      Caver Engine · Lua 5.1 · Protobuf · PowerVR       │
@@ -45,11 +45,11 @@ v2.0r introduces a multi-pass rendering pipeline with SSAO, God Rays, Volumetric
 
 | Component | Technology | Role |
 |-----------|-----------|------|
-| **SRE Loader** | Custom ELF parser | Surgical loader for `libswordigo.so` with full relocation |
-| **SRE Core** | [Unicorn Engine](https://www.unicorn-engine.org/) | High-performance ARMv7 instruction emulation |
-| **SRE Bridge** | Custom JNI bridge | 200+ bridged functions (libc, math, OpenGL, file I/O) |
+| **SRE Loader** | Custom ELF parser | Surgical loader for `libswordigo.so` with full ELF32/ELF64 relocation |
+| **SRE Core** | [Unicorn Engine](https://www.unicorn-engine.org/) | Dual-arch: ARMv7 (VFP) + ARM64 (AArch64) instruction emulation |
+| **SRE Bridge** | Custom JNI bridge | 200+ bridged functions (libc, math, OpenGL, OpenAL, file I/O, pthreads) |
 | **SRE PostFX** | OpenGL 2.1 | Multi-pass rendering with SSAO, God Rays, color grading |
-| **SRE Launcher** | SDL2 + ImGui | Pre-launch config with binary selection + graphics API |
+| **SRE Launcher** | SDL3 + OpenGL | PolyMC-inspired instance manager with save editor |
 
 ---
 
@@ -88,16 +88,19 @@ v2.0r introduces a multi-pass rendering pipeline with SSAO, God Rays, Volumetric
 | **F10** | Toggle game's native on-screen controls |
 | **F12** | Fullscreen toggle |
 
-### 🚀 SRE Launcher (NEW in v2.0r)
-- **Unified Launcher GUI** — Pre-launch configuration with binary selection + graphics API picker
-- **Multi-Binary Support** — SHA-256 validated, auto-detect v1.4.6 and v1.4.12 game binaries
-- **Binary Registry** — JSON-based version tracking with tested/untested status
+### 🚀 SRE Launcher
+- **PolyMC-inspired Instance Manager** — Card grid layout with instance icons, version badges, arch labels
+- **Multi-Binary Support** — SHA-256 validated, auto-detect v1.4.6 and v1.4.12 in ARM32 + ARM64
+- **Binary Registry** — JSON-based version tracking with tested/untested/unknown status
+- **Save Editor** — Browse and edit save files directly from the launcher (coins, health, mana, XP, weapon, keys)
+- **Custom Instance Import** — Add any `.so` binary via file dialog with custom naming
 
 ### 🧪 Advanced
 - Custom camera system with 6-axis control + zoom + smooth interpolation
-- Async I/O thread for non-blocking save/load
+- Draw call batcher with streaming VBO for reduced CPU→GPU overhead
 - Speed control (0.25× to 4×), frame stepping, pause
 - Comprehensive SRE Bridge with SharedPreferences persistence
+- Dual-arch: ARM32 (armeabi-v7a) and ARM64 (arm64-v8a) selectable per-instance
 
 ---
 
@@ -106,11 +109,13 @@ v2.0r introduces a multi-pass rendering pipeline with SSAO, God Rays, Volumetric
 ### Dependencies
 ```bash
 # Fedora / RHEL
-sudo dnf install unicorn-devel SDL2-devel openal-soft-devel mesa-libGL-devel zlib-devel
+sudo dnf install unicorn-devel SDL3-devel SDL3_image-devel openal-soft-devel mesa-libGL-devel zlib-devel
 
-# Ubuntu / Debian
-sudo apt install libunicorn-dev libsdl2-dev libopenal-dev libgl-dev zlib1g-dev
+# Ubuntu / Debian (24.04+)
+sudo apt install libunicorn-dev libsdl3-dev libsdl3-image-dev libopenal-dev libgl-dev zlib1g-dev
 ```
+
+> **Note**: Requires glibc ≥ 2.39. Build on Ubuntu 24.04 for maximum compatibility.
 
 ### Build & Run
 ```bash
@@ -150,15 +155,38 @@ All controls are fully remappable — press **F2** to open the Controls Editor a
 
 ---
 
-## 📦 v2.0r Packages
+## ⚠️ Known Limitations
 
-| Format | Platform | Size |
-|--------|----------|------|
-| `.deb` | Debian/Ubuntu x86_64 | ~48 MB |
-| `.rpm` | Fedora/RHEL x86_64 | ~51 MB |
-| Binary | Raw executable | ~1 MB |
+### ARM64 (arm64-v8a)
+| Issue | Severity | Details |
+|-------|----------|---------|
+| Wastelands freeze | 🔴 High | Game spinlocks when entering Wastelands. Use ARM32 for this region. |
+| Heavy function stalls | 🟡 Medium | Some entity functions take 800ms+ in dungeon areas |
 
-Packages available in the `build/v2/` directory.
+### ARM32 (armeabi-v7a)
+| Issue | Severity | Details |
+|-------|----------|---------|
+| Timer-based spikes | 🔴 High | Repeating spikes on timer intervals don't activate |
+| Boss gates | 🔴 High | Gates that should open after defeating bosses don't trigger |
+| Threads discarded | 🟡 Medium | `pthread_create` is stubbed — some game mechanics may be affected |
+
+### General
+| Issue | Severity | Details |
+|-------|----------|---------|
+| Launcher .deb icons | 🟡 Cosmetic | Instance icons show placeholder in packaged .deb installs |
+| PostFX on Intel iGPU | 🟡 Known | SSAO/God Rays may not work on limited GLSL support |
+
+**Recommended strategy**: Use ARM64 from start through Willcliff Campsite, then switch to ARM32 for regions where ARM64 freezes. Use the Save Editor to manage saves when switching.
+
+---
+
+## 📦 v4.5r Packages
+
+| Format | Platform | Notes |
+|--------|----------|-------|
+| `.deb` | Debian/Ubuntu x86_64 | Requires glibc ≥ 2.39 |
+| `.rpm` | Fedora/RHEL x86_64 | |
+| Binary | Raw executable | Requires deps: unicorn, SDL3, OpenAL, zlib |
 
 ---
 
@@ -188,8 +216,9 @@ Packages available in the `build/v2/` directory.
 
 | Project | License | Purpose |
 |---------|---------|---------|
-| [Unicorn Engine](https://www.unicorn-engine.org/) | GPL-2.0 | ARMv7 CPU emulation (SRE Core) |
-| [SDL2](https://www.libsdl.org/) | Zlib | Window management, input, gamepad |
+| [Unicorn Engine](https://www.unicorn-engine.org/) | GPL-2.0 | ARMv7 + ARM64 CPU emulation (SRE Core) |
+| [SDL3](https://www.libsdl.org/) | Zlib | Window management, input, gamepad |
+| [SDL3_image](https://github.com/libsdl-org/SDL_image) | Zlib | Texture loading for launcher |
 | [OpenAL Soft](https://openal-soft.org/) | LGPL-2.1 | Audio playback |
 | [GlossHook](https://github.com/XMDS/GlossHook) | MIT | Function hooking (reference from SwMini) |
 

@@ -14,6 +14,7 @@
 #include <chrono>
 #include <algorithm>
 #include <filesystem>
+#include "platform/save_editor.h"
 
 namespace fs = std::filesystem;
 
@@ -253,7 +254,9 @@ static void SDLCALL file_dialog_callback(void* userdata, const char* const* file
 // ============================================================================
 enum class LauncherState {
     NORMAL,
-    NAMING_INSTANCE  // Text input for new instance name
+    NAMING_INSTANCE,
+    SAVE_EDITOR_LIST,
+    SAVE_EDITOR_EDIT
 };
 
 // ============================================================================
@@ -344,6 +347,22 @@ LaunchConfig show_launcher(BinarySelector& selector) {
     LauncherState state = LauncherState::NORMAL;
     std::string input_text;
     FileDialogResult dialog_result;
+
+    // Save editor state
+    std::vector<SaveFile> save_files;
+    std::vector<std::string> save_paths;
+    int save_sel = -1;
+    SaveFile edit_save;
+    std::string se_status;  // Status message after save
+    auto se_status_time = std::chrono::steady_clock::now();
+    // Editable fields (as strings for text input)
+    std::string ed_coins, ed_health, ed_mana, ed_xp, ed_weapon, ed_keys;
+    int se_active_field = -1;  // Which field is being edited (-1=none, 0=coins, 1=health, 2=mana, 3=xp, 4=weapon, 5=keys)
+    bool se_status_ok = false;
+    // Save directory path
+    std::string home_dir_str = getenv("HOME") ? getenv("HOME") : "/tmp";
+    std::string xdg_str = getenv("XDG_DATA_HOME") ? getenv("XDG_DATA_HOME") : (home_dir_str + "/.local/share");
+    std::string save_doc_dir = xdg_str + "/swordigo-desktop/save/Documents";
 
     // Auto-launch countdown
     auto start_time = std::chrono::steady_clock::now();
@@ -446,6 +465,122 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                             break;
                         }
 
+                        // === Save Editor clicks ===
+                        if (state == LauncherState::SAVE_EDITOR_LIST) {
+                            // Back button (top-right of panel)
+                            float se_back_w = 100.0f, se_back_h = 30.0f;
+                            float back_btn_x = (W - 40.0f) + 20.0f - 100.0f - 10.0f; // matches render: se_panel_x + se_panel_w - se_back_w - 10
+                            float se_back_y = CONTENT_TOP - 40.0f;
+                            if (hit(mouse_x, mouse_y, back_btn_x, se_back_y, se_back_w, se_back_h)) {
+                                state = LauncherState::NORMAL;
+                                break;
+                            }
+                            // Save file row clicks
+                            float list_top = CONTENT_TOP - 80.0f;
+                            float row_height = 52.0f;
+                            for (size_t i = 0; i < save_files.size() && i < 8; i++) {
+                                float ry = list_top - (float)i * row_height;
+                                if (hit(mouse_x, mouse_y, 30.0f, ry, W - 60.0f, row_height - 4.0f)) {
+                                    save_sel = (int)i;
+                                    // Load into edit fields
+                                    edit_save = save_files[i];
+                                    const auto& ch = edit_save.game_state.character;
+                                    ed_coins = std::to_string(ch.coins);
+                                    ed_health = std::to_string(ch.health);
+                                    ed_mana = std::to_string(ch.mana);
+                                    ed_xp = std::to_string(ch.xp);
+                                    ed_weapon = ch.equipped_weapon;
+                                    // Find key count in items
+                                    ed_keys = "0";
+                                    for (const auto& item : ch.items) {
+                                        if (item.name == "key") {
+                                            ed_keys = std::to_string(item.count);
+                                            break;
+                                        }
+                                    }
+                                    se_active_field = -1;
+                                    se_status.clear();
+                                    state = LauncherState::SAVE_EDITOR_EDIT;
+                                    SDL_StartTextInput(win);
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                        if (state == LauncherState::SAVE_EDITOR_EDIT) {
+                            // Back button (top-right of panel)
+                            float se_back_w = 100.0f, se_back_h = 30.0f;
+                            float back_btn_x = (W - 40.0f) + 20.0f - 100.0f - 10.0f; // matches render: se_panel_x + se_panel_w - se_back_w - 10
+                            float se_back_y = CONTENT_TOP - 40.0f;
+                            if (hit(mouse_x, mouse_y, back_btn_x, se_back_y, se_back_w, se_back_h)) {
+                                state = LauncherState::SAVE_EDITOR_LIST;
+                                SDL_StopTextInput(win);
+                                se_active_field = -1;
+                                break;
+                            }
+                            // Field clicks — detect which field was clicked
+                            float field_x = 230.0f;
+                            float field_w = 300.0f;
+                            float field_h = 28.0f;
+                            float fields_top = CONTENT_TOP - 100.0f;
+                            float field_spacing = 42.0f;
+                            for (int f = 0; f < 6; f++) {
+                                float fy = fields_top - (float)f * field_spacing;
+                                if (hit(mouse_x, mouse_y, field_x, fy, field_w, field_h)) {
+                                    se_active_field = f;
+                                    break;
+                                }
+                            }
+                            // Apply button
+                            float apply_x = W / 2.0f - 130.0f, apply_y = fields_top - 6 * field_spacing - 20.0f;
+                            float apply_w = 260.0f, apply_h = 40.0f;
+                            if (hit(mouse_x, mouse_y, apply_x, apply_y, apply_w, apply_h)) {
+                                // Apply edits
+                                try {
+                                    edit_save.game_state.character.coins = std::stoi(ed_coins);
+                                } catch(...) {}
+                                try {
+                                    edit_save.game_state.character.health = std::stoi(ed_health);
+                                } catch(...) {}
+                                try {
+                                    edit_save.game_state.character.mana = std::stoi(ed_mana);
+                                } catch(...) {}
+                                try {
+                                    edit_save.game_state.character.xp = std::stoi(ed_xp);
+                                } catch(...) {}
+                                edit_save.game_state.character.equipped_weapon = ed_weapon;
+                                // Update key count in items
+                                int new_keys = 0;
+                                try { new_keys = std::stoi(ed_keys); } catch(...) {}
+                                bool found_key = false;
+                                for (auto& item : edit_save.game_state.character.items) {
+                                    if (item.name == "key") {
+                                        item.count = new_keys;
+                                        found_key = true;
+                                        break;
+                                    }
+                                }
+                                if (!found_key && new_keys > 0) {
+                                    edit_save.game_state.character.items.push_back({"key", new_keys});
+                                }
+                                // Write to file
+                                if (save_sel >= 0 && save_sel < (int)save_paths.size()) {
+                                    if (save_write(save_paths[save_sel], edit_save)) {
+                                        se_status = "Save applied successfully!";
+                                        se_status_ok = true;
+                                    } else {
+                                        se_status = "ERROR: Failed to write save!";
+                                        se_status_ok = false;
+                                    }
+                                } else {
+                                    se_status = "ERROR: Invalid save selection!";
+                                    se_status_ok = false;
+                                }
+                                se_status_time = std::chrono::steady_clock::now();
+                            }
+                            break;
+                        }
+
                         if (state == LauncherState::NAMING_INSTANCE) {
                             // In naming mode, clicks don't select cards
                             break;
@@ -526,6 +661,24 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                                 }
                                 break;
                             }
+
+                            // Save Editor button
+                            float sebtn_y_click = rmbtn_y - 12 - ofbtn_h;
+                            if (hit(mouse_x, mouse_y, ofbtn_x, sebtn_y_click, ofbtn_w, ofbtn_h)) {
+                                // Load save files
+                                save_paths = save_list_dir(save_doc_dir);
+                                save_files.clear();
+                                for (const auto& p : save_paths) {
+                                    SaveFile sf;
+                                    if (save_load(p, sf)) {
+                                        save_files.push_back(std::move(sf));
+                                    }
+                                }
+                                save_sel = -1;
+                                se_status.clear();
+                                state = LauncherState::SAVE_EDITOR_LIST;
+                                break;
+                            }
                         }
                     }
                     break;
@@ -539,10 +692,52 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                         input_text += ev.text.text;
                         reset_timer();
                     }
+                    if (state == LauncherState::SAVE_EDITOR_EDIT && se_active_field >= 0) {
+                        std::string* target = nullptr;
+                        switch (se_active_field) {
+                            case 0: target = &ed_coins; break;
+                            case 1: target = &ed_health; break;
+                            case 2: target = &ed_mana; break;
+                            case 3: target = &ed_xp; break;
+                            case 4: target = &ed_weapon; break;
+                            case 5: target = &ed_keys; break;
+                        }
+                        if (target) *target += ev.text.text;
+                    }
                     break;
 
                 case SDL_EVENT_KEY_DOWN:
                     reset_timer();
+
+                    if (state == LauncherState::SAVE_EDITOR_EDIT) {
+                        if (ev.key.key == SDLK_ESCAPE) {
+                            state = LauncherState::SAVE_EDITOR_LIST;
+                            SDL_StopTextInput(win);
+                            se_active_field = -1;
+                        } else if (ev.key.key == SDLK_TAB) {
+                            se_active_field = (se_active_field + 1) % 6;
+                        } else if (ev.key.key == SDLK_BACKSPACE && se_active_field >= 0) {
+                            std::string* target = nullptr;
+                            switch (se_active_field) {
+                                case 0: target = &ed_coins; break;
+                                case 1: target = &ed_health; break;
+                                case 2: target = &ed_mana; break;
+                                case 3: target = &ed_xp; break;
+                                case 4: target = &ed_weapon; break;
+                                case 5: target = &ed_keys; break;
+                            }
+                            if (target && !target->empty()) target->pop_back();
+                        } else if (ev.key.key == SDLK_RETURN || ev.key.key == SDLK_KP_ENTER) {
+                            se_active_field = -1;
+                        }
+                        break;
+                    }
+                    if (state == LauncherState::SAVE_EDITOR_LIST) {
+                        if (ev.key.key == SDLK_ESCAPE) {
+                            state = LauncherState::NORMAL;
+                        }
+                        break;
+                    }
 
                     if (state == LauncherState::NAMING_INSTANCE) {
                         if (ev.key.key == SDLK_RETURN || ev.key.key == SDLK_KP_ENTER) {
@@ -956,6 +1151,17 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                  rm_hov ? (uint8_t)25 : (uint8_t)20, 220);
             border(ofbtn_x, rmbtn_y, ofbtn_w, ofbtn_h, 1.0f, 180, 60, 60, 120);
             text("Remove Instance", ofbtn_x + (ofbtn_w - tw("Remove Instance", 1.4f))/2, rmbtn_y + 10, 1.4f, 255, 140, 140, 220);
+
+            // ==== SAVE EDITOR BUTTON ====
+            dp_cur = rmbtn_y - 12;
+            float sebtn_y = dp_cur - ofbtn_h;
+            bool se_hov = hit(mouse_x, mouse_y, ofbtn_x, sebtn_y, ofbtn_w, ofbtn_h);
+            rect(ofbtn_x, sebtn_y, ofbtn_w, ofbtn_h,
+                 se_hov ? (uint8_t)35 : (uint8_t)25,
+                 se_hov ? (uint8_t)45 : (uint8_t)35,
+                 se_hov ? (uint8_t)60 : (uint8_t)50, 220);
+            border(ofbtn_x, sebtn_y, ofbtn_w, ofbtn_h, 1.0f, 200, 170, 70, 120);
+            text("Save Editor", ofbtn_x + (ofbtn_w - tw("Save Editor", 1.5f))/2, sebtn_y + 10, 1.5f, 255, 220, 130, 255);
         } else if (cur_bins.empty()) {
             // Empty detail panel message
             text("No instance", PANEL_X + 40, H / 2.0f + 10, 2.0f, 136, 136, 170, 160);
@@ -977,16 +1183,177 @@ LaunchConfig show_launcher(BinarySelector& selector) {
         }
 
         // Version + hints
-        text("v3.0r", W - 60, 8, 1.0f, 60, 60, 80, 160);
+        text("v4.5r", W - 60, 8, 1.0f, 60, 60, 80, 160);
         const char* hint = "ESC cancel | ENTER launch | TAB api";
         text(hint, W / 2 - tw(hint, 0.9f)/2, 8, 0.9f, 60, 60, 80, 130);
+
+        // ==== SAVE EDITOR OVERLAY ====
+        if (state == LauncherState::SAVE_EDITOR_LIST || state == LauncherState::SAVE_EDITOR_EDIT) {
+            // Dark overlay
+            rect(0, 0, W, H, 0, 0, 0, 180);
+            // Panel background
+            float se_panel_x = 20.0f, se_panel_y = 40.0f;
+            float se_panel_w = W - 40.0f, se_panel_h = H - 80.0f;
+            rect(se_panel_x, se_panel_y, se_panel_w, se_panel_h, 18, 20, 32, 245);
+            border(se_panel_x, se_panel_y, se_panel_w, se_panel_h, 2.0f, 70, 130, 230, 180);
+
+            // Title
+            const char* se_title = (state == LauncherState::SAVE_EDITOR_LIST) ? "SAVE EDITOR" : "EDIT SAVE";
+            text(se_title, se_panel_x + 20, CONTENT_TOP - 20.0f, 2.2f, 255, 220, 130, 255);
+
+            // Back button
+            float se_back_w = 100.0f, se_back_h = 30.0f;
+            float back_btn_x = se_panel_x + se_panel_w - se_back_w - 10;
+            float se_back_y = CONTENT_TOP - 40.0f;
+            bool back_hov = hit(mouse_x, mouse_y, back_btn_x, se_back_y, se_back_w, se_back_h);
+            rect(back_btn_x, se_back_y, se_back_w, se_back_h,
+                 back_hov ? (uint8_t)50 : (uint8_t)35, back_hov ? (uint8_t)55 : (uint8_t)40,
+                 back_hov ? (uint8_t)80 : (uint8_t)60, 220);
+            border(back_btn_x, se_back_y, se_back_w, se_back_h, 1.0f, 120, 120, 160, 140);
+            text("< Back", back_btn_x + 18, se_back_y + 8, 1.6f, 200, 200, 220, 255);
+
+            if (state == LauncherState::SAVE_EDITOR_LIST) {
+                // Column headers
+                float hdr_y = CONTENT_TOP - 64.0f;
+                text("FILE", 40, hdr_y, 1.5f, 136, 136, 170, 200);
+                text("NAME", 240, hdr_y, 1.5f, 136, 136, 170, 200);
+                text("AREA", 450, hdr_y, 1.5f, 136, 136, 170, 200);
+                text("LVL", 720, hdr_y, 1.5f, 136, 136, 170, 200);
+                text("PROGRESS", 800, hdr_y, 1.5f, 136, 136, 170, 200);
+                rect(35, hdr_y - 4, W - 70, 1, 70, 130, 230, 60);
+
+                // Save file rows
+                float list_top = CONTENT_TOP - 80.0f;
+                float row_height = 52.0f;
+                if (save_files.empty()) {
+                    text("No save files found.", W/2 - tw("No save files found.", 1.8f)/2, H/2, 1.8f, 140, 140, 170, 200);
+                    char path_hint[256];
+                    snprintf(path_hint, 256, "Looking in: %s", save_doc_dir.c_str());
+                    text(path_hint, W/2 - tw(path_hint, 1.0f)/2, H/2 - 24, 1.0f, 100, 100, 130, 160);
+                }
+                for (size_t i = 0; i < save_files.size() && i < 8; i++) {
+                    float ry = list_top - (float)i * row_height;
+                    bool row_hov = hit(mouse_x, mouse_y, 30.0f, ry, W - 60.0f, row_height - 4.0f);
+                    // Row background
+                    rect(30, ry, W - 60, row_height - 4, 
+                         row_hov ? (uint8_t)30 : (uint8_t)22,
+                         row_hov ? (uint8_t)35 : (uint8_t)24,
+                         row_hov ? (uint8_t)55 : (uint8_t)38, 200);
+                    if (row_hov) border(30, ry, W - 60, row_height - 4, 1.0f, 70, 130, 230, 120);
+
+                    // Filename
+                    std::string fname = fs::path(save_files[i].filepath).filename().string();
+                    if (fname.length() > 22) fname = fname.substr(0, 19) + "...";
+                    text(fname.c_str(), 40, ry + 28, 1.3f, 180, 200, 255, 240);
+
+                    // Time info (bottom line)
+                    char time_str[64];
+                    int minutes = (int)(save_files[i].time_played / 60.0);
+                    snprintf(time_str, 64, "%dh %dm played", minutes / 60, minutes % 60);
+                    text(time_str, 40, ry + 8, 1.0f, 100, 100, 130, 160);
+
+                    // Player name
+                    std::string pname = save_files[i].name.empty() ? "(unnamed)" : save_files[i].name;
+                    if (pname.length() > 18) pname = pname.substr(0, 15) + "...";
+                    text(pname.c_str(), 240, ry + 28, 1.4f, 220, 220, 240, 240);
+
+                    // Current area
+                    std::string area = save_files[i].current_level_title;
+                    if (area.empty()) area = save_files[i].game_state.current_level;
+                    if (area.length() > 22) area = area.substr(0, 19) + "...";
+                    text(area.c_str(), 450, ry + 28, 1.3f, 200, 200, 220, 220);
+
+                    // Level
+                    char lvl_str[16];
+                    snprintf(lvl_str, 16, "%d", save_files[i].experience_level);
+                    text(lvl_str, 730, ry + 28, 1.5f, 200, 220, 255, 240);
+
+                    // Progress
+                    char pct_str[16];
+                    snprintf(pct_str, 16, "%d%%", (int)(save_files[i].percent_completed * 100));
+                    text(pct_str, 820, ry + 28, 1.5f, 100, 200, 100, 240);
+                }
+
+            } else if (state == LauncherState::SAVE_EDITOR_EDIT) {
+                // Edit panel
+                float field_x = 230.0f;
+                float field_w = 300.0f;
+                float field_h = 28.0f;
+                float fields_top = CONTENT_TOP - 100.0f;
+                float field_spacing = 42.0f;
+                float label_x = 50.0f;
+
+                const char* labels[] = {"Coins", "Health", "Mana", "XP", "Weapon", "Keys"};
+                std::string* values[] = {&ed_coins, &ed_health, &ed_mana, &ed_xp, &ed_weapon, &ed_keys};
+
+                // Save name/file header
+                std::string edit_header = "Editing: ";
+                if (!edit_save.name.empty()) edit_header += edit_save.name + " — ";
+                edit_header += fs::path(edit_save.filepath).filename().string();
+                text(edit_header.c_str(), 50, CONTENT_TOP - 60.0f, 1.5f, 200, 200, 220, 220);
+                rect(35, CONTENT_TOP - 72.0f, W - 70, 1, 70, 130, 230, 60);
+
+                for (int f = 0; f < 6; f++) {
+                    float fy = fields_top - (float)f * field_spacing;
+                    bool is_active = (se_active_field == f);
+                    bool field_hov = hit(mouse_x, mouse_y, field_x, fy, field_w, field_h);
+
+                    // Label
+                    text(labels[f], label_x, fy + 8, 1.8f, 180, 190, 220, 240);
+
+                    // Field background
+                    rect(field_x, fy, field_w, field_h,
+                         is_active ? (uint8_t)35 : (uint8_t)20,
+                         is_active ? (uint8_t)40 : (uint8_t)22,
+                         is_active ? (uint8_t)65 : (uint8_t)35, 220);
+                    uint8_t br = is_active ? (uint8_t)100 : (field_hov ? (uint8_t)80 : (uint8_t)50);
+                    uint8_t bg = is_active ? (uint8_t)180 : (field_hov ? (uint8_t)130 : (uint8_t)70);
+                    uint8_t bb = is_active ? (uint8_t)255 : (field_hov ? (uint8_t)200 : (uint8_t)120);
+                    border(field_x, fy, field_w, field_h, 1.5f, br, bg, bb, 200);
+
+                    // Value text
+                    std::string display_val = *values[f];
+                    if (is_active) display_val += "_"; // cursor
+                    text(display_val.c_str(), field_x + 8, fy + 7, 1.5f, 240, 240, 255, 255);
+                }
+
+                // Tab hint
+                text("TAB to switch fields | ESC to go back", 50, fields_top - 6 * field_spacing + 10, 1.0f, 100, 100, 130, 140);
+
+                // Apply button
+                float apply_x = W / 2.0f - 130.0f;
+                float apply_y = fields_top - 6 * field_spacing - 20.0f;
+                float apply_w = 260.0f, apply_h = 40.0f;
+                bool ap_hov = hit(mouse_x, mouse_y, apply_x, apply_y, apply_w, apply_h);
+                rect(apply_x, apply_y, apply_w, apply_h,
+                     ap_hov ? (uint8_t)30 : (uint8_t)20,
+                     ap_hov ? (uint8_t)60 : (uint8_t)45,
+                     ap_hov ? (uint8_t)30 : (uint8_t)20, 220);
+                border(apply_x, apply_y, apply_w, apply_h, 2.0f, 60, 180, 60, ap_hov ? (uint8_t)240 : (uint8_t)160);
+                text("APPLY", apply_x + (apply_w - tw("APPLY", 2.2f))/2, apply_y + 12, 2.2f, 130, 255, 130, 255);
+
+                // Status message
+                if (!se_status.empty()) {
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now() - se_status_time).count();
+                    if (elapsed < 5) {
+                        uint8_t alpha = (uint8_t)(255 - std::min((int)(elapsed * 40), 200));
+                        float status_y = apply_y - 30.0f;
+                        text(se_status.c_str(), W/2 - tw(se_status.c_str(), 1.4f)/2, status_y, 1.4f,
+                             se_status_ok ? (uint8_t)100 : (uint8_t)255,
+                             se_status_ok ? (uint8_t)255 : (uint8_t)100,
+                             se_status_ok ? (uint8_t)100 : (uint8_t)100, alpha);
+                    }
+                }
+            }
+        }
 
         SDL_GL_SwapWindow(win);
         SDL_Delay(16);
     }
 
     // Cleanup text input if active
-    if (state == LauncherState::NAMING_INSTANCE) {
+    if (state == LauncherState::NAMING_INSTANCE || state == LauncherState::SAVE_EDITOR_EDIT) {
         SDL_StopTextInput(win);
     }
 
