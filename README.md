@@ -197,8 +197,7 @@ All controls are fully remappable — press **F2** to open the Controls Editor a
 | Role | Name | GitHub |
 |------|------|--------|
 | **Lead Developer** | TheMegineBraine | [@TheMegineBraine](https://github.com/TheMegineBraine) |
-| **Developer** | TheCorrectSynovian | [@TheCorrectSynovian](https://github.com/TheCorrectSynovian) |
-
+| **Developer** | TheCorrectSynovian | -- |
 ### Research & Community
 
 | Contribution | Name | GitHub |

@@ -375,11 +375,7 @@ bool save_write(const std::string& filepath, const SaveFile& sf) {
     if (sf.cheat_enabled) w.write_varint_field(PP::CheatEnabled, 1);
     if (!sf.identifier.empty()) w.write_string_field(PP::Identifier, sf.identifier);
     
-    // Append preserved unknown fields
-    for (const auto& [fn, raw] : sf.raw_fields) {
-        auto& buf = const_cast<std::string&>(w.to_string()); // hack: direct append
-    }
-    
+
     // Write to file
     std::string output = w.to_string();
     // Append raw preserved fields

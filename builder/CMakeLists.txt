@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.12)
-project(SwordigoDesktop VERSION 3.0.0 LANGUAGES C CXX)
+project(SwordigoDesktop VERSION 4.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,8 +34,11 @@ set(SOURCES
     ${CMAKE_SOURCE_DIR}/../src/platform/display.cpp
     ${CMAKE_SOURCE_DIR}/../src/platform/gui.cpp
     ${CMAKE_SOURCE_DIR}/../src/loader/elf_loader.cpp
+    ${CMAKE_SOURCE_DIR}/../src/loader/elf_loader_arm64.cpp
     ${CMAKE_SOURCE_DIR}/../src/jni/jni_bridge.cpp
+    ${CMAKE_SOURCE_DIR}/../src/jni/jni_bridge_arm64.cpp
     ${CMAKE_SOURCE_DIR}/../src/platform/emulator.cpp
+    ${CMAKE_SOURCE_DIR}/../src/platform/emulator_arm64.cpp
     ${CMAKE_SOURCE_DIR}/../src/android/asset_manager.c
     ${CMAKE_SOURCE_DIR}/../src/android/log.c
     ${CMAKE_SOURCE_DIR}/../src/platform/input_config.cpp
@@ -52,7 +55,7 @@ set(SOURCES
 
 # Add SWORDIGO_DATA_DIR definition
 set(SWORDIGO_DATA_DIR "${CMAKE_INSTALL_PREFIX}/share/swordigo/")
-add_compile_definitions(SWORDIGO_DATA_DIR="${SWORDIGO_DATA_DIR}")
+add_compile_definitions(SWORDIGO_DATA_DIR_PATH="${SWORDIGO_DATA_DIR}")
 
 # Executable
 add_executable(swordigo_boot ${SOURCES})
@@ -96,8 +99,8 @@ install(FILES ${CMAKE_SOURCE_DIR}/../Swordigo.desktop DESTINATION share/applicat
 
 set(CPACK_PACKAGE_NAME "swordigo-desktop")
 set(CPACK_PACKAGE_VENDOR "Prenxy / TheCorrectSynovian")
-set(CPACK_PACKAGE_VERSION "3.0.0")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Swordigo Desktop v3.0r — Native Linux port with SDL3 and advanced rendering")
+set(CPACK_PACKAGE_VERSION "4.5.0")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Swordigo Desktop v4.5r — Native Linux port with dual-arch ARM emulation")
 set(CPACK_PACKAGE_CONTACT "quantumcreeper@gmail.com")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/../LICENSE")
 
@@ -112,9 +115,9 @@ set(CPACK_RPM_PACKAGE_GROUP "Amusements/Games")
 # binaries that rpmbuild incorrectly scans for x86_64 Linux deps
 set(CPACK_RPM_PACKAGE_AUTOREQ "no")
 set(CPACK_RPM_PACKAGE_AUTOPROV "no")
-set(CPACK_RPM_PACKAGE_DESCRIPTION "Swordigo Desktop v3.0r — A native Linux runtime for Swordigo (ARM emulation via Unicorn).
+set(CPACK_RPM_PACKAGE_DESCRIPTION "Swordigo Desktop v4.5r — A native Linux runtime for Swordigo (ARM emulation via Unicorn).
 Features: SDL3, advanced shaders (SSAO, godrays, tone mapping), gamepad support,
-free camera, mod tools, binary selector (v1.4.6 / v1.4.12), and more.
+save editor, ARM32+ARM64, binary selector, and more.
 NOTE: Game assets (assets/) and binary (.so) must be supplied by the user from their own copy.")
 
 # --- Debian packaging ---

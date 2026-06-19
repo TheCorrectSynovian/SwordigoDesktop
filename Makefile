@@ -42,7 +42,8 @@ CXX_SRCS := \
     src/platform/io_thread.cpp \
     src/platform/data_path.cpp \
     src/platform/binary_selector.cpp \
-    src/platform/launcher.cpp
+    src/platform/launcher.cpp \
+    src/platform/save_editor.cpp
 
 C_SRCS := \
     src/android/asset_manager.c \

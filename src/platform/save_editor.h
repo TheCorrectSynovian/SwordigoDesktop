@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <cstdint>
 
 // ============================================================
 // Swordigo Save Editor — parses .gplayer (PlayerProfile) files

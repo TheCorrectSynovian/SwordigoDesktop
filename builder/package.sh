@@ -2,7 +2,7 @@
 set -e
 
 # ============================================================
-# Swordigo Desktop v4.0r — Vanilla Package Builder
+# Swordigo Desktop v4.5r — Vanilla Package Builder
 # Builds RPM and/or DEB — vanilla only (v1.4.6 + v1.4.12)
 #
 # Usage:
@@ -12,7 +12,7 @@ set -e
 # ============================================================
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="4.0.0"
+VERSION="4.5.0"
 RELEASE="1"
 ARCH="x86_64"
 BUILD_DIR="/tmp/swordigo-packaging"
@@ -24,7 +24,7 @@ SHIP_VERSIONS=("v1.4.6" "v1.4.12")
 FORMAT="${1:-all}"     # rpm | deb | all
 
 echo "============================================"
-echo " Swordigo Desktop v4.0r — Package Builder"
+echo " Swordigo Desktop v4.5r — Package Builder"
 echo "============================================"
 echo "  Format: $FORMAT"
 echo "  Source:  $ROOT_DIR"
@@ -60,8 +60,8 @@ stage_package() {
     cp "$ROOT_DIR/swordigo_boot" "$STAGING/usr/bin/"
     chmod 755 "$STAGING/usr/bin/swordigo_boot"
 
-    # Launcher textures
-    cp "$ROOT_DIR/src/assets/"*.png "$STAGING/usr/share/swordigo/src/assets/" 2>/dev/null || true
+    # Launcher textures (including icons/ subdirectory)
+    cp -r "$ROOT_DIR/src/assets/"* "$STAGING/usr/share/swordigo/src/assets/" 2>/dev/null || true
 
     # Icon + license
     cp "$ROOT_DIR/src/assets/icon_gnome.png" "$STAGING/usr/share/icons/hicolor/256x256/apps/swordigo-desktop.png" 2>/dev/null || true
@@ -176,7 +176,7 @@ Icon=swordigo-desktop
 Terminal=false
 Type=Application
 Categories=Game;ActionGame;AdventureGame;
-Comment=Swordigo Desktop v4.0r
+Comment=Swordigo Desktop v4.5r
 Keywords=swordigo;game;rpg;adventure;
 StartupWMClass=Swordigo
 EOF
@@ -209,7 +209,7 @@ build_rpm() {
 Name:           ${PKG_NAME}
 Version:        ${VERSION}
 Release:        ${RELEASE}
-Summary:        Swordigo Desktop v4.0r
+Summary:        Swordigo Desktop v4.5r
 License:        MIT
 Group:          Amusements/Games
 URL:            https://github.com/TheCorrectSynovian/SwordigoDesktop
@@ -217,7 +217,7 @@ AutoReq:        no
 AutoProv:       no
 
 %description
-Swordigo Desktop v4.0r — Native Linux runtime for Swordigo.
+Swordigo Desktop v4.5r — Native Linux runtime for Swordigo.
 ARM emulation via Unicorn Engine. SDL3, HiDPI rendering,
 PostFX (SSAO, god rays, bloom, FSR upscaling), draw call batcher,
 threading bridges, binary/mod selector, gamepad support.
@@ -234,7 +234,10 @@ cp -a ${BUILDROOT}/* %{buildroot}/
 
 %changelog
 * $(date +'%a %b %d %Y') QuantumCreeper <quantumcreeper@gmail.com> - ${VERSION}-${RELEASE}
-- v4.0r Release
+- v4.5r Release
+- Save Editor: Revamped, moved to launcher window
+- Save Editor: Browse and edit .gplayer saves (coins, health, mana, XP, weapon, keys)
+- ARM64: Entity loop infinite loop fix (NOP at 0x580708)
 - GPU: Draw call batcher (80-140 draws -> ~20 per frame)
 - GPU: FSR 1.0 edge-adaptive spatial upscaling
 - GPU: GLSL #version 330 shaders
@@ -280,19 +283,16 @@ Section: games
 Priority: optional
 Architecture: amd64
 Maintainer: QuantumCreeper <quantumcreeper@gmail.com>
-Description: Swordigo Desktop v4.0r
+Description: Swordigo Desktop v4.5r
  Native Linux runtime for Swordigo. ARM emulation via Unicorn Engine.
  SDL3, HiDPI rendering, PostFX (SSAO, god rays, bloom, FSR upscaling),
- GPU draw call batcher, threading bridges, binary/mod selector, gamepad.
+ GPU draw call batcher, save editor, binary/mod selector, gamepad.
  .
- Changes in v4.0r:
- - GPU: Draw call batcher, FSR 1.0 upscaling, GLSL 330 shaders
- - Threading: Real nanosleep/usleep/pthread bridges
- - PostFX: SSAO, god rays, bloom, vignette, chromatic aberration
- - Launcher: PolyMC-style instance manager
- - ARM64: Full ARM64 emulation via Unicorn Engine
- - HiDPI: Native resolution rendering
- - SDL3: Complete SDL3 migration
+ Changes in v4.5r:
+ - Save Editor: Revamped, moved from in-game to launcher window
+ - Save Editor: Browse/edit .gplayer saves (coins, health, mana, XP, weapon, keys)
+ - ARM64: Entity loop infinite loop fix
+ - Version bump to v4.5r
 Homepage: https://github.com/TheCorrectSynovian/SwordigoDesktop
 CTRL
 
