@@ -161,6 +161,18 @@ void JniBridge::call_handler(uint32_t address, void* emu_ptr) {
                 warned_funcs.insert(func.name);
             }
         }
+    } else {
+        // Completely unregistered bridge address — this function was imported
+        // by libswordigo but has no handler. It silently returns via bx lr.
+        // Log it so we can find missing bridges (e.g. timer_create, setitimer).
+        Emulator* emu = (Emulator*)emu_ptr;
+        static std::unordered_set<uint32_t> warned_addrs;
+        if (!warned_addrs.count(address)) {
+            uint32_t lr = emu->get_reg(14);
+            std::cerr << "[Bridge] UNREGISTERED call at 0x" << std::hex << address
+                      << " (caller LR=0x" << lr << ")" << std::dec << std::endl;
+            warned_addrs.insert(address);
+        }
     }
 }
 
@@ -1282,7 +1294,7 @@ void bridge_CallStaticBooleanMethodV(void* emu_ptr) {
     } else if (mid == 0x13180001) { // getPlatformConsentState
         res = 3; // Return 3 — OBTAINED
     } else if (mid == 0x13260001) { // isGoogleGameServicesAvailable
-        res = 0; // No Google Play Services on desktop
+        res = 1; // Return true — we handle snapshots locally
     } else if (mid == 0x13280001) { // getBooleanFromSP(String key)
         uint8_t* memory = emu->get_memory_base();
         uint32_t va_ptr = emu->get_reg(3);
@@ -1360,19 +1372,9 @@ void bridge_CallStaticVoidMethodV(void* emu_ptr) {
     } else if (mid == 0x13170007) { // receivedPrivacyConsent
         std::cout << "[JNI] receivedPrivacyConsent() -> Stubbed!" << std::endl;
     } else if (mid == 0x13250001) { // loadSnapshot
-        std::string snap_path = g_save_dir + "/snapshot.bin";
-        std::cout << "[SAVE] loadSnapshot() -> Posting async load for " << snap_path << std::endl;
-        io_thread_post_load(snap_path, [](bool ok, std::vector<uint8_t> data) {
-            g_snapshot_load_pending_count++;
-            g_snapshot_has_data = ok;
-            if (ok) {
-                g_snapshot_data = std::move(data);
-                std::cout << "[SAVE] Loaded " << g_snapshot_data.size() << " bytes via async thread" << std::endl;
-            } else {
-                g_snapshot_data.clear();
-                std::cout << "[SAVE] Async load completed (no save data or error)" << std::endl;
-            }
-        });
+        // NO-OP: On Android, loadSnapshot syncs cloud saves. Calling snapshotLoaded
+        // after death interferes with the respawn (overwrites internal game state).
+        std::cout << "[SAVE] loadSnapshot() -> Ignored (no cloud sync needed)" << std::endl;
     } else if (mid == 0x13250002) { // saveSnapshot
         // Extract save data from JNI args: saveSnapshot(String name, byte[] data)
         uint8_t* memory = emu->get_memory_base();
@@ -1448,7 +1450,14 @@ void bridge_ReleaseStringUTFChars(void* emu_ptr) {
 
 void bridge_GetArrayLength(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
-    emu->set_reg(0, 0);
+    uint32_t array = emu->get_reg(1);
+    if (array) {
+        uint8_t* mem = emu->get_memory_base();
+        uint32_t len = *(uint32_t*)(mem + array);
+        emu->set_reg(0, len);
+    } else {
+        emu->set_reg(0, 0);
+    }
 }
 
 void bridge_GetObjectArrayElement(void* emu_ptr) {
@@ -1470,8 +1479,16 @@ void bridge_NewByteArray(void* emu_ptr) {
 void bridge_GetByteArrayElements(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     uint32_t array = emu->get_reg(1);
-    std::cout << "[JNI] GetByteArrayElements(array=0x" << std::hex << array << ") -> 0" << std::dec << std::endl;
-    emu->set_reg(0, 0); // Return null (no data)
+    if (array) {
+        // Array layout: [uint32_t length][byte data...] — return pointer past length
+        uint32_t data_ptr = array + 4;
+        std::cout << "[JNI] GetByteArrayElements(array=0x" << std::hex << array
+                  << ") -> 0x" << data_ptr << std::dec << std::endl;
+        emu->set_reg(0, data_ptr);
+    } else {
+        std::cout << "[JNI] GetByteArrayElements(null) -> 0" << std::endl;
+        emu->set_reg(0, 0);
+    }
 }
 
 void bridge_ReleaseByteArrayElements(void* emu_ptr) {

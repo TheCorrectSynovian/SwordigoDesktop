@@ -47,6 +47,8 @@ extern VulkanBackend g_vk_backend;
 // These globals are defined in jni_bridge.cpp — use extern here
 extern bool g_display_active;
 extern std::string g_save_dir;
+extern bool g_text_input_active;
+extern std::string g_text_input_buffer;
 
 // ============================================================================
 // ARM64 va_list helper
@@ -615,6 +617,8 @@ static void bridge_GetMethodID(void* emu_ptr) {
     else if (strcmp(name, "getLongFromSP") == 0) id = 0x13280005;
     else if (strcmp(name, "saveLongInSP") == 0) id = 0x13280006;
     else if (strcmp(name, "<init>") == 0) id = 0x13000001;
+    else if (strcmp(name, "startTextInput") == 0) id = 0x13290001;
+    else if (strcmp(name, "stopTextInput") == 0) id = 0x13290002;
     else id = 0x56780001;
     if (!emu->quiet_mode) {
         std::cout << "[JNI] GetMethodID: " << name << " -> 0x" << std::hex << id << std::dec << std::endl;
@@ -665,6 +669,9 @@ static void bridge_GetStringUTFChars(void* emu_ptr) {
         g_guest_heap_ptr += (str.length() + 8) & ~7;
         std::strcpy((char*)(memory + addr), str.c_str());
         emu->set_reg(0, addr);
+    } else if (jstr > 0x1000 && jstr < 0x40000000) {
+        // Treat as direct C-string pointer in guest memory
+        emu->set_reg(0, jstr);
     } else {
         uint32_t addr = 0x30000;
         strcpy((char*)(memory + addr), "dummy_jni_string");
@@ -996,8 +1003,8 @@ static void bridge_CallBooleanMethodV(void* emu_ptr) {
         
         // Death detection: flag when gameover music is loaded
         if (fname.find("gameover") != std::string::npos) {
-            g_death_detected_countdown = 480;  // ~8 seconds at 60fps, then auto-restart
-            std::cout << "[Fix] Death detected (gameover music loaded) — auto-restart in ~8s" << std::endl;
+            g_death_detected_countdown = 180;  // ~3 seconds at 60fps, then auto-restart
+            std::cout << "[Fix] Death detected (gameover music loaded) — auto-restart in ~3s" << std::endl;
         }
         
         if (g_music_source != 0) {
@@ -1212,7 +1219,7 @@ static void bridge_CallStaticBooleanMethodV(void* emu_ptr) {
     } else if (mid == 0x13180001) { // getPlatformConsentState
         res = 3; // Return 3 — OBTAINED
     } else if (mid == 0x13260001) { // isGoogleGameServicesAvailable
-        res = 0; // No Google Play Services on desktop
+        res = 1; // Return true — we handle snapshots locally
     } else if (mid == 0x13280001) { // getBooleanFromSP(String key)
         uint8_t* memory = emu->get_memory_base();
         uint32_t va_ptr = emu->get_reg(3);
@@ -1358,6 +1365,22 @@ static void bridge_CallStaticVoidMethodV(void* emu_ptr) {
         int64_t lval = (int64_t)va.next_gp();
         std::string key = resolve_jstring(key_h, memory);
         pref_set(key, std::to_string(lval));
+    } else if (mid == 0x13290001) { // startTextInput(String initialText)
+        uint8_t* memory = emu->get_memory_base();
+        uint32_t va_ptr = emu->get_reg(3);
+        Arm64VaList va(memory, va_ptr);
+        uint32_t str_h = (uint32_t)va.next_gp();
+        std::string initial = resolve_jstring(str_h, memory);
+        if (initial == "dummy_jni_string") initial = "";
+        
+        g_text_input_buffer = initial;
+        g_text_input_active = true;
+        std::cout << "[TextInput] startTextInput(\"" << initial 
+                  << "\") — type on keyboard, Enter to confirm, Escape to cancel" << std::endl;
+    } else if (mid == 0x13290002) { // stopTextInput
+        g_text_input_active = false;
+        g_text_input_buffer.clear();
+        std::cout << "[TextInput] stopTextInput()" << std::endl;
     }
 }
 
@@ -1384,7 +1407,14 @@ static void bridge_ReleaseStringUTFChars(void* emu_ptr) {
 
 static void bridge_GetArrayLength(void* emu_ptr) {
     EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
-    emu->set_reg(0, 0);
+    uint64_t array = emu->get_reg(1);
+    if (array) {
+        uint8_t* mem = emu->get_memory_base();
+        uint32_t len = *(uint32_t*)(mem + array);
+        emu->set_reg(0, len);
+    } else {
+        emu->set_reg(0, 0);
+    }
 }
 
 static void bridge_GetObjectArrayElement(void* emu_ptr) {
@@ -1397,21 +1427,78 @@ static void bridge_NewIntArray(void* emu_ptr) {
     emu->set_reg(0, 0);
 }
 
+// Bump allocator for JNI byte arrays in guest memory
+// Arrays are short-lived (created, filled, passed to saveSnapshot/etc, then discarded)
+static uint64_t g_byte_array_alloc_ptr_64 = 0x48000000; // High address region for arrays
+
 static void bridge_NewByteArray(void* emu_ptr) {
     EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
-    std::cout << "[JNI] NewByteArray() -> 0" << std::endl;
-    emu->set_reg(0, 0);
+    uint64_t length = emu->get_reg(1); // X1 = size
+    
+    if (length == 0 || length > 0x1000000) { // Sanity check (max 16MB)
+        std::cout << "[JNI] NewByteArray(" << length << ") -> 0 (invalid size)" << std::endl;
+        emu->set_reg(0, 0);
+        return;
+    }
+
+    // Layout: [uint32_t length][byte data...] — matches GetByteArrayElements expectation
+    uint64_t array_addr = g_byte_array_alloc_ptr_64;
+    uint8_t* memory = emu->get_memory_base();
+    *(uint32_t*)(memory + array_addr) = (uint32_t)length;
+    // Zero-initialize the data region
+    memset(memory + array_addr + 4, 0, length);
+    // Bump allocator forward (align to 8 bytes)
+    g_byte_array_alloc_ptr_64 += (4 + length + 7) & ~7ULL;
+    // Wrap around if we go too far (reuse space)
+    if (g_byte_array_alloc_ptr_64 > 0x4A000000) {
+        g_byte_array_alloc_ptr_64 = 0x48000000;
+    }
+
+    std::cout << "[JNI] NewByteArray(" << length << ") -> 0x" << std::hex << array_addr << std::dec << std::endl;
+    emu->set_reg(0, array_addr);
+}
+
+// SetByteArrayRegion(JNIEnv*, jbyteArray array, jsize start, jsize len, const jbyte* buf)
+// Copies len bytes from buf into array[start..start+len]
+static void bridge_SetByteArrayRegion(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint64_t array = emu->get_reg(1);  // X1 = array
+    int32_t start  = (int32_t)emu->get_reg(2);  // X2 = start offset
+    int32_t len    = (int32_t)emu->get_reg(3);   // X3 = length
+    uint64_t buf   = emu->get_reg(4);  // X4 = source buffer
+
+    if (array && buf && len > 0) {
+        uint8_t* memory = emu->get_memory_base();
+        // Array layout: [uint32_t length][byte data...]
+        // Data starts at array + 4
+        uint8_t* dst = memory + array + 4 + start;
+        uint8_t* src = memory + buf;
+        memcpy(dst, src, len);
+        if (!emu->quiet_mode) {
+            std::cout << "[JNI] SetByteArrayRegion(array=0x" << std::hex << array
+                      << ", start=" << std::dec << start << ", len=" << len
+                      << ", buf=0x" << std::hex << buf << ")" << std::dec << std::endl;
+        }
+    }
 }
 
 static void bridge_GetByteArrayElements(void* emu_ptr) {
     EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
-    uint32_t array = emu->get_reg(1);
-    std::cout << "[JNI] GetByteArrayElements(array=0x" << std::hex << array << ") -> 0" << std::dec << std::endl;
-    emu->set_reg(0, 0); // Return null (no data)
+    uint64_t array = emu->get_reg(1);
+    if (array) {
+        // Array layout: [uint32_t length][byte data...] — return pointer past length
+        uint64_t data_ptr = array + 4;
+        std::cout << "[JNI] GetByteArrayElements(array=0x" << std::hex << array
+                  << ") -> 0x" << data_ptr << std::dec << std::endl;
+        emu->set_reg(0, data_ptr);
+    } else {
+        std::cout << "[JNI] GetByteArrayElements(null) -> 0" << std::endl;
+        emu->set_reg(0, 0);
+    }
 }
 
 static void bridge_ReleaseByteArrayElements(void* emu_ptr) {
-    // No-op — nothing to release
+    // No-op — bump allocator, nothing to release
 }
 
 static void bridge_GetIntArrayElements(void* emu_ptr) {
@@ -2518,12 +2605,12 @@ static void bridge_abort(void* emu_ptr) {
         }
     }
     
-    if (g_abort_count > 50) {
-        std::cerr << "[FATAL] abort() loop detected (" << g_abort_count 
-                  << " calls). Killing process." << std::endl;
-        exit(1);
+    if (g_abort_count == 50) {
+        std::cerr << "[WARN] abort() called 50+ times — suppressing further logs" << std::endl;
     }
     
+    // Don't kill — these are non-fatal asserts (Lua compiler, fwrite, etc.)
+    // Just return and let the guest code continue past the bl abort
     emu->set_reg(0, 0);
 }
 
@@ -5442,10 +5529,36 @@ static void bridge_stack_chk_fail(void* emu_ptr) {
     std::cerr << "[FATAL] __stack_chk_fail called!" << std::endl;
 }
 
-static void bridge_cxa_guard(void* emu_ptr) {
-    // __cxa_guard_acquire/release/abort - just succeed
+static void bridge_cxa_guard_acquire(void* emu_ptr) {
+    // __cxa_guard_acquire(int64_t* guard_object)
+    // Returns 1 if initialization is needed, 0 if already done
     EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
-    emu->set_reg(0, 1);
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t guard_ptr = (uint32_t)emu->get_reg(0);
+    if (guard_ptr && guard_ptr < 0xE0000000) {
+        uint8_t guard_byte = memory[guard_ptr];
+        if (guard_byte != 0) {
+            emu->set_reg(0, 0); // already initialized
+            return;
+        }
+    }
+    emu->set_reg(0, 1); // needs initialization
+}
+
+static void bridge_cxa_guard_release(void* emu_ptr) {
+    // __cxa_guard_release(int64_t* guard_object) — mark as initialized
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t guard_ptr = (uint32_t)emu->get_reg(0);
+    if (guard_ptr && guard_ptr < 0xE0000000) {
+        memory[guard_ptr] = 1; // mark initialized
+    }
+}
+
+static void bridge_cxa_guard_abort(void* emu_ptr) {
+    // __cxa_guard_abort — just return (no-op in single-threaded)
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    (void)emu;
 }
 
 static void bridge_pthread_mutex(void* emu_ptr) {
@@ -5495,19 +5608,18 @@ static void bridge_pthread_create(void* emu_ptr) {
     uint64_t arg = emu->get_reg(3);
     
     // Write a fake thread ID if thread_ptr is valid
-    if (thread_ptr) {
+    if (thread_ptr && thread_ptr < 0xE0000000) {
         static uint64_t next_tid = 0x1001;
         *(uint64_t*)(memory + thread_ptr) = next_tid++;
     }
     
-    // DISCARD: Match ARM32 behavior — don't run the thread function at all.
-    // ARM32's pthread_create is a pure no-op (never runs thread functions)
-    // and works perfectly through the entire game. The deferred queue caused
-    // deadlocks: updateApp polls for results from threads that haven't run yet.
+    // Discard thread but log the address for analysis.
+    // Can't run inline (nested uc_emu_start), and deferred execution 
+    // runs too late (scene loader needs data immediately).
     if (start_routine != 0) {
-        std::cerr << "[Bridge64] pthread_create: DISCARDING thread func 0x" 
+        std::cerr << "[Thread64] pthread_create: DISCARD thread func 0x" 
                   << std::hex << start_routine << " arg=0x" << arg 
-                  << std::dec << " (ARM32-compatible)" << std::endl;
+                  << std::dec << std::endl;
     }
     
     emu->set_reg(0, 0); // success
@@ -5771,8 +5883,9 @@ void JniBridge64::init_standard_bridges() {
     register_handler("__cxa_atexit", bridge_cxa_atexit);
     register_handler("__cxa_finalize", bridge_cxa_atexit);
     register_handler("__stack_chk_fail", bridge_stack_chk_fail);
-    register_handler("__cxa_guard_acquire", bridge_cxa_guard);
-    register_handler("__cxa_guard_release", bridge_cxa_guard);
+    register_handler("__cxa_guard_acquire", bridge_cxa_guard_acquire);
+    register_handler("__cxa_guard_release", bridge_cxa_guard_release);
+    register_handler("__cxa_guard_abort", bridge_cxa_guard_abort);
     register_handler("__google_potentially_blocking_region_begin", bridge_google_blocking);
     register_handler("__google_potentially_blocking_region_end", bridge_google_blocking);
     register_handler("time", bridge_time);
@@ -5854,6 +5967,7 @@ void JniBridge64::init_standard_bridges() {
     register_handler("NewByteArray", bridge_NewByteArray);
     register_handler("GetByteArrayElements", bridge_GetByteArrayElements);
     register_handler("ReleaseByteArrayElements", bridge_ReleaseByteArrayElements);
+    register_handler("SetByteArrayRegion", bridge_SetByteArrayRegion);
     register_handler("GetIntArrayElements", bridge_GetIntArrayElements);
     register_handler("ReleaseIntArrayElements", bridge_ReleaseIntArrayElements);
     register_handler("SetIntArrayRegion", bridge_SetIntArrayRegion);

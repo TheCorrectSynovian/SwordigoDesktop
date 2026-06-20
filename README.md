@@ -1,4 +1,5 @@
 <div align="center">
+<img width="225" height="225" alt="image" src="https://github.com/user-attachments/assets/24f6bc9f-fb38-4618-b3e1-e7de5d3c67f8" />
 
 # ⚔️ Swordigo Desktop
 
@@ -18,7 +19,7 @@
 ---
 
 **Swordigo Desktop** is a native Linux port of the beloved mobile action-adventure platformer by Touch Foo. Rather than running through Android emulation layers, this project uses the **Swordigo Runtime Environment (SRE)** — a surgical ARM ELF loader powered by Unicorn Engine that executes the game's original native code directly, bridging it with host-native OpenGL, OpenAL, and SDL3 for a true desktop experience.
-
+<img width="1880" height="1056" alt="Screenshot From 2026-06-18 16-17-57 (Edited)" src="https://github.com/user-attachments/assets/e2b6f0f3-16c0-44ce-a4d8-7fba12b58d32" />
 v4.5r features **dual-architecture support** (ARM32 + ARM64), a revamped **launcher-integrated save editor**, and draw call batching for improved GPU performance.
 
 ---

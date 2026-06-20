@@ -104,6 +104,14 @@ static uint32_t g_fw_sendKeyChar = 0;       // Caver::FWKeyboard::SendKeyCharEve
 static uint32_t g_fw_handleMenuBtn = 0;     // Java_com_touchfoo_swordigo_Native_handleMenuButtonPress
 static bool g_typing_mode = false;          // F6 toggle: keyboard sends FWKeyboard events
 
+// Text input system — game calls startTextInput/stopTextInput via JNI,
+// we route SDL text events back to the game via textInputTextDidChange/textInputDidFinish
+static uint32_t g_fw_textInputDidChange = 0; // Java_com_touchfoo_swordigo_Native_textInputTextDidChange
+static uint32_t g_fw_textInputDidFinish = 0; // Java_com_touchfoo_swordigo_Native_textInputDidFinish
+extern bool g_text_input_active;             // Defined in jni_bridge.cpp
+extern std::string g_text_input_buffer;      // Defined in jni_bridge.cpp
+static bool g_text_input_was_active = false;  // Previous frame state for edge detection
+
 extern std::string g_save_dir;  // Defined in jni_bridge.cpp
 extern bool g_gl_hide_hud;      // Defined in jni_bridge.cpp — hides HUD draw calls
 extern int g_death_detected_countdown;  // Defined in jni_bridge.cpp
@@ -214,6 +222,37 @@ static void fw_send_char(uint32_t charCode, double timestamp) {
     call_fw_key_char(kb, charCode, timestamp);
 }
 
+// --- Text Input Callbacks ---
+// These call back into the game's native JNI functions to notify
+// it of text changes (like Android's EditText → Native bridge).
+
+// Guest memory region for text input strings (must be < 0x40000000 for resolve_jstring)
+static uint32_t g_text_input_str_addr = 0x3F000000;
+
+// Allocate a jstring in guest memory and return its guest address
+static uint32_t write_guest_jstring(uint8_t* memory, const std::string& text) {
+    // Write string at a fixed scratch area (text input is single-threaded)
+    uint32_t addr = g_text_input_str_addr;
+    size_t len = text.length();
+    if (len > 4000) len = 4000;  // Safety clamp
+    memcpy(memory + addr, text.c_str(), len + 1);
+    return addr;
+}
+
+// Call textInputTextDidChange(JNIEnv* env, jclass cls, jstring text)
+static void call_text_input_did_change(uint32_t env_ptr, const std::string& text) {
+    if (!g_fw_textInputDidChange) return;
+    uint8_t* memory = g_emulator->get_memory_base();
+    uint32_t str_addr = write_guest_jstring(memory, text);
+    g_emulator->call(g_fw_textInputDidChange, {env_ptr, 0, str_addr});
+}
+
+// Call textInputDidFinish(JNIEnv* env, jclass cls)
+static void call_text_input_did_finish(uint32_t env_ptr) {
+    if (!g_fw_textInputDidFinish) return;
+    g_emulator->call(g_fw_textInputDidFinish, {env_ptr, 0});
+}
+
 void init_all() {
     // CRITICAL: calloc zero-initializes via OS lazy-zeroing (demand-paged).
     // new uint8_t[N] leaves garbage that causes 0xFFFFFFFF... in uninitialized
@@ -311,6 +350,7 @@ uint32_t setup_jni_env(uint8_t* memory) {
     *(uint32_t*)(memory + vtable_ptr + 0x2EC) = g_bridge.get_address("GetIntArrayElements");
     *(uint32_t*)(memory + vtable_ptr + 0x300) = g_bridge.get_address("ReleaseByteArrayElements"); // Slot 192
     *(uint32_t*)(memory + vtable_ptr + 0x30C) = g_bridge.get_address("ReleaseIntArrayElements");
+    *(uint32_t*)(memory + vtable_ptr + 0x340) = g_bridge.get_address("SetByteArrayRegion");     // Slot 208
     *(uint32_t*)(memory + vtable_ptr + 0x34C) = g_bridge.get_address("SetIntArrayRegion");
     *(uint32_t*)(memory + vtable_ptr + 0x35C) = g_bridge.get_address("RegisterNatives");
     *(uint32_t*)(memory + vtable_ptr + 0x36C) = g_bridge.get_address("GetJavaVM");
@@ -383,6 +423,7 @@ uint64_t setup_jni_env_arm64(uint8_t* memory) {
     *(uint64_t*)(memory + vtable_ptr + 0x5D8) = g_bridge_64.get_address("GetIntArrayElements");
     *(uint64_t*)(memory + vtable_ptr + 0x600) = g_bridge_64.get_address("ReleaseByteArrayElements");
     *(uint64_t*)(memory + vtable_ptr + 0x618) = g_bridge_64.get_address("ReleaseIntArrayElements");
+    *(uint64_t*)(memory + vtable_ptr + 0x680) = g_bridge_64.get_address("SetByteArrayRegion"); // [208]
     *(uint64_t*)(memory + vtable_ptr + 0x698) = g_bridge_64.get_address("SetIntArrayRegion");
     *(uint64_t*)(memory + vtable_ptr + 0x6B8) = g_bridge_64.get_address("RegisterNatives");
     *(uint64_t*)(memory + vtable_ptr + 0x6D8) = g_bridge_64.get_address("GetJavaVM");
@@ -460,10 +501,17 @@ void load_and_boot() {
     g_fw_sendKeyUp      = g_loader->get_symbol_vaddr(&g_main_mod, "_ZN5Caver10FWKeyboard14SendKeyUpEventEjjd");
     g_fw_sendKeyChar    = g_loader->get_symbol_vaddr(&g_main_mod, "_ZN5Caver10FWKeyboard16SendKeyCharEventEjd");
     g_fw_handleMenuBtn  = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_handleMenuButtonPress");
+
+    // Resolve text input callback symbols (native JNI functions the game exports)
+    g_fw_textInputDidChange = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_textInputTextDidChange");
+    g_fw_textInputDidFinish = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_textInputDidFinish");
+
     std::cout << "[Boot] FWKeyboard API: sharedKeyboard=0x" << std::hex << g_fw_sharedKeyboard
               << " sendDown=0x" << g_fw_sendKeyDown << " sendUp=0x" << g_fw_sendKeyUp
               << " sendChar=0x" << g_fw_sendKeyChar << " menuBtn=0x" << g_fw_handleMenuBtn
               << std::dec << std::endl;
+    std::cout << "[Boot] TextInput API: didChange=0x" << std::hex << g_fw_textInputDidChange
+              << " didFinish=0x" << g_fw_textInputDidFinish << std::dec << std::endl;
 
     // Setup fake JNI structures in guest memory
     uint32_t env_ptr = setup_jni_env(g_guest_memory);
@@ -496,8 +544,8 @@ void load_and_boot() {
         g_emulator->call(setAssetMgr, {env_ptr, 0, 0x55555555}); 
     }
     if (googleSignInCompleted) {
-        std::cout << "[Boot] Calling googleSignInCompleted" << std::endl;
-        g_emulator->call(googleSignInCompleted, {env_ptr, 0, 0});
+        std::cout << "[Boot] Calling googleSignInCompleted(true) — enable snapshots" << std::endl;
+        g_emulator->call(googleSignInCompleted, {env_ptr, 0, 1}); // true = signed in
     }
     if (handleAppLaunch) {
         std::cout << "[Boot] Calling handleApplicationLaunch" << std::endl;
@@ -525,49 +573,64 @@ void load_and_boot() {
     }
 
     // ========================================================================
-    // Death screen fix: Patch ShowInterstitialAd + wire ad dismissed callback
-    // The game calls ShowInterstitialAd() on death, then waits for
-    // interstitialAdVisibilityChanged(false) to proceed with respawn.
-    // Without this fix, the game hangs forever on the death screen.
-    // (The Vita port only patches the ad call but NOT the callback — that's
-    // why they still have the bug.)
+    // Death screen fix: Make game think "Remove Ads" IAP is purchased
+    // The game checks IsNoAdsUnlockedCheck() before showing interstitial ads.
+    // If it returns true, the death flow skips ads entirely and respawns
+    // directly from the last checkpoint. No callbacks or snapshots needed.
     // ========================================================================
     {
-        // Patch ShowInterstitialAd to return immediately (Thumb: bx lr = 0x4770)
+        uint8_t* memory = g_emulator->get_memory_base();
+
+        // Patch IsNoAdsUnlockedCheck() -> return true (MOV R0, #1; BX LR)
+        uint32_t noAdsCheck = g_loader->get_symbol_vaddr(&g_main_mod,
+            "_ZN5Caver15StoreController20IsNoAdsUnlockedCheckEv");
+        if (noAdsCheck) {
+            uint32_t addr = noAdsCheck & ~1u;
+            *(uint16_t*)(memory + addr + 0) = 0x2001; // MOVS R0, #1
+            *(uint16_t*)(memory + addr + 2) = 0x4770; // BX LR
+            std::cout << "[Fix] Patched IsNoAdsUnlockedCheck at 0x" << std::hex << noAdsCheck
+                      << " -> return true (ad-free)" << std::dec << std::endl;
+        }
+
+        // Also patch IsProductPurchased -> return true (for any product check)
+        uint32_t isPurchased = g_loader->get_symbol_vaddr(&g_main_mod,
+            "_ZN5Caver23StoreController_Android18IsProductPurchasedERKSs");
+        if (isPurchased) {
+            uint32_t addr = isPurchased & ~1u;
+            *(uint16_t*)(memory + addr + 0) = 0x2001; // MOVS R0, #1
+            *(uint16_t*)(memory + addr + 2) = 0x4770; // BX LR
+            std::cout << "[Fix] Patched IsProductPurchased at 0x" << std::hex << isPurchased
+                      << " -> return true" << std::dec << std::endl;
+        }
+        // Patch ShowInterstitialAd to return immediately — prevents JNI ad code from
+        // corrupting game state. Death respawn is handled by execv restart fallback.
         uint32_t showAd = g_loader->get_symbol_vaddr(&g_main_mod,
             "_ZN5Caver24OnlineController_Android18ShowInterstitialAdERKSsif");
         if (showAd) {
-            // Address has Thumb bit set (odd) — strip it for memory access
             uint32_t addr = showAd & ~1u;
-            uint8_t* memory = g_emulator->get_memory_base();
-            // Write Thumb "bx lr" (0x4770) to make it return immediately
-            memory[addr + 0] = 0x70;  // bx lr (Thumb)
-            memory[addr + 1] = 0x47;
+            *(uint16_t*)(memory + addr + 0) = 0x4770; // BX LR
             std::cout << "[Fix] Patched ShowInterstitialAd at 0x" << std::hex << showAd
-                      << " -> bx lr (no-op)" << std::dec << std::endl;
+                      << " -> bx lr" << std::dec << std::endl;
         }
-
-        // Also patch AndroidShowInterstitialAd (wrapper)
         uint32_t showAd2 = g_loader->get_symbol_vaddr(&g_main_mod,
             "_ZN5Caver25AndroidShowInterstitialAdEd");
         if (showAd2) {
             uint32_t addr = showAd2 & ~1u;
-            uint8_t* memory = g_emulator->get_memory_base();
-            memory[addr + 0] = 0x70;
-            memory[addr + 1] = 0x47;
+            *(uint16_t*)(memory + addr + 0) = 0x4770; // BX LR
             std::cout << "[Fix] Patched AndroidShowInterstitialAd at 0x" << std::hex << showAd2
                       << " -> bx lr" << std::dec << std::endl;
         }
+
+        // NOTE: BLX NOP approach REVERTED — NOPing ARM-mode function calls breaks
+        // textures because those functions compute transform data that other code
+        // reads via VLDR. The functions MUST run. The root cause is Unicorn's 
+        // ARM-mode VFP emulation producing NaN. Fix must be at the VFP level.
+        // The glLoadMatrixf NaN sanitizer handles the rendering side.
     }
 
-    // Resolve the ad dismissed callback — called reactively in game loop when death is detected
+    // Resolve adVisibilityChanged (kept for death detection countdown fallback)
     uint32_t adVisibilityChanged = g_loader->get_symbol_vaddr(&g_main_mod,
         "Java_com_touchfoo_swordigo_Native_interstitialAdVisibilityChanged");
-    if (adVisibilityChanged) {
-        std::cout << "[Fix] Resolved interstitialAdVisibilityChanged at 0x"
-                  << std::hex << adVisibilityChanged << std::dec
-                  << " — will fire reactively on death detection" << std::endl;
-    }
 
     // 5. Game Loop
     uint32_t updateApp = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_updateApplication");
@@ -575,10 +638,10 @@ void load_and_boot() {
     uint32_t handleTouchEvent = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_handleTouchEvent");
     uint32_t snapshotLoaded = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_snapshotLoaded");
     
-    // Tell the game that Google Sign-In failed (services not available)
+    // Tell the game that Google Sign-In succeeded so snapshot system is enabled
     if (googleSignInCompleted) {
-        std::cout << "[Boot] Calling googleSignInCompleted(false) — no Google Play services" << std::endl;
-        g_emulator->call(googleSignInCompleted, {env_ptr, 0, 0}); // (env, this, false)
+        std::cout << "[Boot] Calling googleSignInCompleted(true) — enable snapshots" << std::endl;
+        g_emulator->call(googleSignInCompleted, {env_ptr, 0, 1}); // (env, this, true)
     }
 
     // NOTE: We used to call handleMenuButtonPress here to hide on-screen controls,
@@ -710,33 +773,21 @@ void load_and_boot() {
                     mod_toast("Stepped 1 frame", 0.8f);
                 }
             }
-            
-            // --- Death screen workaround: auto-restart on gameover ---
-            // The game freezes on death because ShowInterstitialAd waits for
-            // a callback that can't be properly delivered. Even the Vita port
-            // couldn't fix this. Workaround: detect death via gameover music,
-            // wait ~8s for the death animation, then restart the process.
-            // The save system auto-checkpoints, so the player resumes from
-            // their last checkpoint after restart.
+            // --- Death recovery: execv restart after ~3s ---
+            // The death state machine is tied to Android's ad system and can't be
+            // replicated (same issue as PS Vita port). Restart the process cleanly.
             if (g_death_detected_countdown > 0) {
                 g_death_detected_countdown--;
                 if (g_death_detected_countdown == 0) {
-                    std::cout << "\n[Fix] Death screen detected — auto-restarting engine..." << std::endl;
-                    std::cout << "[Fix] You will resume from your last checkpoint." << std::endl;
-                    
-                    // Clean up SDL before restart
+                    std::cout << "\n[Fix] Death timeout — restarting from checkpoint..." << std::endl;
                     SDL_Quit();
-                    
-                    // Re-exec ourselves using /proc/self/exe
-                    // Pass --lib to skip the launcher on restart
                     extern std::string g_lib_name;
                     extern char** g_saved_argv;
                     extern int g_saved_argc;
-                    std::vector<std::string> arg_strs;  // Keep strings alive
+                    std::vector<std::string> arg_strs;
                     std::vector<char*> args;
                     for (int i = 0; i < g_saved_argc; i++) {
                         std::string a = g_saved_argv[i];
-                        // Skip old --lib/--assets and their values
                         if ((a == "--lib" || a == "--assets") && i + 1 < g_saved_argc) { i++; continue; }
                         arg_strs.push_back(a);
                     }
@@ -746,16 +797,7 @@ void load_and_boot() {
                     arg_strs.push_back(g_assets_dir);
                     for (auto& s : arg_strs) args.push_back(&s[0]);
                     args.push_back(nullptr);
-#ifdef _WIN32
-                    char exe_path[MAX_PATH];
-                    GetModuleFileNameA(NULL, exe_path, MAX_PATH);
-                    _spawnv(_P_NOWAIT, exe_path, args.data());
-#else
                     execv("/proc/self/exe", args.data());
-#endif
-                    
-                    // If restart fails, just exit
-                    std::cerr << "[Fix] Restart failed, please start manually." << std::endl;
                     exit(1);
                 }
             }
@@ -1014,6 +1056,16 @@ void load_and_boot() {
                     g_display_ptr->swap();
                 }
                 
+                // Auto-toggle SDL text input when game requests it
+                if (g_text_input_active && !g_text_input_was_active) {
+                    SDL_StartTextInput(g_display_ptr->get_window());
+                    std::cout << "[TextInput] SDL text input enabled" << std::endl;
+                } else if (!g_text_input_active && g_text_input_was_active) {
+                    SDL_StopTextInput(g_display_ptr->get_window());
+                    std::cout << "[TextInput] SDL text input disabled" << std::endl;
+                }
+                g_text_input_was_active = g_text_input_active;
+
                 // Poll and process SDL window and input events
                 SDL_Event event;
                 while (SDL_PollEvent(&event)) {
@@ -1290,6 +1342,36 @@ void load_and_boot() {
                             bool is_down = (event.type == SDL_EVENT_KEY_DOWN);
                             int scancode = event.key.scancode;
                             
+                            // ---- TEXT INPUT MODE: intercept keys when game requests text input ----
+                            if (g_text_input_active && is_down) {
+                                if (event.key.key == SDLK_RETURN) {
+                                    std::cout << "[TextInput] Enter — confirming \"" << g_text_input_buffer << "\"" << std::endl;
+                                    call_text_input_did_change(env_ptr, g_text_input_buffer);
+                                    call_text_input_did_finish(env_ptr);
+                                    g_text_input_active = false;
+                                    g_text_input_buffer.clear();
+                                    break;
+                                } else if (event.key.key == SDLK_ESCAPE) {
+                                    std::cout << "[TextInput] Escape — cancelling" << std::endl;
+                                    g_text_input_buffer.clear();
+                                    call_text_input_did_change(env_ptr, "");
+                                    call_text_input_did_finish(env_ptr);
+                                    g_text_input_active = false;
+                                    break;
+                                } else if (event.key.key == SDLK_BACKSPACE) {
+                                    if (!g_text_input_buffer.empty()) {
+                                        g_text_input_buffer.pop_back();
+                                        call_text_input_did_change(env_ptr, g_text_input_buffer);
+                                        std::cout << "[TextInput] Backspace → \"" << g_text_input_buffer << "\"" << std::endl;
+                                    }
+                                    break;
+                                }
+                                // Other keys: fall through to typing mode or normal handling
+                                // (text characters come via SDL_EVENT_TEXT_INPUT, not KEY_DOWN)
+                                break; // Eat all other key_down events during text input
+                            }
+                            if (g_text_input_active && !is_down) break; // Eat key-up too
+
                             // ---- TYPING MODE: route through FWKeyboard API ----
                             if (g_typing_mode && g_fw_sendKeyDown && g_fw_sendKeyUp) {
                                 // Map SDL keysym to FWKeyboard key codes
@@ -1310,6 +1392,7 @@ void load_and_boot() {
                                     case SDLK_F10:        fw_key = 0x5d; break;
                                     default: break;
                                 }
+
                                 if (fw_key != 0) {
                                     uint32_t kb = get_fw_keyboard();
                                     if (kb) {
@@ -1377,11 +1460,16 @@ void load_and_boot() {
                             }
                             break;
                         }
-                        // --- Text input events (typing mode F7) ---
+                        // --- Text input events ---
                         case SDL_EVENT_TEXT_INPUT: {
-                            if (g_typing_mode && g_fw_sendKeyChar) {
-                                // Send each character through FWKeyboard::SendKeyCharEvent
-                                const char* text = event.text.text;
+                            const char* text = event.text.text;
+                            if (g_text_input_active) {
+                                // Game-driven text input: append to buffer and notify game
+                                g_text_input_buffer += text;
+                                call_text_input_did_change(env_ptr, g_text_input_buffer);
+                                std::cout << "[TextInput] \"" << g_text_input_buffer << "\"" << std::endl;
+                            } else if (g_typing_mode && g_fw_sendKeyChar) {
+                                // Manual typing mode (F7): send through FWKeyboard
                                 for (int ci = 0; text[ci] != '\0'; ci++) {
                                     uint32_t ch = (uint32_t)(unsigned char)text[ci];
                                     fw_send_char(ch, accumulated_time);
@@ -1604,114 +1692,116 @@ void load_and_boot_arm64() {
     g_emulator_64->set_bridge(&g_bridge_64);
 
     // --- Runtime binary patches (ARM64) ---
-    // Patch code integrity checks that fail in emulation
+    // NO hardcoded address patches — they break when switching binary versions.
+    // Only version-independent patches are applied:
+    //   1. __cxa_guard_* (symbol lookup — works for any binary)
+    //   2. STXR patcher (scans .text — works for any binary)
+    //   3. .text protection (uses ELF loader text_size — works for any binary)
+    //   4. Generic abort NOP (scans for bl abort patterns)
     {
-        uint32_t NOP = 0xD503201F;  // ARM64 NOP instruction
-        
-        // 1. NOP the "bl abort" at 0x5812e0 (Lua compiler assert)
-        //    Original: 0x5812e0: bl abort  →  triggered when parser returns non-zero
-        *(uint32_t*)(g_guest_memory + load_addr + 0x5812e0) = NOP;
-        
-        // 2. NOP the code validation "b.ne" at 0x580728
-        //    Original: checks if code bytes match magic1 (0xd2801168)
-        *(uint32_t*)(g_guest_memory + load_addr + 0x580728) = NOP;
-        
-        // 3. NOP the code validation "b.ne" at 0x580740
-        //    Original: checks if code bytes match magic2 (0xd4000001)  
-        *(uint32_t*)(g_guest_memory + load_addr + 0x580740) = NOP;
-        
-        // 4. NOP the "bl abort" at 0x5702a4 (fwrite assert path)
-        *(uint32_t*)(g_guest_memory + load_addr + 0x5702a4) = NOP;
-        
-        // 5. NOP the load instruction at 0x580720 that dereferences invalid 
-        //    64-bit pointers (0xffffffff...) during scene processing.
-        //    This happens because pointer arithmetic overflows in our flat 
-        //    32-bit memory layout vs Android's 64-bit address space.
-        *(uint32_t*)(g_guest_memory + load_addr + 0x580720) = NOP;
-        
-        std::cout << "[Patch64] Applied 5 runtime patches (integrity checks bypassed)" << std::endl;
+        std::cerr << "\n======== [Patch64] APPLYING BINARY PATCHES ========" << std::endl;
+        std::cout << "[Patch64] Version-independent patches starting..." << std::endl;
     }
 
-    // --- POD block parsing loop fix ---
-    // At guest 0x15807d0 (binary offset 0x5807d0): ADD X0, X0, X2
-    // This advances through a linked block structure. When the data is 
-    // corrupt/uninitialized (size=0 at [X0+4]), the loop never advances.
-    // Hook this instruction to ensure minimum advance of 8 bytes (header size).
+    // =========================================================================
+    // STXR/STLXR → STR patcher (eliminate atomic CAS spin loops)
+    // =========================================================================
+    // ARM64 uses LDXR/STXR for ALL atomics: shared_ptr refcount, mutexes, etc.
+    // In single-threaded Unicorn, STXR may spin (exclusive monitor unreliable).
+    // Fix: replace every STXR with STR (always succeeds) and fix the retry branch.
     {
-        static auto hook_pod_advance = [](uc_engine* uc, uint64_t addr, 
-                                          uint32_t size, void* data) {
-            uint64_t x2;
-            uc_reg_read(uc, UC_ARM64_REG_X2, &x2);
-            if ((x2 & 0xFFFFFFFF) == 0) {
-                x2 = 8; // minimum advance = sizeof(tag) + sizeof(size)
-                uc_reg_write(uc, UC_ARM64_REG_X2, &x2);
+        uint32_t NOP = 0xD503201F;
+        std::cout << "[Patch64] STXR scan: text_base=0x" << std::hex << g_main_mod_64.text_base
+                  << " text_size=0x" << g_main_mod_64.text_size 
+                  << " (" << std::dec << (g_main_mod_64.text_size / 4) << " insns)" << std::endl;
+        uint32_t* code = (uint32_t*)(g_guest_memory + g_main_mod_64.text_base);
+        int num_insns = g_main_mod_64.text_size / 4;
+        int patched = 0;
+        int cbz_fixed = 0, cbnz_fixed = 0;
+        
+        for (int i = 0; i < num_insns; i++) {
+            uint32_t insn = code[i];
+            
+            // Match STXR/STLXR/STXRB/STLXRB/STXRH/STLXRH:
+            // Fixed bits: [29:24]=001000, [22]=0(store), [14:10]=11111
+            if ((insn & 0x3FE07C00) == 0x08007C00) {
+                uint32_t size = (insn >> 30) & 3;
+                uint32_t Rt = insn & 0x1F;
+                uint32_t Rn = (insn >> 5) & 0x1F;
+                uint32_t Rs = (insn >> 16) & 0x1F;
+                
+                // Replace with size-appropriate STR (unsigned offset, imm=0)
+                uint32_t str_insn;
+                switch (size) {
+                    case 0: str_insn = 0x39000000; break;  // STRB
+                    case 1: str_insn = 0x79000000; break;  // STRH
+                    case 2: str_insn = 0xB9000000; break;  // STR W
+                    case 3: str_insn = 0xF9000000; break;  // STR X
+                    default: continue;
+                }
+                code[i] = str_insn | (Rn << 5) | Rt;
+                
+                // Fix the following branch that checks the STXR status register
+                if (i + 1 < num_insns) {
+                    uint32_t next = code[i + 1];
+                    // CBNZ Rs, retry → NOP (don't retry, store always succeeds)
+                    if ((next & 0xFF000000) == 0x35000000 && (next & 0x1F) == Rs) {
+                        code[i + 1] = NOP;
+                        cbnz_fixed++;
+                    }
+                    // CBZ Rs, success → unconditional B (always branch to success)
+                    else if ((next & 0xFF000000) == 0x34000000 && (next & 0x1F) == Rs) {
+                        int32_t imm19 = (int32_t)((next >> 5) & 0x7FFFF);
+                        if (imm19 & 0x40000) imm19 |= (int32_t)0xFFF80000;
+                        code[i + 1] = 0x14000000 | (imm19 & 0x3FFFFFF);
+                        cbz_fixed++;
+                    }
+                }
+                patched++;
             }
-        };
-        uint64_t hook_addr = load_addr + 0x5807d0;
-        uc_hook pod_hook;
-        uc_hook_add((uc_engine*)g_emulator_64->get_uc_handle(), &pod_hook, 
-                    UC_HOOK_CODE, (void*)(+hook_pod_advance), nullptr, 
-                    hook_addr, hook_addr);
-        std::cout << "[Patch64] POD loop advance hook at 0x" << std::hex 
-                  << hook_addr << std::dec << std::endl;
+        }
+        std::cout << "[Patch64] STXR patcher: " << patched << " stores, "
+                  << cbnz_fixed << " CBNZ→NOP, " << cbz_fixed << " CBZ→B" << std::endl;
     }
-    
-    // --- Entity inner loop break ---
-    // The entity processing has an inner loop (0x15811B8 → 0x158120c/0x1581230 → back)
-    // that iterates over entity sub-items. When entity data pointers are 0 (because
-    // the entity data pool at [X20+0x310] is NULL/zeroed), the inner loop reads
-    // all zeros and never exits. Hook the loop-back branches to count iterations
-    // and break out after a reasonable limit.
+
+    // =========================================================================
+    // PROTECT .text section from corruption
+    // =========================================================================
     {
-        // Patch the unconditional B at 0x158120c (B 0x15811B8) and 0x1581230 (B 0x15811B8)
-        // to jump to the entity-advance code at 0x1581234 instead.
-        // This makes each entity's inner loop run exactly once, then advance.
-        // Original: 17ffffeb (B -0x54)  →  Changed to: 1400000a (B +0x28 → 0x1581234)
-        // Original: 17ffffe2 (B -0x78)  →  Changed to: 14000001 (B +0x4 → 0x1581234)
-        
-        // Actually, let's compute the correct branch offsets:
-        // From 0x158120c to 0x1581234: offset = (0x1581234 - 0x158120c) / 4 = 0x28/4 = 10
-        // Encoding: 0x14000000 | 10 = 0x1400000a
-        *(uint32_t*)(g_guest_memory + load_addr + 0x58120c) = 0x1400000a;
-        
-        // From 0x1581230 to 0x1581234: offset = (0x1581234 - 0x1581230) / 4 = 0x4/4 = 1
-        // Encoding: 0x14000000 | 1 = 0x14000001
-        *(uint32_t*)(g_guest_memory + load_addr + 0x581230) = 0x14000001;
-        
-        std::cout << "[Patch64] Entity inner loop patched (single-pass per entity)" << std::endl;
+        uint64_t text_start = g_main_mod_64.text_base;
+        uint64_t text_size_rounded = (g_main_mod_64.text_size + 0xFFF) & ~0xFFF;
+        g_emulator_64->protect_memory(text_start, text_size_rounded, UC_PROT_READ | UC_PROT_EXEC);
     }
-    
-    // --- Entity setup function bypass ---
-    // The BL at 0x580708 calls 0x1583248 (entity_setup) which searches a
-    // linked list at global 0x16FE598 (BSS). When the list is empty (0),
-    // the function loops infinitely. Replace BL with MOV X0, XZR (= return 0).
-    // The subsequent CBNZ at 0x580710 checks X0; if 0, falls through
-    // to the init loop path instead of the "found" path at 0x580810.
+
+    // --- Patch __cxa_guard_acquire/release/abort in the binary ---
+    // Uses symbol lookup — works for any binary version.
     {
-        // MOV X0, XZR = 0xAA1F03E0
-        *(uint32_t*)(g_guest_memory + load_addr + 0x580708) = 0xAA1F03E0;
-        std::cout << "[Patch64] Entity setup BL at 0x1580708 → MOV X0, XZR" << std::endl;
-    }
-    
-    // --- Entity list global watchpoint ---
-    // Monitor writes to the entity list head at 0x16FE598 (BSS).
-    // If anything writes here, it means entity creation code ran.
-    {
-        static auto hook_entity_write = [](uc_engine* uc, uc_mem_type type,
-                                           uint64_t addr, int size, 
-                                           int64_t value, void* data) {
-            uint64_t pc;
-            uc_reg_read(uc, UC_ARM64_REG_PC, &pc);
-            std::cerr << "[WATCHPOINT] Write to entity list global 0x16FE598: "
-                      << "value=0x" << std::hex << value 
-                      << " size=" << std::dec << size
-                      << " PC=0x" << std::hex << pc << std::dec << std::endl;
-        };
-        uc_hook wp_hook;
-        uc_hook_add((uc_engine*)g_emulator_64->get_uc_handle(), &wp_hook, 
-                    UC_HOOK_MEM_WRITE, (void*)(+hook_entity_write), nullptr, 
-                    0x16FE590, 0x16FE5A0);
-        std::cout << "[Patch64] Entity list watchpoint at 0x16FE590-0x16FE5A0" << std::endl;
+        uint64_t guard_acq = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "__cxa_guard_acquire");
+        uint64_t guard_rel = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "__cxa_guard_release");
+        uint64_t guard_abt = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "__cxa_guard_abort");
+        
+        if (guard_acq) {
+            *(uint32_t*)(g_guest_memory + guard_acq + 0)  = 0x39400001; // LDRB W1, [X0]
+            *(uint32_t*)(g_guest_memory + guard_acq + 4)  = 0x35000061; // CBNZ W1, #12
+            *(uint32_t*)(g_guest_memory + guard_acq + 8)  = 0x52800020; // MOV W0, #1
+            *(uint32_t*)(g_guest_memory + guard_acq + 12) = 0xD65F03C0; // RET
+            *(uint32_t*)(g_guest_memory + guard_acq + 16) = 0x52800000; // MOV W0, #0
+            *(uint32_t*)(g_guest_memory + guard_acq + 20) = 0xD65F03C0; // RET
+            std::cout << "[Patch64] __cxa_guard_acquire at 0x" << std::hex << guard_acq 
+                      << " → proper guard check" << std::dec << std::endl;
+        }
+        if (guard_rel) {
+            *(uint32_t*)(g_guest_memory + guard_rel + 0) = 0x52800021; // MOV W1, #1
+            *(uint32_t*)(g_guest_memory + guard_rel + 4) = 0x39000001; // STRB W1, [X0]
+            *(uint32_t*)(g_guest_memory + guard_rel + 8) = 0xD65F03C0; // RET
+            std::cout << "[Patch64] __cxa_guard_release at 0x" << std::hex << guard_rel 
+                      << " → set guard + RET" << std::dec << std::endl;
+        }
+        if (guard_abt) {
+            *(uint32_t*)(g_guest_memory + guard_abt) = 0xD65F03C0; // RET
+            std::cout << "[Patch64] __cxa_guard_abort at 0x" << std::hex << guard_abt 
+                      << " → RET" << std::dec << std::endl;
+        }
     }
 
     // Debug: Check what's at the crash address 0x270
@@ -1732,6 +1822,8 @@ void load_and_boot_arm64() {
                       << std::dec << std::endl;
         }
     }
+
+    // (OLD duplicate STXR patcher and .text protection REMOVED — new version above)
 
     // Run dynamic initializers (.init_array) — entries are uint64_t (8 bytes each)
     if (g_main_mod_64.init_array_vaddr != 0 && g_main_mod_64.init_array_size > 0) {
@@ -1769,10 +1861,17 @@ void load_and_boot_arm64() {
     g_fw_sendKeyUp      = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "_ZN5Caver10FWKeyboard14SendKeyUpEventEjjd");
     g_fw_sendKeyChar    = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "_ZN5Caver10FWKeyboard16SendKeyCharEventEjd");
     g_fw_handleMenuBtn  = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_handleMenuButtonPress");
+
+    // Resolve text input callback symbols (native JNI functions the game exports)
+    g_fw_textInputDidChange = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_textInputTextDidChange");
+    g_fw_textInputDidFinish = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_textInputDidFinish");
+
     std::cout << "[Boot64] FWKeyboard API: sharedKeyboard=0x" << std::hex << g_fw_sharedKeyboard
               << " sendDown=0x" << g_fw_sendKeyDown << " sendUp=0x" << g_fw_sendKeyUp
               << " sendChar=0x" << g_fw_sendKeyChar << " menuBtn=0x" << g_fw_handleMenuBtn
               << std::dec << std::endl;
+    std::cout << "[Boot64] TextInput API: didChange=0x" << std::hex << g_fw_textInputDidChange
+              << " didFinish=0x" << g_fw_textInputDidFinish << std::dec << std::endl;
 
     // Setup fake JNI structures in guest memory (64-bit)
     uint64_t env_ptr = setup_jni_env_arm64(g_guest_memory);
@@ -1806,8 +1905,8 @@ void load_and_boot_arm64() {
         g_emulator_64->call(setAssetMgr, {env_ptr, 0, 0x55555555});
     }
     if (googleSignInCompleted) {
-        std::cout << "[Boot64] Calling googleSignInCompleted" << std::endl;
-        g_emulator_64->call(googleSignInCompleted, {env_ptr, 0, 0});
+        std::cout << "[Boot64] Calling googleSignInCompleted(true) — enable snapshots" << std::endl;
+        g_emulator_64->call(googleSignInCompleted, {env_ptr, 0, 1}); // true = signed in
     }
     if (handleAppLaunch) {
         std::cout << "[Boot64] Calling handleApplicationLaunch" << std::endl;
@@ -1837,41 +1936,58 @@ void load_and_boot_arm64() {
     std::cout.flush();
 
     // ========================================================================
-    // Death screen fix: Patch ShowInterstitialAd + wire ad dismissed callback
-    // ARM64 version: use 'ret' (0xD65F03C0) instead of Thumb 'bx lr' (0x4770)
-    // No Thumb bit stripping needed — ARM64 has no Thumb mode
+    // Death screen fix: Make game think "Remove Ads" IAP is purchased (ARM64)
     // ========================================================================
     {
+        uint8_t* memory = g_emulator_64->get_memory_base();
+
+        // Patch IsNoAdsUnlockedCheck() -> return true (MOV W0, #1; RET)
+        uint64_t noAdsCheck = g_loader_64->get_symbol_vaddr(&g_main_mod_64,
+            "_ZN5Caver15StoreController20IsNoAdsUnlockedCheckEv");
+        if (noAdsCheck) {
+            *(uint32_t*)(memory + noAdsCheck + 0) = 0x52800020; // MOV W0, #1
+            *(uint32_t*)(memory + noAdsCheck + 4) = 0xD65F03C0; // RET
+            std::cout << "[Fix64] Patched IsNoAdsUnlockedCheck at 0x" << std::hex << noAdsCheck
+                      << " -> return true (ad-free)" << std::dec << std::endl;
+        }
+
+        // Also patch IsProductPurchased -> return true
+        uint64_t isPurchased = g_loader_64->get_symbol_vaddr(&g_main_mod_64,
+            "_ZN5Caver23StoreController_Android18IsProductPurchasedERKSs");
+        if (!isPurchased) {
+            // Try the base class version
+            isPurchased = g_loader_64->get_symbol_vaddr(&g_main_mod_64,
+                "_ZN5Caver15StoreController18IsProductPurchasedERKSs");
+        }
+        if (isPurchased) {
+            *(uint32_t*)(memory + isPurchased + 0) = 0x52800020; // MOV W0, #1
+            *(uint32_t*)(memory + isPurchased + 4) = 0xD65F03C0; // RET
+            std::cout << "[Fix64] Patched IsProductPurchased at 0x" << std::hex << isPurchased
+                      << " -> return true" << std::dec << std::endl;
+        }
+
+        // Patch ShowInterstitialAd to return immediately — the death state machine
+        // can't be replicated on non-Android (same issue as PS Vita port).
+        // Death recovery uses execv process restart.
         uint64_t showAd = g_loader_64->get_symbol_vaddr(&g_main_mod_64,
             "_ZN5Caver24OnlineController_Android18ShowInterstitialAdERKSsif");
         if (showAd) {
-            uint8_t* memory = g_emulator_64->get_memory_base();
-            // Write ARM64 'ret' instruction (0xD65F03C0) — 4 bytes, little-endian
-            *(uint32_t*)(memory + showAd) = 0xD65F03C0;
+            *(uint32_t*)(memory + showAd) = 0xD65F03C0; // RET
             std::cout << "[Fix64] Patched ShowInterstitialAd at 0x" << std::hex << showAd
-                      << " -> ret (no-op)" << std::dec << std::endl;
+                      << " -> ret" << std::dec << std::endl;
         }
-
         uint64_t showAd2 = g_loader_64->get_symbol_vaddr(&g_main_mod_64,
             "_ZN5Caver25AndroidShowInterstitialAdEd");
         if (showAd2) {
-            uint8_t* memory = g_emulator_64->get_memory_base();
-            *(uint32_t*)(memory + showAd2) = 0xD65F03C0;
+            *(uint32_t*)(memory + showAd2) = 0xD65F03C0; // RET
             std::cout << "[Fix64] Patched AndroidShowInterstitialAd at 0x" << std::hex << showAd2
                       << " -> ret" << std::dec << std::endl;
         }
     }
-    std::cout << "[Diag64] Post-ad-patches" << std::endl;
-    std::cout.flush();
 
-    // Resolve the ad dismissed callback — called reactively in game loop when death is detected
+    // Resolve adVisibilityChanged (kept for death detection countdown fallback)
     uint64_t adVisibilityChanged = g_loader_64->get_symbol_vaddr(&g_main_mod_64,
         "Java_com_touchfoo_swordigo_Native_interstitialAdVisibilityChanged");
-    if (adVisibilityChanged) {
-        std::cout << "[Fix64] Resolved interstitialAdVisibilityChanged at 0x"
-                  << std::hex << adVisibilityChanged << std::dec
-                  << " — will fire reactively on death detection" << std::endl;
-    }
 
     // 5. Game Loop
     uint64_t updateApp = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_updateApplication");
@@ -1879,11 +1995,11 @@ void load_and_boot_arm64() {
     uint64_t handleTouchEvent = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_handleTouchEvent");
     uint64_t snapshotLoaded = g_loader_64->get_symbol_vaddr(&g_main_mod_64, "Java_com_touchfoo_swordigo_Native_snapshotLoaded");
     
-    // Tell the game that Google Sign-In failed (services not available)
+    // Tell the game Google Sign-In succeeded so snapshot system is enabled
     if (googleSignInCompleted) {
-        std::cout << "[Boot64] Calling googleSignInCompleted(false) — no Google Play services" << std::endl;
+        std::cout << "[Boot64] Calling googleSignInCompleted(true) — enable snapshots" << std::endl;
         std::cout.flush();
-        g_emulator_64->call(googleSignInCompleted, {env_ptr, 0, 0});
+        g_emulator_64->call(googleSignInCompleted, {env_ptr, 0, 1}); // true = signed in
         std::cout << "[Diag64] Post-googleSignInCompleted" << std::endl;
         std::cout.flush();
     }
@@ -2030,13 +2146,14 @@ void load_and_boot_arm64() {
                     mod_toast("Stepped 1 frame", 0.8f);
                 }
             }
-            
-            // Death screen workaround
+            // --- Death recovery: execv restart after ~3s ---
+            // The death state machine is tied to Android's ad system and can't be
+            // replicated (same issue as PS Vita port). Restart the process cleanly;
+            // the game reloads from the last .gplayer checkpoint.
             if (g_death_detected_countdown > 0) {
                 g_death_detected_countdown--;
                 if (g_death_detected_countdown == 0) {
-                    std::cout << "\n[Fix64] Death screen detected — auto-restarting engine..." << std::endl;
-                    std::cout << "[Fix64] You will resume from your last checkpoint." << std::endl;
+                    std::cout << "\n[Fix64] Death timeout — restarting from checkpoint..." << std::endl;
                     SDL_Quit();
                     extern std::string g_lib_name;
                     extern char** g_saved_argv;
@@ -2054,14 +2171,7 @@ void load_and_boot_arm64() {
                     arg_strs.push_back(g_assets_dir);
                     for (auto& s : arg_strs) args.push_back(&s[0]);
                     args.push_back(nullptr);
-#ifdef _WIN32
-                    char exe_path[MAX_PATH];
-                    GetModuleFileNameA(NULL, exe_path, MAX_PATH);
-                    _spawnv(_P_NOWAIT, exe_path, args.data());
-#else
                     execv("/proc/self/exe", args.data());
-#endif
-                    std::cerr << "[Fix64] Restart failed, please start manually." << std::endl;
                     exit(1);
                 }
             }
@@ -2281,7 +2391,28 @@ void load_and_boot_arm64() {
                 {
                     g_display_ptr->swap();
                 }
-                
+                // Auto-toggle SDL text input when game requests it
+                if (g_text_input_active && !g_text_input_was_active) {
+                    SDL_StartTextInput(g_display_ptr->get_window());
+                    std::cout << "[TextInput] SDL text input enabled" << std::endl;
+                } else if (!g_text_input_active && g_text_input_was_active) {
+                    SDL_StopTextInput(g_display_ptr->get_window());
+                    std::cout << "[TextInput] SDL text input disabled" << std::endl;
+                }
+                g_text_input_was_active = g_text_input_active;
+
+                // ARM64 text input callback helpers (lambdas capture env_ptr and g_emulator_64)
+                auto call_text_change_64 = [&](const std::string& text) {
+                    if (!g_fw_textInputDidChange) return;
+                    uint8_t* memory = g_emulator_64->get_memory_base();
+                    uint32_t str_addr = write_guest_jstring(memory, text);
+                    g_emulator_64->call(g_fw_textInputDidChange, {env_ptr, 0, (uint64_t)str_addr});
+                };
+                auto call_text_finish_64 = [&]() {
+                    if (!g_fw_textInputDidFinish) return;
+                    g_emulator_64->call(g_fw_textInputDidFinish, {env_ptr, 0});
+                };
+
                 SDL_Event event;
                 while (SDL_PollEvent(&event)) {
                     switch (event.type) {
@@ -2377,6 +2508,43 @@ void load_and_boot_arm64() {
                         case SDL_EVENT_KEY_UP: {
                             bool is_down = (event.type == SDL_EVENT_KEY_DOWN);
                             int scancode = event.key.scancode;
+
+                            // ---- TEXT INPUT MODE: intercept keys when game requests text input ----
+                            if (g_text_input_active && is_down) {
+                                if (event.key.key == SDLK_RETURN) {
+                                    std::cout << "[TextInput] Enter — confirming \"" << g_text_input_buffer << "\"" << std::endl;
+                                    call_text_change_64(g_text_input_buffer);
+                                    call_text_finish_64();
+                                    g_text_input_active = false;
+                                    g_text_input_buffer.clear();
+                                    break;
+                                } else if (event.key.key == SDLK_ESCAPE) {
+                                    std::cout << "[TextInput] Escape — cancelling" << std::endl;
+                                    g_text_input_buffer.clear();
+                                    call_text_change_64("");
+                                    call_text_finish_64();
+                                    g_text_input_active = false;
+                                    break;
+                                } else if (event.key.key == SDLK_BACKSPACE) {
+                                    if (!g_text_input_buffer.empty()) {
+                                        g_text_input_buffer.pop_back();
+                                        call_text_change_64(g_text_input_buffer);
+                                        std::cout << "[TextInput] Backspace → \"" << g_text_input_buffer << "\"" << std::endl;
+                                    }
+                                    break;
+                                }
+                                break; // Eat all other key_down events during text input
+                            }
+                            if (g_text_input_active && !is_down) break; // Eat key-up too
+
+                            // ---- TYPING MODE: route through FWKeyboard + text buffer ----
+                            if (g_typing_mode && is_down) {
+                                break;
+                            }
+                            if (g_typing_mode && !is_down) {
+                                break;
+                            }
+
                             // Camera + arrow keys
                             switch (event.key.key) {
                                 case SDLK_LEFT:     arrow_left   = is_down; break;
@@ -2388,6 +2556,16 @@ void load_and_boot_arm64() {
                                 case SDLK_HOME:
                                     if (is_down) cam_reset();
                                     break;
+                            }
+                            break;
+                        }
+                        // --- Text input events ---
+                        case SDL_EVENT_TEXT_INPUT: {
+                            const char* text = event.text.text;
+                            if (g_text_input_active) {
+                                g_text_input_buffer += text;
+                                call_text_change_64(g_text_input_buffer);
+                                std::cout << "[TextInput] \"" << g_text_input_buffer << "\"" << std::endl;
                             }
                             break;
                         }
