@@ -83,6 +83,9 @@ public:
     }
     
     bool has_pending_threads() const { return !pending_threads.empty(); }
+    
+    // Change Unicorn memory protection for a region
+    void protect_memory(uint64_t addr, uint64_t size, uint32_t perms);
 
 private:
     uint8_t* memory;

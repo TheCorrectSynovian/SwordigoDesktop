@@ -26,6 +26,7 @@ public:
     void handle_bridge_call(uint32_t address);
     uint32_t get_bridge_base();
     uint8_t* get_memory_base() { return memory; }
+    void* get_uc_handle() { return uc; }
 
     // Public for hooks
     JniBridge* bridge;

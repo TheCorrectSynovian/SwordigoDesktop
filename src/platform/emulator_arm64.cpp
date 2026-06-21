@@ -58,9 +58,31 @@ static bool hook_mem_unmapped_64(uc_engine *uc, uc_mem_type type, uint64_t addre
             uc_err map_err;
             if (guest_page < 0xE0000000U && base != nullptr) {
                 // Alias: high address → same physical memory as low address
-                map_err = uc_mem_map_ptr(uc, fault_page, 0x1000, UC_PROT_ALL, base + guest_page);
+                // CRITICAL: if the aliased page falls in the .text section (code),
+                // map it READ-ONLY to prevent accidental code corruption.
+                // The .text segment is at load_addr(0x1000000) to 0x16af698.
+                uint32_t prot = UC_PROT_ALL;
+                if (guest_page >= 0x1000000 && guest_page < 0x16b0000) {
+                    prot = UC_PROT_READ;  // Code section: read-only alias
+                }
+                map_err = uc_mem_map_ptr(uc, fault_page, 0x1000, prot, base + guest_page);
             } else {
-                // Guest page is out of range — map zeros as fallback
+                // Guest page is out of range — map zeros as fallback.
+                // LIMIT: Too many zero pages = garbage 64-bit pointers → stop.
+                static int zero_page_count = 0;
+                zero_page_count++;
+                if (zero_page_count > 50) {
+                    // Too many garbage pages — stop emulation to avoid OOM
+                    uint64_t pc;
+                    uc_reg_read(uc, UC_ARM64_REG_PC, &pc);
+                    if (zero_page_count <= 52) {
+                        std::cerr << "[ARM64] Zero page limit (50) reached at PC=0x" 
+                                  << std::hex << pc << std::dec 
+                                  << " — stopping emulation" << std::endl;
+                    }
+                    uc_emu_stop(uc);
+                    return false;
+                }
                 map_err = uc_mem_map(uc, fault_page, 0x1000, UC_PROT_ALL);
             }
             
@@ -217,6 +239,18 @@ EmulatorArm64::~EmulatorArm64() {
     if (uc) uc_close((uc_engine*)uc);
 }
 
+void EmulatorArm64::protect_memory(uint64_t addr, uint64_t size, uint32_t perms) {
+    uc_err err = uc_mem_protect((uc_engine*)uc, addr, size, perms);
+    if (err) {
+        std::cerr << "[ARM64] uc_mem_protect(0x" << std::hex << addr 
+                  << ", 0x" << size << ", " << std::dec << perms 
+                  << ") failed: " << uc_strerror(err) << std::endl;
+    } else {
+        std::cout << "[ARM64] Protected 0x" << std::hex << addr 
+                  << "-0x" << (addr + size) << " perms=" << std::dec << perms << std::endl;
+    }
+}
+
 // --- Register access ---
 
 void EmulatorArm64::set_pc(uint64_t pc) {
@@ -317,6 +351,8 @@ void EmulatorArm64::run(uint64_t start_pc) {
     uc_err err = UC_ERR_OK;
     uint64_t curr_pc = start_pc;
     int chunk = 0;
+    int same_pc_count = 0;     // Count consecutive chunks at the SAME PC
+    uint64_t last_chunk_pc = 0; // Track PC from previous chunk
     for (chunk = 0; chunk < MAX_CHUNKS; chunk++) {
         err = uc_emu_start((uc_engine*)uc, 
                            chunk == 0 ? start_pc : curr_pc, 
@@ -324,6 +360,24 @@ void EmulatorArm64::run(uint64_t start_pc) {
         uc_reg_read((uc_engine*)uc, UC_ARM64_REG_PC, &curr_pc);
         if (curr_pc == magic_lr) break;  // Function completed!
         if (err && err != UC_ERR_OK) break;  // Real error
+        
+        // Detect TRUE infinite loop: same PC for 3 consecutive chunks.
+        // Entity processing changes PCs between chunks (making progress).
+        // Only a true spin loop stays at the exact same address.
+        if (curr_pc == last_chunk_pc) {
+            same_pc_count++;
+            if (same_pc_count >= 3) {
+                std::cerr << "[ARM64] TRUE spin loop: PC=0x" << std::hex << curr_pc 
+                          << std::dec << " unchanged for " << same_pc_count 
+                          << " chunks — force-returning" << std::endl;
+                uc_reg_write((uc_engine*)uc, UC_ARM64_REG_PC, &magic_lr);
+                uc_reg_write((uc_engine*)uc, UC_ARM64_REG_SP, &entry_sp);
+                return;
+            }
+        } else {
+            same_pc_count = 0;
+        }
+        last_chunk_pc = curr_pc;
         
         if (chunk > 0) {
             std::cerr << "[ARM64] Heavy function 0x" << std::hex << start_pc 
@@ -337,6 +391,66 @@ void EmulatorArm64::run(uint64_t start_pc) {
     
     if (err) {
         if (curr_pc != magic_lr) {
+            /* Check if this is our intentional BRK from sre_cxa_throw (inside libsre.so).
+             * libsre.so is loaded at 0x2000000, typically < 64KB in size.
+             * If so, walk the frame chain to skip past the throwing function
+             * and RESUME emulation instead of aborting the entire call. */
+            if (curr_pc >= 0x2000000 && curr_pc < 0x2010000) {
+                /* Read frame pointer to walk the call stack */
+                uint64_t fp;
+                uc_reg_read((uc_engine*)uc, UC_ARM64_REG_X29, &fp);
+                
+                /* Walk up frames to get past the exception machinery AND Lua internals.
+                 * We want to return to ENGINE code, not to mid-Lua state.
+                 * 
+                 * Code ranges (guest addresses):
+                 *   0x1000000-0x14E0000: Engine code (safe to return to)
+                 *   0x14E0000-0x1580000: Lua code (SKIP — state is corrupted)
+                 *   0x1580000-0x1700000: C++ runtime/exception code (SKIP)
+                 *   0x2000000-0x2010000: libsre.so (SKIP)
+                 */
+                uint64_t target_lr = 0;
+                uint64_t target_fp = 0;
+                uint64_t target_sp = 0;
+                bool found = false;
+                
+                for (int i = 0; i < 10 && fp >= 0xD0000000 && fp < 0xE0000000; i++) {
+                    uint64_t next_fp = 0, next_lr = 0;
+                    uc_mem_read((uc_engine*)uc, fp, &next_fp, 8);
+                    uc_mem_read((uc_engine*)uc, fp + 8, &next_lr, 8);
+                    
+                    /* Want: engine code (0x1000000-0x14E0000) — 
+                     * NOT Lua, NOT C++ runtime, NOT libsre */
+                    if (i >= 2 && next_lr >= 0x1000000 && next_lr < 0x14E0000) {
+                        target_lr = next_lr;
+                        target_fp = next_fp;
+                        target_sp = fp + 16;
+                        found = true;
+                        break;
+                    }
+                    fp = next_fp;
+                }
+                
+                if (found) {
+                    std::cerr << "[SRE-Recovery] C++ exception — skipping to engine code 0x" 
+                              << std::hex << target_lr << std::dec << std::endl;
+                    uc_reg_write((uc_engine*)uc, UC_ARM64_REG_PC, &target_lr);
+                    uc_reg_write((uc_engine*)uc, UC_ARM64_REG_X29, &target_fp);
+                    uc_reg_write((uc_engine*)uc, UC_ARM64_REG_SP, &target_sp);
+                    uint64_t zero = 0;
+                    uc_reg_write((uc_engine*)uc, UC_ARM64_REG_X0, &zero);
+                    
+                    /* Resume emulation from the recovered address */
+                    err = uc_emu_start((uc_engine*)uc, target_lr, magic_lr, 0, CHUNK);
+                    uc_reg_read((uc_engine*)uc, UC_ARM64_REG_PC, &curr_pc);
+                    
+                    if (!err || curr_pc == magic_lr) {
+                        goto post_call;
+                    }
+                    /* Recovery failed — fall through to normal error handling */
+                }
+            }
+            
             std::cerr << "[ARM64] !! Emulation error: " << uc_strerror(err) << std::endl;
             std::cerr << "  Stuck at PC: 0x" << std::hex << curr_pc << std::dec << std::endl;
             std::cerr << "  (started at 0x" << std::hex << start_pc << std::dec 

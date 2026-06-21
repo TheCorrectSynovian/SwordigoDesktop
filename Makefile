@@ -39,6 +39,7 @@ CXX_SRCS := \
     src/game/mod_tools.cpp \
     src/game/save_editor_logic.cpp \
     src/platform/fbo_scaler.cpp \
+    src/platform/pvr_loader.cpp \
     src/platform/io_thread.cpp \
     src/platform/data_path.cpp \
     src/platform/binary_selector.cpp \
@@ -58,11 +59,31 @@ ALL_OBJS := $(CXX_OBJS) $(C_OBJS)
 DEPS := $(ALL_OBJS:.o=.d)
 
 # Default target
-all: swordigo_boot
+all: swordigo_boot libsre.so
 
 swordigo_boot: $(ALL_OBJS)
 	@echo "[LINK] $@"
 	@$(CXX) -o $@ $^ $(LIBS)
+
+# =========================================================================
+# libsre.so — Swordigo Runtime Engine (ARM64 cross-compiled)
+# =========================================================================
+# This is a guest-side library loaded into the Unicorn emulator.
+# It replaces problematic functions in libswordigo.so with clean C code.
+AARCH64_CC := aarch64-linux-gnu-gcc
+SRE_SRCS   := src/sre/sre_init.c src/sre/sre_string.c src/sre/sre_lua.c src/sre/sre_background.c src/sre/sre_effects.c src/sre/sre_music.c src/sre/sre_gui.c src/sre/sre_setjmp.S
+SRE_CFLAGS := -shared -fPIC -O2 -nostdlib -fno-builtin -Isrc/sre
+
+libsre.so: $(SRE_SRCS) src/sre/sre.h src/sre/sre_lua.h src/sre/sre_setjmp.h
+	@echo "[SRE]  Building libsre.so (ARM64)"
+	@$(AARCH64_CC) $(SRE_CFLAGS) -o $@ $(SRE_SRCS)
+	@echo "[SRE]  Built libsre.so (ARM64) — ready for emulator loading"
+
+# Install libsre.so alongside libswordigo.so
+install-sre: libsre.so
+	@mkdir -p $(HOME)/.local/share/swordigo-desktop/engine/v1.4.12/arm64-v8a/
+	@cp libsre.so $(HOME)/.local/share/swordigo-desktop/engine/v1.4.12/arm64-v8a/libsre.so
+	@echo "[SRE]  Installed to ~/.local/share/swordigo-desktop/engine/v1.4.12/arm64-v8a/"
 
 # C++ compile rule
 build/%.o: src/%.cpp
@@ -80,6 +101,7 @@ build/%.o: src/%.c
 -include $(DEPS)
 
 clean:
-	rm -f $(ALL_OBJS) $(DEPS) swordigo_boot
+	rm -f $(ALL_OBJS) $(DEPS) swordigo_boot libsre.so
 
-.PHONY: all clean
+.PHONY: all clean install-sre
+

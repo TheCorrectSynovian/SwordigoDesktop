@@ -173,7 +173,9 @@ void GuiRenderer::init() {
         Menu m;
         m.title = "Config";
         m.items.push_back(MenuItem("Customize Controls", GUI_CUSTOMIZE_CONTROLS));
-        m.items.push_back(MenuItem("Audio Settings", GUI_AUDIO_SETTINGS));
+        m.items.push_back(MenuItem("Music Vol +10%", GUI_MUSIC_VOL_UP));
+        m.items.push_back(MenuItem("Music Vol -10%", GUI_MUSIC_VOL_DOWN));
+        m.items.push_back(MenuItem("Mute Music", GUI_MUSIC_MUTE));
         m.items.push_back(MenuItem("Toggle VSync", GUI_TOGGLE_VSYNC));
         m.items.push_back(MenuItem("---", GUI_NONE, false));
         m.items.push_back(MenuItem("Graphics: OpenGL", GUI_GFX_OPENGL));
@@ -1211,6 +1213,7 @@ void GuiRenderer::render_mod_sidebar(float fwin_w, float fwin_h, int mouse_x, in
         cy -= rh * 0.8f;
     };
 
+    /* v5.0 vanilla release — non-functional sections hidden, code preserved
     draw_sec("COMBAT");
     draw_cb("God Mode", mod_god_mode);
     draw_cb("Inf. Mana", mod_infinite_mana);
@@ -1231,6 +1234,12 @@ void GuiRenderer::render_mod_sidebar(float fwin_w, float fwin_h, int mouse_x, in
     draw_val("Level", lv);
     char xp[16]; snprintf(xp, 16, "%d", mod_exp);
     draw_val("Exp", xp);
+
+    draw_sec("CHEATS");
+    draw_val("Heal", "[FULL]");
+    draw_val("Coins", "[+100]");
+    draw_val("Mana", "[FULL]");
+    */
 
     draw_sec("GAME");
     char gs[16]; snprintf(gs, 16, "%.1fx", g_game_speed);
@@ -1281,11 +1290,8 @@ GuiAction GuiRenderer::handle_mod_panel_click(int mouse_x, int mouse_y, int win_
 
         // Compute which row was clicked
         float first_row = spy + ph - 38.0f*s - 14.0f*s - rh*0.6f;
-        // Row layout:
-        // 0=COMBAT(hdr), 1=GodMode(cb), 2=InfMana(cb),
-        // 3=MOVEMENT(hdr), 4=Fly(cb), 5=InfJump(cb), 6=WalkSpeed(val), 7=RunSpeed(val), 8=JumpHeight(val),
-        // 9=ECONOMY(hdr), 10=CoinBreak(cb), 11=Level(val), 12=Exp(val),
-        // 13=GAME(hdr), 14=GameSpeed(val), 15=Pause(cb), 16=FreeCam(cb), 17=SmoothCam(cb)
+        // Row layout (v5.0 — only GAME section visible):
+        // 0=GAME(hdr), 1=GameSpeed(val), 2=Pause(cb), 3=FreeCam(cb), 4=SmoothCam(cb)
         int row = (int)((first_row - (float)mouse_y) / rh);
 
         // Value row: check if click is on left (<) or right (>) arrow
@@ -1293,38 +1299,13 @@ GuiAction GuiRenderer::handle_mod_panel_click(int mouse_x, int mouse_y, int win_
         bool click_left = (mouse_x < (int)(vx + 14*s));
 
         switch (row) {
-            case 1: // God Mode
-                mod_god_mode = !mod_god_mode;
-                return GUI_NONE;
-            case 2: // Infinite Mana
-                mod_infinite_mana = !mod_infinite_mana;
-                return GUI_NONE;
-            case 4: // Fly Mode
-                mod_fly_mode = !mod_fly_mode;
-                return GUI_NONE;
-            case 5: // Infinite Jump
-                mod_infinite_jump = !mod_infinite_jump;
-                return GUI_NONE;
-            case 6: // Walk Speed
-                return click_left ? GUI_MOD_WALK_SPEED_DOWN : GUI_MOD_WALK_SPEED_UP;
-            case 7: // Run Speed
-                return click_left ? GUI_MOD_RUN_SPEED_DOWN : GUI_MOD_RUN_SPEED_UP;
-            case 8: // Jump Height
-                return click_left ? GUI_MOD_JUMP_HEIGHT_DOWN : GUI_MOD_JUMP_HEIGHT_UP;
-            case 10: // Coin Limit Breaker
-                mod_coin_break = !mod_coin_break;
-                return GUI_NONE;
-            case 11: // Level
-                return click_left ? GUI_MOD_LEVEL_DOWN : GUI_MOD_LEVEL_UP;
-            case 12: // Experience
-                return click_left ? GUI_MOD_EXP_DOWN : GUI_MOD_EXP_UP;
-            case 14: // Game Speed
+            case 1: // Game Speed
                 return click_left ? GUI_GAME_SPEED_DOWN : GUI_GAME_SPEED_UP;
-            case 15: // Pause Game
+            case 2: // Pause Game
                 return GUI_TOGGLE_PAUSE;
-            case 16: // Free Camera
+            case 3: // Free Camera
                 return GUI_TOGGLE_CAM;
-            case 17: // Smooth Camera
+            case 4: // Smooth Camera
                 return GUI_TOGGLE_SMOOTH_CAM;
             default:
                 break;
@@ -1406,44 +1387,39 @@ GuiAction GuiRenderer::handle_mod_sidebar_click(int mouse_x, int mouse_y, int wi
         // We track items by stepping through the layout
         // Section = skip sec_rh, Checkbox/Value = skip rh
 
-        // COMBAT header
+        // v5.0 — only GAME section visible in sidebar
+        // (COMBAT, MOVEMENT, ECONOMY sections hidden — code preserved below)
+        /* hidden sections layout
         cy -= sec_rh;
-        float god_top = cy; cy -= rh;       // 0: God Mode (cb)
-        float mana_top = cy; cy -= rh;      // 1: Inf Mana (cb)
-        // MOVEMENT header
+        float god_top = cy; cy -= rh;
+        float mana_top = cy; cy -= rh;
         cy -= sec_rh;
-        float fly_top = cy; cy -= rh;       // 2: Fly (cb)
-        float ijmp_top = cy; cy -= rh;      // 3: Inf Jump (cb)
-        float walk_top = cy; cy -= rh;      // 4: Walk Speed (val)
-        float run_top = cy; cy -= rh;       // 5: Run Speed (val)
-        float jump_top = cy; cy -= rh;      // 6: Jump Height (val)
-        // ECONOMY header
+        float fly_top = cy; cy -= rh;
+        float ijmp_top = cy; cy -= rh;
+        float walk_top = cy; cy -= rh;
+        float run_top = cy; cy -= rh;
+        float jump_top = cy; cy -= rh;
         cy -= sec_rh;
-        float coin_top = cy; cy -= rh;      // 7: Coin Break (cb)
-        float lvl_top = cy; cy -= rh;       // 8: Level (val)
-        float exp_top = cy; cy -= rh;       // 9: Exp (val)
+        float coin_top = cy; cy -= rh;
+        float lvl_top = cy; cy -= rh;
+        float exp_top = cy; cy -= rh;
+        cy -= sec_rh;
+        float heal_top = cy; cy -= rh;
+        float addcoin_top = cy; cy -= rh;
+        float refmana_top = cy; cy -= rh;
+        */
         // GAME header
         cy -= sec_rh;
-        float spd_top = cy; cy -= rh;       // 10: Speed (val)
-        float pause_top = cy; cy -= rh;     // 11: Pause (cb)
-        float fcam_top = cy; cy -= rh;      // 12: Free Cam (cb)
-        float scam_top = cy; cy -= rh;      // 13: Smooth Cam (cb)
+        float spd_top = cy; cy -= rh;       // 0: Speed (val)
+        float pause_top = cy; cy -= rh;     // 1: Pause (cb)
+        float fcam_top = cy; cy -= rh;      // 2: Free Cam (cb)
+        float scam_top = cy; cy -= rh;      // 3: Smooth Cam (cb)
 
         float my_f = (float)mouse_y;
         float vx = sb_x + mg + cw * 0.55f;
         bool click_left = (mouse_x < (int)(vx + 10*s));
 
-        // Check each item
-        if (my_f >= god_top - rh && my_f < god_top) { mod_god_mode = !mod_god_mode; return GUI_NONE; }
-        if (my_f >= mana_top - rh && my_f < mana_top) { mod_infinite_mana = !mod_infinite_mana; return GUI_NONE; }
-        if (my_f >= fly_top - rh && my_f < fly_top) { mod_fly_mode = !mod_fly_mode; return GUI_NONE; }
-        if (my_f >= ijmp_top - rh && my_f < ijmp_top) { mod_infinite_jump = !mod_infinite_jump; return GUI_NONE; }
-        if (my_f >= walk_top - rh && my_f < walk_top) { return click_left ? GUI_MOD_WALK_SPEED_DOWN : GUI_MOD_WALK_SPEED_UP; }
-        if (my_f >= run_top - rh && my_f < run_top) { return click_left ? GUI_MOD_RUN_SPEED_DOWN : GUI_MOD_RUN_SPEED_UP; }
-        if (my_f >= jump_top - rh && my_f < jump_top) { return click_left ? GUI_MOD_JUMP_HEIGHT_DOWN : GUI_MOD_JUMP_HEIGHT_UP; }
-        if (my_f >= coin_top - rh && my_f < coin_top) { mod_coin_break = !mod_coin_break; return GUI_NONE; }
-        if (my_f >= lvl_top - rh && my_f < lvl_top) { return click_left ? GUI_MOD_LEVEL_DOWN : GUI_MOD_LEVEL_UP; }
-        if (my_f >= exp_top - rh && my_f < exp_top) { return click_left ? GUI_MOD_EXP_DOWN : GUI_MOD_EXP_UP; }
+        // Check GAME items only
         if (my_f >= spd_top - rh && my_f < spd_top) { return click_left ? GUI_GAME_SPEED_DOWN : GUI_GAME_SPEED_UP; }
         if (my_f >= pause_top - rh && my_f < pause_top) { return GUI_TOGGLE_PAUSE; }
         if (my_f >= fcam_top - rh && my_f < fcam_top) { return GUI_TOGGLE_CAM; }

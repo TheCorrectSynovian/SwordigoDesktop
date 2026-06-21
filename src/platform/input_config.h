@@ -36,27 +36,28 @@ struct TouchButton {
     // TV remote mapping
     int tv_remote_key;          // TV remote virtual key (-1 = none)
 
-    // Magic menu macro — two-step touch sequence
-    // Step 1: touch the magic button (opens spell menu)
-    // Step 2: after delay, touch the target spell slot
+    // Magic menu macro — multi-step touch sequence
+    // Step 1: TAP the magic button (opens spell menu — it's a toggle)
+    // Step 2: after delay, TAP the target spell slot
     bool is_macro;
     int macro_open_touch_id;    // touch_id of the button to press first (e.g., magic)
-    int macro_delay_ms;         // Delay between press and target tap (ms)
+    int macro_delay_ms;         // Delay between opener tap and slot tap (ms)
     float macro_target_x;      // Target touch position for step 2
     float macro_target_y;
     
     // Runtime state
     bool is_pressed;
-    bool macro_pending;         // Macro step 1 fired, waiting for delay
-    uint64_t macro_fire_time;   // Timestamp when step 1 fired
+    bool macro_pending;         // Macro sequence in progress
+    int macro_stage;            // 0=idle, 1=opener pressed, 2=opener released/waiting, 3=done
+    uint64_t macro_fire_time;   // Timestamp when sequence started
 
     TouchButton() : is_custom(false),
                     game_x(0), game_y(0), radius(40), action_type(1), touch_id(0),
                     sdl_scancode(0), sdl_scancode_alt(0), gamepad_button(-1),
                     gamepad_axis(-1), axis_threshold(0.5f), tv_remote_key(-1),
-                    is_macro(false), macro_open_touch_id(-1), macro_delay_ms(150),
+                    is_macro(false), macro_open_touch_id(-1), macro_delay_ms(250),
                     macro_target_x(0), macro_target_y(0),
-                    is_pressed(false), macro_pending(false), macro_fire_time(0) {}
+                    is_pressed(false), macro_pending(false), macro_stage(0), macro_fire_time(0) {}
 };
 
 // Editor mode

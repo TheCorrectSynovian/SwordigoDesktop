@@ -251,11 +251,8 @@ static void bridge_realloc(void* emu_ptr) {
     EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     uint32_t ptr = emu->get_reg(0);
     uint32_t size = emu->get_reg(1);
-    if (ptr != 0 && g_guest_allocs.count(ptr) == 0) {
-        std::cout << "[ALLOC] WARNING: realloc called on unregistered pointer 0x" << std::hex << ptr 
-                  << " (requested size: " << std::dec << size << ")" << std::endl;
-    }
     if (ptr == 0) {
+        // realloc(NULL, size) == malloc(size)
         uint32_t addr = g_guest_heap_ptr;
         g_guest_heap_ptr += (size + 7) & ~7;
         g_guest_allocs[addr] = size;
@@ -263,16 +260,25 @@ static void bridge_realloc(void* emu_ptr) {
         return;
     }
     if (size == 0) {
+        // realloc(ptr, 0) == free(ptr)
+        g_guest_allocs.erase(ptr);
         emu->set_reg(0, 0);
         return;
     }
+    // If ptr is unregistered (allocated before our tracking), register it
+    // with the requested size as a conservative estimate for copy
     uint32_t old_size = 0;
     if (g_guest_allocs.count(ptr)) {
         old_size = g_guest_allocs[ptr];
+    } else {
+        // Unregistered pointer — use requested size as old_size estimate
+        // (we'll copy at most 'size' bytes, which is safe)
+        old_size = size;
     }
     uint32_t addr = g_guest_heap_ptr;
     g_guest_heap_ptr += (size + 7) & ~7;
     g_guest_allocs[addr] = size;
+    g_guest_allocs.erase(ptr);  // clean up old entry
     uint32_t copy_size = (old_size < size) ? old_size : size;
     if (copy_size > 0) {
         std::memcpy(emu->get_memory_base() + addr, emu->get_memory_base() + ptr, copy_size);
@@ -2570,17 +2576,30 @@ static void bridge_unlink(void* emu_ptr) {
 }
 
 static int g_abort_count = 0;
+static uint64_t g_last_abort_lr = 0;
+static int g_same_lr_count = 0;
+
 static void bridge_abort(void* emu_ptr) {
     EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
     g_abort_count++;
     
+    uint64_t lr = emu->get_lr();
+    uint64_t sp = emu->get_reg(31);
+    
+    // Detect abort retry loop: same LR means same callsite retrying
+    if (lr == g_last_abort_lr) {
+        g_same_lr_count++;
+    } else {
+        g_same_lr_count = 1;
+        g_last_abort_lr = lr;
+    }
+    
     if (g_abort_count <= 3) {
-        uint8_t* memory = emu->get_memory_base();
-        uint64_t lr = emu->get_lr();
         std::cerr << "[WARN] abort() #" << g_abort_count 
                   << " PC=0x" << std::hex << emu->get_pc()
                   << " LR=0x" << lr
-                  << " SP=0x" << emu->get_reg(31) << std::dec << std::endl;
+                  << " SP=0x" << sp << std::dec << std::endl;
         
         // Dump registers for debugging
         std::cerr << "  X0=0x" << std::hex << emu->get_reg(0)
@@ -2609,8 +2628,57 @@ static void bridge_abort(void* emu_ptr) {
         std::cerr << "[WARN] abort() called 50+ times — suppressing further logs" << std::endl;
     }
     
-    // Don't kill — these are non-fatal asserts (Lua compiler, fwrite, etc.)
-    // Just return and let the guest code continue past the bl abort
+    // ABORT LOOP BREAKER: If the same callsite aborts 3+ times, it's a retry loop.
+    // Unwind two stack frames to skip past the entire exception handling chain.
+    // This is the key fix for C++ exceptions that fail to unwind in our emulator.
+    if (g_same_lr_count >= 3) {
+        // Walk UP the frame chain: X29 → saved {X29, X30} → caller → caller's caller
+        uint64_t fp = emu->get_reg(29);  // current frame pointer
+        if (fp > 0x1000 && fp < 0xF0000000) {
+            // First frame: the function that called abort (e.g. unwind helper)
+            uint64_t fp1 = *(uint64_t*)(memory + (uint32_t)fp);
+            uint64_t lr1 = *(uint64_t*)(memory + (uint32_t)fp + 8);
+            
+            // Second frame: the function that called the thrower
+            uint64_t fp2 = 0, lr2 = 0;
+            if (fp1 > 0x1000 && fp1 < 0xF0000000) {
+                fp2 = *(uint64_t*)(memory + (uint32_t)fp1);
+                lr2 = *(uint64_t*)(memory + (uint32_t)fp1 + 8);
+            }
+            
+            // Try to return to the second frame's caller (skip 2 frames)
+            if (lr2 > 0x1000000 && lr2 < 0x2000000) {
+                if (g_same_lr_count == 3) {
+                    std::cerr << "[ABORT-FIX] Exception loop at LR=0x" 
+                              << std::hex << lr << " — skipping 2 frames to 0x" 
+                              << lr2 << std::dec << std::endl;
+                }
+                emu->set_reg(29, fp2);     // restore grandparent FP
+                emu->set_reg(31, fp1 + 16); // pop both frames
+                emu->set_reg(0, 0);         // return 0 (no error)
+                emu->redirect_pc = lr2;
+                g_same_lr_count = 0;
+                return;
+            }
+            // Fallback: skip just 1 frame
+            else if (lr1 > 0x1000000 && lr1 < 0x2000000) {
+                if (g_same_lr_count == 3) {
+                    std::cerr << "[ABORT-FIX] Exception loop at LR=0x" 
+                              << std::hex << lr << " — skipping 1 frame to 0x" 
+                              << lr1 << std::dec << std::endl;
+                }
+                emu->set_reg(29, fp1);
+                emu->set_reg(31, fp + 16);
+                emu->set_reg(0, 0);
+                emu->redirect_pc = lr1;
+                g_same_lr_count = 0;
+                return;
+            }
+        }
+        g_same_lr_count = 0;  // couldn't unwind, reset
+    }
+    
+    // Normal case: just return and let guest continue past the bl abort
     emu->set_reg(0, 0);
 }
 
@@ -2637,6 +2705,42 @@ static void bridge_localtime(void* emu_ptr) {
     tm_guest[8] = t->tm_isdst;
     
     emu->set_reg(0, tm_guest_ptr);
+}
+
+// localtime_r(const time_t* timer, struct tm* result) → struct tm*
+// Thread-safe version — writes to caller-supplied buffer (X1)
+static void bridge_localtime_r(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint64_t timer_ptr = emu->get_reg(0);
+    uint64_t result_ptr = emu->get_reg(1);
+    
+    time_t timer;
+    if (timer_ptr) timer = (time_t)*(int64_t*)(memory + timer_ptr);
+    else timer = time(NULL);
+    
+    struct tm t;
+    localtime_r(&timer, &t);
+    
+    if (result_ptr) {
+        // ARM64 struct tm: 9 ints (each 4 bytes) + padding
+        int32_t* tm_guest = (int32_t*)(memory + result_ptr);
+        tm_guest[0] = t.tm_sec;
+        tm_guest[1] = t.tm_min;
+        tm_guest[2] = t.tm_hour;
+        tm_guest[3] = t.tm_mday;
+        tm_guest[4] = t.tm_mon;
+        tm_guest[5] = t.tm_year;
+        tm_guest[6] = t.tm_wday;
+        tm_guest[7] = t.tm_yday;
+        tm_guest[8] = t.tm_isdst;
+        // Android's struct tm also has tm_gmtoff (long) and tm_zone (char*)
+        // at offsets 9*4=36 and 36+8=44 — zero them for safety
+        *(int64_t*)(tm_guest + 9) = t.tm_gmtoff;
+        *(uint64_t*)(tm_guest + 11) = 0; // tm_zone = NULL
+    }
+    
+    emu->set_reg(0, result_ptr); // returns pointer to result
 }
 
 
@@ -3960,7 +4064,7 @@ static void bridge_gl_load_matrixf(void* emu_ptr) {
         if (g_display_active) {
             // For projection: use ortho matching game viewport; for modelview: identity
             if (g_current_matrix_mode == GL_PROJECTION) {
-                glOrtho(0, 800, 480, 0, -1, 1);  // Game's 2D UI space
+                glOrtho(0, g_draw_w, g_draw_h, 0, -1, 1);  // Match actual game resolution
             } else {
                 glLoadIdentity();
             }
@@ -3980,7 +4084,7 @@ static void bridge_gl_load_matrixf(void* emu_ptr) {
         }
         if (g_display_active) {
             if (g_current_matrix_mode == GL_PROJECTION) {
-                glOrtho(0, 800, 480, 0, -1, 1);
+                glOrtho(0, g_draw_w, g_draw_h, 0, -1, 1);
             } else {
                 glLoadIdentity();
             }
@@ -4082,6 +4186,11 @@ static void bridge_gl_orthof(void* emu_ptr) {
     float b = emu->get_sreg(2), t = emu->get_sreg(3);
     float n = emu->get_sreg(4), f = emu->get_sreg(5);
     
+    /* Track ortho calls for GUI detection — if only ortho and no frustum,
+     * the game is showing a full-screen menu (map, inventory, etc.) */
+    extern int g_frame_has_ortho;
+    g_frame_has_ortho++;
+    
     static int ortho_diag = 0;
     if (ortho_diag < 10) {
         std::cout << "[GL64-DIAG] glOrthof(l=" << l << ", r=" << r_ << ", b=" << b 
@@ -4160,6 +4269,11 @@ static void bridge_gl_frustumf(void* emu_ptr) {
     float l = emu->get_sreg(0), r_ = emu->get_sreg(1);
     float b = emu->get_sreg(2), t = emu->get_sreg(3);
     float n = emu->get_sreg(4), f = emu->get_sreg(5);
+    
+    /* Track frustum calls for GUI detection — if frustum is called,
+     * the game is rendering the 3D scene (not just a full-screen menu) */
+    extern int g_frame_has_perspective;
+    g_frame_has_perspective++;
     
     static int frust_diag = 0;
     if (frust_diag < 10) {
@@ -5306,8 +5420,9 @@ static void bridge_glGetString(void* emu_ptr) {
     if (!initialized) {
         strcpy((char*)(memory + 0x40000), "OpenGL ES 2.0 (Swordigo Desktop)");
         strcpy((char*)(memory + 0x40100), "Swordigo Desktop Emulator");
-        // Don't advertise ETC1 — forces game to use uncompressed textures (faster, no CPU decode)
-        strcpy((char*)(memory + 0x40200), "GL_OES_texture_npot");
+        // Advertise ETC1 support — we have a full software decoder (bridge_gl_compressed_tex_image_2d).
+        // This makes the engine load .pvr textures instead of .tex.png (which don't exist for many assets).
+        strcpy((char*)(memory + 0x40200), "GL_OES_compressed_ETC1_texture_data GL_OES_texture_npot");
         initialized = true;
     }
     uint32_t name = emu->get_reg(0);
@@ -5389,11 +5504,129 @@ static void bridge_gl_finish(void* emu_ptr) {
     if (g_display_active) glFinish();
 }
 
-static void bridge_gl_framebuffer_status(void* emu_ptr) {
+// ========== FBO Bridge — Proper implementation for game effects ==========
+// The game uses FBOs for: portal effects, drift effects, post-processing.
+// We need to track guest FBO IDs and map them to host FBOs, while being
+// careful not to conflict with the host's own FBO (from fbo_scaler).
+
+// Track the host FBO that fbo_scaler is using, so we can restore it
+extern GLuint g_game_fbo;  // from fbo_scaler.cpp
+
+static void bridge_gl_gen_framebuffers(void* emu_ptr) {
     EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
-    emu->set_reg(0, 0x8CD5); // GL_FRAMEBUFFER_COMPLETE
+    uint8_t* memory = emu->get_memory_base();
+    GLsizei n = (GLsizei)emu->get_reg(0);
+    uint32_t ids_ptr = (uint32_t)emu->get_reg(1);
+    
+    if (!g_display_active || n <= 0 || n > 16) return;
+    
+    GLuint host_ids[16];
+    glGenFramebuffers(n, host_ids);
+    
+    // Write IDs back to guest memory
+    uint32_t* guest_ids = (uint32_t*)(memory + ids_ptr);
+    for (int i = 0; i < n; i++) {
+        guest_ids[i] = host_ids[i];
+    }
+    
+    std::cout << "[FBO] glGenFramebuffers(n=" << n << ") -> ";
+    for (int i = 0; i < n; i++) std::cout << host_ids[i] << " ";
+    std::cout << std::endl;
 }
 
+static void bridge_gl_bind_framebuffer(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    GLenum target = (GLenum)emu->get_reg(0);
+    GLuint framebuffer = (GLuint)emu->get_reg(1);
+    
+    if (!g_display_active) return;
+    
+    if (framebuffer == 0) {
+        // Game unbinding FBO → bind back to host's game FBO (not FBO 0!)
+        glBindFramebuffer(target, g_game_fbo);
+    } else {
+        glBindFramebuffer(target, framebuffer);
+    }
+}
+
+static void bridge_gl_delete_framebuffers(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    GLsizei n = (GLsizei)emu->get_reg(0);
+    uint32_t ids_ptr = (uint32_t)emu->get_reg(1);
+    
+    if (!g_display_active || n <= 0 || n > 16) return;
+    
+    GLuint host_ids[16];
+    uint32_t* guest_ids = (uint32_t*)(memory + ids_ptr);
+    for (int i = 0; i < n; i++) host_ids[i] = guest_ids[i];
+    
+    glDeleteFramebuffers(n, host_ids);
+}
+
+static void bridge_gl_framebuffer_texture2d(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    GLenum target = (GLenum)emu->get_reg(0);
+    GLenum attachment = (GLenum)emu->get_reg(1);
+    GLenum textarget = (GLenum)emu->get_reg(2);
+    GLuint texture = (GLuint)emu->get_reg(3);
+    GLint level = (GLint)emu->get_reg(4);
+    
+    if (!g_display_active) return;
+    
+    glFramebufferTexture2D(target, attachment, textarget, texture, level);
+}
+
+static void bridge_gl_framebuffer_status(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    emu->set_reg(0, 0x8CD5); // GL_FRAMEBUFFER_COMPLETE — always
+}
+
+// ========== Renderbuffer Bridge — Required for FBO depth/stencil ==========
+
+static void bridge_gl_gen_renderbuffers(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    GLsizei n = (GLsizei)emu->get_reg(0);
+    uint32_t ids_ptr = (uint32_t)emu->get_reg(1);
+    if (!g_display_active || n <= 0 || n > 16) return;
+    GLuint host_ids[16];
+    glGenRenderbuffers(n, host_ids);
+    uint32_t* guest_ids = (uint32_t*)(memory + ids_ptr);
+    for (int i = 0; i < n; i++) guest_ids[i] = host_ids[i];
+}
+
+static void bridge_gl_bind_renderbuffer(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    if (!g_display_active) return;
+    glBindRenderbuffer((GLenum)emu->get_reg(0), (GLuint)emu->get_reg(1));
+}
+
+static void bridge_gl_renderbuffer_storage(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    if (!g_display_active) return;
+    glRenderbufferStorage((GLenum)emu->get_reg(0), (GLenum)emu->get_reg(1),
+                          (GLsizei)emu->get_reg(2), (GLsizei)emu->get_reg(3));
+}
+
+static void bridge_gl_framebuffer_renderbuffer(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    if (!g_display_active) return;
+    glFramebufferRenderbuffer((GLenum)emu->get_reg(0), (GLenum)emu->get_reg(1),
+                              (GLenum)emu->get_reg(2), (GLuint)emu->get_reg(3));
+}
+
+static void bridge_gl_delete_renderbuffers(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    GLsizei n = (GLsizei)emu->get_reg(0);
+    uint32_t ids_ptr = (uint32_t)emu->get_reg(1);
+    if (!g_display_active || n <= 0 || n > 16) return;
+    GLuint host_ids[16];
+    uint32_t* guest_ids = (uint32_t*)(memory + ids_ptr);
+    for (int i = 0; i < n; i++) host_ids[i] = guest_ids[i];
+    glDeleteRenderbuffers(n, host_ids);
+}
 
 static void bridge_matrix4_mul(void* emu_ptr) {
     EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
@@ -5613,13 +5846,15 @@ static void bridge_pthread_create(void* emu_ptr) {
         *(uint64_t*)(memory + thread_ptr) = next_tid++;
     }
     
-    // Discard thread but log the address for analysis.
-    // Can't run inline (nested uc_emu_start), and deferred execution 
-    // runs too late (scene loader needs data immediately).
+    // Queue thread for deferred execution.
+    // The entity worker thread populates a linked list that entity processing
+    // needs. We run it via queue_thread + run_pending_threads() which is called
+    // between emulator call() invocations (avoids nested uc_emu_start).
     if (start_routine != 0) {
-        std::cerr << "[Thread64] pthread_create: DISCARD thread func 0x" 
+        std::cerr << "[Thread64] pthread_create: QUEUED thread func 0x" 
                   << std::hex << start_routine << " arg=0x" << arg 
                   << std::dec << std::endl;
+        emu->queue_thread(start_routine, arg);
     }
     
     emu->set_reg(0, 0); // success
@@ -5892,6 +6127,7 @@ void JniBridge64::init_standard_bridges() {
     register_handler("clock", bridge_clock);
     register_handler("lrand48", bridge_lrand48);
     register_handler("localtime", bridge_localtime);
+    register_handler("localtime_r", bridge_localtime_r);
     register_handler("clock_gettime", bridge_clock_gettime);
     register_handler("gettimeofday", bridge_gettimeofday);
     register_handler("__gnu_Unwind_Find_exidx", bridge_exidx);
@@ -6141,6 +6377,13 @@ void JniBridge64::init_standard_bridges() {
     register_handler("eglGetDisplay", bridge_gl_noop);
     register_handler("eglSwapBuffers", bridge_gl_noop);
     register_handler("eglGetProcAddress", bridge_eglGetProcAddress);
+
+    // Renderbuffers — NOOPed for now (game FBOs are bypassed)
+    // register_handler("glGenRenderbuffers", bridge_gl_gen_renderbuffers);
+    // register_handler("glBindRenderbuffer", bridge_gl_bind_renderbuffer);
+    // register_handler("glRenderbufferStorage", bridge_gl_renderbuffer_storage);
+    // register_handler("glFramebufferRenderbuffer", bridge_gl_framebuffer_renderbuffer);
+    // register_handler("glDeleteRenderbuffers", bridge_gl_delete_renderbuffers);
 }
 
 // ======================= DRAW BATCHER API =======================
@@ -6166,4 +6409,163 @@ void draw_batcher_print_stats() {
                   << std::endl;
     }
     g_batcher.reset_stats();
+}
+
+/* =====================================================================
+ * SRE Music Host API — called by main.cpp to execute music commands
+ * from the SRE guest. Full control over the music subsystem.
+ * ===================================================================== */
+
+static std::string g_sre_music_current_track = "";  /* What's currently loaded */
+
+bool sre_music_host_load(const std::string& name) {
+    extern std::string g_assets_dir;
+    
+    /* ===== Playlist Name → Track Filename mapping =====
+     * The engine calls PlayMusicWithName("outdoors_light") but the actual
+     * file is music_squire_new2.ogg. This table maps playlist→track.
+     * Easy to edit — just change the right column!
+     * Same track can serve multiple playlists (Swordigo reuses music). */
+    static const struct { const char* playlist; const char* track; } music_map[] = {
+        { "menu",            "1_hero2"         },  /* Main menu / title screen */
+        { "title",           "1_hero2"         },  /* Title screen (alias) */
+        { "house",           "1_plaintest2"    },  /* House interior */
+        { "outdoors_light",  "squire_new2"     },  /* Plains / outdoors light */
+        { "outdoors_dark",   "1_hero2"         },  /* Dark outdoors, adventure */
+        { "dungeon1",        "1_dung73"        },  /* Dungeons */
+        { "cave",            "2cave2"          },  /* Caves */
+        { "boss",            "1_boss23"        },  /* Boss fights */
+        { "bosskill",        "momentofwonder"  },  /* After killing boss — fades in slowly */
+        { "gameover",        "gameover"        },  /* Death screen */
+        { "heartbeat",       "heartbeat"       },  /* Tension / danger */
+        { "momentofwonder",  "momentofwonder"  },  /* Discovery / portals */
+        { "squire",          "squire_new2"     },  /* Town / shop */
+        { NULL, NULL }
+    };
+    
+    // Resolve playlist name → track name
+    std::string track = name;  // fallback: use playlist name as-is
+    for (int i = 0; music_map[i].playlist; i++) {
+        if (name == music_map[i].playlist) {
+            track = music_map[i].track;
+            break;
+        }
+    }
+    
+    std::cout << "[SRE-Music] Loading: \"" << name << "\" → track \"" << track << "\"" << std::endl;
+    
+    // Death detection
+    if (name.find("gameover") != std::string::npos) {
+        extern int g_death_detected_countdown;
+        g_death_detected_countdown = 180;
+        std::cout << "[SRE-Music] Death detected (gameover music)" << std::endl;
+    }
+    
+    // Stop current playback
+    if (g_music_source != 0) {
+        alSourceStop(g_music_source);
+        alSourcei(g_music_source, AL_BUFFER, 0);
+    }
+    
+    // Build paths using resolved track name
+    std::string music_dir = get_data_path(g_assets_dir + "/resources/music");
+    std::string music_dir_alt = get_data_path(g_assets_dir + "/music");
+    
+    // Sanitize: replace dashes with underscores
+    std::string safe = track;
+    for (size_t i = 0; i < safe.size(); i++) {
+        if (safe[i] == '-') safe[i] = '_';
+    }
+    
+    // Try all path variants
+    std::string paths[] = {
+        music_dir + "/music_" + safe + ".ogg",
+        music_dir + "/" + safe + ".ogg",
+        music_dir_alt + "/" + safe + ".ogg",
+        music_dir_alt + "/music_" + safe + ".ogg",
+        music_dir + "/music_" + safe + ".wav",
+    };
+    
+    if (g_music_buffer == 0) {
+        alGenBuffers(1, &g_music_buffer);
+    }
+    
+    bool loaded = false;
+    for (int i = 0; i < 5 && !loaded; i++) {
+        std::cout << "[SRE-Music]   try[" << i << "]: " << paths[i] << std::endl;
+        if (i < 4) {
+            loaded = load_ogg_to_buffer(paths[i], g_music_buffer);
+        } else {
+            loaded = load_wav_to_buffer(paths[i], g_music_buffer);
+        }
+        if (loaded) {
+            std::cout << "[SRE-Music] ✓ Loaded: " << paths[i] << std::endl;
+        }
+    }
+    
+    if (loaded) {
+        if (g_music_source == 0) {
+            alGenSources(1, &g_music_source);
+        }
+        alSourcei(g_music_source, AL_BUFFER, g_music_buffer);
+        alSourcei(g_music_source, AL_LOOPING, g_music_looping ? AL_TRUE : AL_FALSE);
+        alSourcef(g_music_source, AL_GAIN, g_music_volume);
+        alSourcePlay(g_music_source);
+        g_sre_music_current_track = name;
+        std::cout << "[SRE-Music] Playing: \"" << name << "\"" << std::endl;
+        return true;
+    } else {
+        std::cerr << "[SRE-Music] ⚠ Failed to load: \"" << name << "\"" << std::endl;
+        g_sre_music_current_track = "";
+        return false;
+    }
+}
+
+void sre_music_host_play() {
+    if (g_music_source != 0) {
+        alSourcePlay(g_music_source);
+    }
+}
+
+void sre_music_host_pause() {
+    if (g_music_source != 0) {
+        alSourcePause(g_music_source);
+    }
+}
+
+void sre_music_host_stop() {
+    if (g_music_source != 0) {
+        alSourceStop(g_music_source);
+    }
+}
+
+void sre_music_host_set_volume(float vol) {
+    g_music_volume = vol;
+    if (g_music_volume < 0.0f) g_music_volume = 0.0f;
+    if (g_music_volume > 1.0f) g_music_volume = 1.0f;
+    if (g_music_source != 0) {
+        alSourcef(g_music_source, AL_GAIN, g_music_volume);
+    }
+}
+
+void sre_music_host_set_looping(bool loop) {
+    g_music_looping = loop;
+    if (g_music_source != 0) {
+        alSourcei(g_music_source, AL_LOOPING, loop ? AL_TRUE : AL_FALSE);
+    }
+}
+
+const std::string& sre_music_host_get_track() {
+    return g_sre_music_current_track;
+}
+
+float sre_music_host_get_volume() {
+    return g_music_volume;
+}
+
+bool sre_music_host_is_playing() {
+    if (g_music_source == 0) return false;
+    ALint state;
+    alGetSourcei(g_music_source, AL_SOURCE_STATE, &state);
+    return state == AL_PLAYING;
 }

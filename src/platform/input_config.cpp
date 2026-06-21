@@ -120,23 +120,23 @@ void InputConfig::load_defaults() {
         SDL_SCANCODE_P, 0, 17,
         SDL_GAMEPAD_BUTTON_BACK);
 
-    // Magic spell macros — press use_item (opens spell menu), waits 1.25s, then taps spell slot
+    // Magic spell macros — TAP use_item (opens spell menu), wait 250ms, TAP spell slot
     // Drag these buttons onto the spell slot positions in the F2 editor
     add("magic_bolt", 898, 426, 30,
         SDL_SCANCODE_1, 0, 30, -1, -1,
-        true, 15, 500, 898, 426);
+        true, 15, 250, 898, 426);
 
     add("magic_bomb", 906, 329, 30,
         SDL_SCANCODE_2, 0, 31, -1, -1,
-        true, 15, 500, 906, 329);
+        true, 15, 250, 906, 329);
 
     add("magic_dragon", 889, 243, 30,
         SDL_SCANCODE_3, 0, 32, -1, -1,
-        true, 15, 500, 889, 243);
+        true, 15, 250, 889, 243);
 
     add("magic_rift", 891, 105, 30,
         SDL_SCANCODE_4, 0, 33, -1, -1,
-        true, 15, 500, 891, 105);
+        true, 15, 250, 891, 105);
 
     next_custom_touch_id = 40;
     std::cout << "[InputConfig] Loaded " << buttons.size() << " default buttons\n";
@@ -430,28 +430,47 @@ void InputConfig::process_macros(double current_time, TouchCallback callback) {
         if (!btn.is_macro || !btn.macro_pending) continue;
         
         uint64_t elapsed = now_ms - btn.macro_fire_time;
+        int macro_tid = 100 + btn.touch_id;
         
-        // Step 1.5: Release the opener button after 100ms (give game time to register)
-        if (elapsed >= 100 && elapsed < (uint64_t)btn.macro_delay_ms) {
-            // Find opener and release it (only once, on the frame that crosses 100ms)
-            // This is handled by the step 1 release in the main loop now
+        // Stage 1: opener was pressed in main loop. Release it after 50ms to complete the TAP.
+        if (btn.macro_stage == 1 && elapsed >= 50) {
+            // Release the opener → completes the "i" button tap → menu opens
+            for (auto& other : buttons) {
+                if (other.touch_id == btn.macro_open_touch_id) {
+                    if (callback) {
+                        callback(2, macro_tid, current_time,
+                                other.game_x, other.game_y,
+                                other.game_x, other.game_y, 0);
+                        std::cout << "[Macro] Stage 1→2: released opener " << other.name << std::endl;
+                    }
+                    break;
+                }
+            }
+            btn.macro_stage = 2;  // now waiting for delay before slot tap
         }
         
-        if (elapsed >= (uint64_t)btn.macro_delay_ms) {
-            // Step 2: tap the spell slot at THIS button's position
-            // (user drags the macro button onto the spell slot to calibrate)
+        // Stage 2: menu is open, wait for delay then tap the spell slot
+        if (btn.macro_stage == 2 && elapsed >= (uint64_t)btn.macro_delay_ms) {
             if (callback) {
-                std::cout << "[Macro] Step 2: tap " << get_display(btn) 
+                std::cout << "[Macro] Stage 2→done: tap " << get_display(btn) 
                           << " at (" << btn.game_x << ", " << btn.game_y << ")" << std::endl;
+                // Tap the spell slot (press + release)
                 callback(1, btn.touch_id, current_time, 
                         btn.game_x, btn.game_y,
                         btn.game_x, btn.game_y, 1);
-                // Quick release after 50ms
-                callback(2, btn.touch_id, current_time + 0.05,
+            }
+            btn.macro_stage = 3;  // will release on next frame
+        }
+        
+        // Stage 3: release the spell slot tap
+        if (btn.macro_stage == 3 && elapsed >= (uint64_t)btn.macro_delay_ms + 50) {
+            if (callback) {
+                callback(2, btn.touch_id, current_time,
                         btn.game_x, btn.game_y,
                         btn.game_x, btn.game_y, 0);
             }
             btn.macro_pending = false;
+            btn.macro_stage = 0;
         }
     }
 }

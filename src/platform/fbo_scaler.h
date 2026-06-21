@@ -56,9 +56,16 @@ struct PostFXState {
     float bloom_threshold = 0.7f;       // brightness threshold for bloom extraction
     float bloom_intensity = 0.35f;      // additive bloom strength
     
-    bool fake_shadows = false;
-    float shadow_intensity = 0.3f;      // bottom-screen darkening
-    float shadow_height = 0.25f;        // how high up the shadow gradient reaches
+    bool shadows = false;
+    float shadow_intensity = 0.5f;       // shadow darkness (0=none, 1=pitch black)
+    float shadow_softness = 0.003f;      // blur radius for soft shadow edges
+    float shadow_light_x = 0.3f;         // light direction X (+right, normalized)
+    float shadow_light_y = -0.8f;        // light direction Y (-down, normalized)
+    
+    bool outlines = false;               // depth-based edge outlines (cel-shading style)
+    float outline_thickness = 1.0f;      // pixel width of outline (1.0 = 1px, 2.0 = thicker)
+    float outline_intensity = 0.7f;      // outline opacity (0-1)
+    float outline_depth_threshold = 0.002f; // depth difference to detect an edge
     
     // Preset name (for display)
     const char* preset_name = "Off";
@@ -86,3 +93,8 @@ void fbo_begin_game();
 void fbo_end_game_and_blit(int win_w, int win_h, FBOScale mode = FBOScale::SHARP_BILINEAR, const PostFXState* postfx = nullptr);
 unsigned int fbo_get_texture();
 bool fbo_is_active();
+
+// Render portal effect directly into the current framebuffer (for non-PostFX / vanilla mode).
+// Call AFTER drawApplication() and BEFORE GUI overlay.
+// Works with or without the FBO pipeline active.
+void fbo_draw_portal_vanilla(int viewport_w, int viewport_h);

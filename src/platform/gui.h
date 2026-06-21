@@ -20,6 +20,9 @@ enum GuiAction {
     // Config menu
     GUI_CUSTOMIZE_CONTROLS,
     GUI_AUDIO_SETTINGS,
+    GUI_MUSIC_VOL_UP,
+    GUI_MUSIC_VOL_DOWN,
+    GUI_MUSIC_MUTE,
     GUI_TOGGLE_VSYNC,
     GUI_GFX_OPENGL,
     GUI_GFX_VULKAN,
@@ -53,6 +56,10 @@ enum GuiAction {
     GUI_MOD_LEVEL_DOWN,
     GUI_MOD_EXP_UP,
     GUI_MOD_EXP_DOWN,
+    // Phase B: Live game state modification (SRE gamestate direct writes)
+    GUI_MOD_HEAL_FULL,
+    GUI_MOD_ADD_COINS,
+    GUI_MOD_REFILL_MANA,
     GUI_OPEN_SAVE_EDITOR,
     GUI_SAVE_EDITOR_SAVE,
 };

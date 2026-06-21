@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <mutex>
+#include <thread>
 #include <sys/stat.h>
 #ifndef _WIN32
 #include <dirent.h>
@@ -38,6 +39,9 @@ extern VulkanBackend g_vk_backend;
 bool g_display_active = false;
 std::string g_save_dir = "./save";  // Default; overwritten by main.cpp at startup
 int g_death_detected_countdown = 0;  // Set when gameover music loads, counted down in game loop
+bool g_text_input_active = false;   // Set by JNI bridge when game requests text input
+std::string g_text_input_buffer;    // Current text buffer for text input mode
+bool g_text_input_pending_result = false; // Set by zenity thread when dialog closes
 
 
 // --- Frame Statistics ---
@@ -208,8 +212,15 @@ void bridge_realloc(void* emu_ptr) {
     uint32_t ptr = emu->get_reg(0);
     uint32_t size = emu->get_reg(1);
     if (ptr != 0 && g_guest_allocs.count(ptr) == 0) {
-        std::cout << "[ALLOC] WARNING: realloc called on unregistered pointer 0x" << std::hex << ptr 
-                  << " (requested size: " << std::dec << size << ")" << std::endl;
+        static int realloc_warn_count = 0;
+        if (realloc_warn_count < 5) {
+            std::cout << "[ALLOC] WARNING: realloc called on unregistered pointer 0x" << std::hex << ptr 
+                      << " (requested size: " << std::dec << size << ")" << std::endl;
+            realloc_warn_count++;
+        } else if (realloc_warn_count == 5) {
+            std::cout << "[ALLOC] WARNING: further unregistered realloc warnings suppressed." << std::endl;
+            realloc_warn_count++;
+        }
     }
     if (ptr == 0) {
         uint32_t addr = g_guest_heap_ptr;
@@ -499,6 +510,10 @@ void bridge_sin(void* emu_ptr) {
     uint64_t x_i = ((uint64_t)r1 << 32) | r0;
     memcpy(&x, &x_i, 8);
     double res = std::sin(x);
+    if (std::isnan(res)) {
+        static int c = 0; if (++c <= 3)
+            std::cerr << "[Math-NaN] sin(" << x << ") LR=0x" << std::hex << emu->get_lr() << std::dec << std::endl;
+    }
     uint64_t res_i;
     memcpy(&res_i, &res, 8);
     emu->set_reg(0, (uint32_t)res_i);
@@ -512,6 +527,10 @@ void bridge_cos(void* emu_ptr) {
     uint64_t x_i = ((uint64_t)r1 << 32) | r0;
     memcpy(&x, &x_i, 8);
     double res = std::cos(x);
+    if (std::isnan(res)) {
+        static int c = 0; if (++c <= 3)
+            std::cerr << "[Math-NaN] cos(" << x << ") LR=0x" << std::hex << emu->get_lr() << std::dec << std::endl;
+    }
     uint64_t res_i;
     memcpy(&res_i, &res, 8);
     emu->set_reg(0, (uint32_t)res_i);
@@ -525,6 +544,10 @@ void bridge_acos(void* emu_ptr) {
     uint64_t x_i = ((uint64_t)r1 << 32) | r0;
     memcpy(&x, &x_i, 8);
     double res = std::acos(x);
+    if (std::isnan(res)) {
+        static int c = 0; if (++c <= 3)
+            std::cerr << "[Math-NaN] acos(" << x << ") -> NaN! LR=0x" << std::hex << emu->get_lr() << std::dec << std::endl;
+    }
     uint64_t res_i;
     memcpy(&res_i, &res, 8);
     emu->set_reg(0, (uint32_t)res_i);
@@ -555,6 +578,113 @@ void bridge_tan(void* emu_ptr) {
     double res = std::tan(x);
     if (!emu->quiet_mode || std::isnan(res)) {
         std::cout << "[Math] tan(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
+    }
+    uint64_t res_i;
+    memcpy(&res_i, &res, 8);
+    emu->set_reg(0, (uint32_t)res_i);
+    emu->set_reg(1, (uint32_t)(res_i >> 32));
+}
+
+// --- Missing double-precision math bridges (critical for Lua) ---
+// Lua uses double for ALL numbers. Without these, gate timers, trigger
+// distances, and state transitions return garbage — causing the ARM32
+// gate/obstacle progression bug.
+
+// Helper macro: single-arg double function (softfp: R0:R1 -> R0:R1)
+#define BRIDGE_DOUBLE_1ARG(fname, cfunc) \
+void bridge_##fname(void* emu_ptr) { \
+    Emulator* emu = (Emulator*)emu_ptr; \
+    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1); \
+    double x; \
+    uint64_t x_i = ((uint64_t)r1 << 32) | r0; \
+    memcpy(&x, &x_i, 8); \
+    double res = cfunc(x); \
+    if (std::isnan(res) || std::isinf(res)) { \
+        static int nan_count_##fname = 0; \
+        if (++nan_count_##fname <= 5) { \
+            std::cerr << "[Math-NaN] " << #fname << "(" << x << ") -> " << res \
+                      << " LR=0x" << std::hex << emu->get_lr() << std::dec << std::endl; \
+        } \
+    } \
+    uint64_t res_i; \
+    memcpy(&res_i, &res, 8); \
+    emu->set_reg(0, (uint32_t)res_i); \
+    emu->set_reg(1, (uint32_t)(res_i >> 32)); \
+}
+
+// Helper macro: two-arg double function (softfp: R0:R1, R2:R3 -> R0:R1)
+#define BRIDGE_DOUBLE_2ARG(fname, cfunc) \
+void bridge_##fname(void* emu_ptr) { \
+    Emulator* emu = (Emulator*)emu_ptr; \
+    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1); \
+    uint32_t r2 = emu->get_reg(2), r3 = emu->get_reg(3); \
+    double a, b; \
+    uint64_t a_i = ((uint64_t)r1 << 32) | r0; \
+    uint64_t b_i = ((uint64_t)r3 << 32) | r2; \
+    memcpy(&a, &a_i, 8); \
+    memcpy(&b, &b_i, 8); \
+    double res = cfunc(a, b); \
+    if (std::isnan(res) || std::isinf(res)) { \
+        static int nan_count_##fname = 0; \
+        if (++nan_count_##fname <= 5) { \
+            std::cerr << "[Math-NaN] " << #fname << "(" << a << ", " << b << ") -> " << res \
+                      << " LR=0x" << std::hex << emu->get_lr() << std::dec << std::endl; \
+        } \
+    } \
+    uint64_t res_i; \
+    memcpy(&res_i, &res, 8); \
+    emu->set_reg(0, (uint32_t)res_i); \
+    emu->set_reg(1, (uint32_t)(res_i >> 32)); \
+}
+
+BRIDGE_DOUBLE_1ARG(floor_d, std::floor)
+BRIDGE_DOUBLE_1ARG(ceil_d, std::ceil)
+BRIDGE_DOUBLE_1ARG(sqrt_d, std::sqrt)
+BRIDGE_DOUBLE_1ARG(fabs_d, std::fabs)
+BRIDGE_DOUBLE_1ARG(log_d, std::log)
+BRIDGE_DOUBLE_1ARG(log10_d, std::log10)
+BRIDGE_DOUBLE_1ARG(log2_d, std::log2)
+BRIDGE_DOUBLE_1ARG(exp_d, std::exp)
+BRIDGE_DOUBLE_1ARG(asin_d, std::asin)
+BRIDGE_DOUBLE_1ARG(atan_d, std::atan)
+
+BRIDGE_DOUBLE_2ARG(fmod_d, std::fmod)
+BRIDGE_DOUBLE_2ARG(atan2_d, std::atan2)
+BRIDGE_DOUBLE_2ARG(ldexp_d, std::ldexp)
+
+// frexp: double frexp(double x, int* exp) — writes int via pointer in R2
+void bridge_frexp_d(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
+    uint32_t exp_ptr = emu->get_reg(2);
+    double x;
+    uint64_t x_i = ((uint64_t)r1 << 32) | r0;
+    memcpy(&x, &x_i, 8);
+    int exp_val;
+    double res = std::frexp(x, &exp_val);
+    if (exp_ptr) *(int32_t*)(memory + exp_ptr) = exp_val;
+    uint64_t res_i;
+    memcpy(&res_i, &res, 8);
+    emu->set_reg(0, (uint32_t)res_i);
+    emu->set_reg(1, (uint32_t)(res_i >> 32));
+}
+
+// modf: double modf(double x, double* iptr) — writes integer part via pointer in R2
+void bridge_modf_d(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t r0 = emu->get_reg(0), r1 = emu->get_reg(1);
+    uint32_t iptr = emu->get_reg(2);
+    double x;
+    uint64_t x_i = ((uint64_t)r1 << 32) | r0;
+    memcpy(&x, &x_i, 8);
+    double int_part;
+    double res = std::modf(x, &int_part);
+    if (iptr) {
+        uint64_t ip_i;
+        memcpy(&ip_i, &int_part, 8);
+        *(uint64_t*)(memory + iptr) = ip_i;
     }
     uint64_t res_i;
     memcpy(&res_i, &res, 8);
@@ -712,6 +842,8 @@ void bridge_GetMethodID(void* emu_ptr) {
     else if (strcmp(name, "getLongFromSP") == 0) id = 0x13280005;
     else if (strcmp(name, "saveLongInSP") == 0) id = 0x13280006;
     else if (strcmp(name, "<init>") == 0) id = 0x13000001;
+    else if (strcmp(name, "startTextInput") == 0) id = 0x13290001;
+    else if (strcmp(name, "stopTextInput") == 0) id = 0x13290002;
     else id = 0x56780001;
     if (!emu->quiet_mode) {
         std::cout << "[JNI] GetMethodID: " << name << " -> 0x" << std::hex << id << std::dec << std::endl;
@@ -762,6 +894,10 @@ void bridge_GetStringUTFChars(void* emu_ptr) {
         g_guest_heap_ptr += (str.length() + 8) & ~7;
         std::strcpy((char*)(memory + addr), str.c_str());
         emu->set_reg(0, addr);
+    } else if (jstr > 0x1000 && jstr < 0x40000000) {
+        // Treat as direct C-string pointer in guest memory
+        // (used by text input system at 0x3F000000)
+        emu->set_reg(0, jstr);
     } else {
         uint32_t addr = 0x30000;
         strcpy((char*)(memory + addr), "dummy_jni_string");
@@ -1093,8 +1229,8 @@ void bridge_CallBooleanMethodV(void* emu_ptr) {
         
         // Death detection: flag when gameover music is loaded
         if (fname.find("gameover") != std::string::npos) {
-            g_death_detected_countdown = 480;  // ~8 seconds at 60fps, then auto-restart
-            std::cout << "[Fix] Death detected (gameover music loaded) — auto-restart in ~8s" << std::endl;
+            g_death_detected_countdown = 180;  // ~3 seconds at 60fps, then auto-restart
+            std::cout << "[Fix] Death detected (gameover music loaded) — auto-restart in ~3s" << std::endl;
         }
         
         if (g_music_source != 0) {
@@ -1372,9 +1508,19 @@ void bridge_CallStaticVoidMethodV(void* emu_ptr) {
     } else if (mid == 0x13170007) { // receivedPrivacyConsent
         std::cout << "[JNI] receivedPrivacyConsent() -> Stubbed!" << std::endl;
     } else if (mid == 0x13250001) { // loadSnapshot
-        // NO-OP: On Android, loadSnapshot syncs cloud saves. Calling snapshotLoaded
-        // after death interferes with the respawn (overwrites internal game state).
-        std::cout << "[SAVE] loadSnapshot() -> Ignored (no cloud sync needed)" << std::endl;
+        std::string snap_path = g_save_dir + "/snapshot.bin";
+        std::cout << "[SAVE] loadSnapshot() -> Posting async load for " << snap_path << std::endl;
+        io_thread_post_load(snap_path, [](bool ok, std::vector<uint8_t> data) {
+            g_snapshot_load_pending_count++;
+            g_snapshot_has_data = ok;
+            if (ok) {
+                g_snapshot_data = std::move(data);
+                std::cout << "[SAVE] Loaded " << g_snapshot_data.size() << " bytes via async thread" << std::endl;
+            } else {
+                g_snapshot_data.clear();
+                std::cout << "[SAVE] Async load completed (no save data or error)" << std::endl;
+            }
+        });
     } else if (mid == 0x13250002) { // saveSnapshot
         // Extract save data from JNI args: saveSnapshot(String name, byte[] data)
         uint8_t* memory = emu->get_memory_base();
@@ -1424,6 +1570,21 @@ void bridge_CallStaticVoidMethodV(void* emu_ptr) {
         int64_t lval = (int64_t)((uint64_t)hi << 32 | lo);
         std::string key = resolve_jstring(key_h, memory);
         pref_set(key, std::to_string(lval));
+    } else if (mid == 0x13290001) { // startTextInput(String initialText)
+        uint8_t* memory = emu->get_memory_base();
+        uint32_t va_ptr = emu->get_reg(3);
+        uint32_t str_h = *(uint32_t*)(memory + va_ptr);
+        std::string initial = resolve_jstring(str_h, memory);
+        if (initial == "dummy_jni_string") initial = "";
+        
+        g_text_input_buffer = initial;
+        g_text_input_active = true;
+        std::cout << "[TextInput] startTextInput(\"" << initial 
+                  << "\") — type on keyboard, Enter to confirm, Escape to cancel" << std::endl;
+    } else if (mid == 0x13290002) { // stopTextInput
+        g_text_input_active = false;
+        g_text_input_buffer.clear();
+        std::cout << "[TextInput] stopTextInput()" << std::endl;
     }
 }
 
@@ -1470,10 +1631,34 @@ void bridge_NewIntArray(void* emu_ptr) {
     emu->set_reg(0, 0);
 }
 
+// Bump allocator for byte arrays — short-lived (created, filled, passed to save, discarded)
+static uint32_t g_byte_array_alloc_ptr = 0x30000000; // High region for arrays
+
 void bridge_NewByteArray(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
-    std::cout << "[JNI] NewByteArray() -> 0" << std::endl;
-    emu->set_reg(0, 0);
+    uint32_t length = emu->get_reg(1); // R1 = size
+    
+    if (length == 0 || length > 0x1000000) { // Sanity check (max 16MB)
+        std::cout << "[JNI] NewByteArray(" << length << ") -> 0 (invalid size)" << std::endl;
+        emu->set_reg(0, 0);
+        return;
+    }
+
+    // Layout: [uint32_t length][byte data...] — matches GetByteArrayElements
+    uint32_t array_addr = g_byte_array_alloc_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    *(uint32_t*)(memory + array_addr) = length;
+    // Zero-initialize the data region
+    memset(memory + array_addr + 4, 0, length);
+    // Bump allocator forward (align to 4 bytes)
+    g_byte_array_alloc_ptr += (4 + length + 3) & ~3U;
+    // Wrap around if we go too far
+    if (g_byte_array_alloc_ptr > 0x32000000) {
+        g_byte_array_alloc_ptr = 0x30000000;
+    }
+
+    std::cout << "[JNI] NewByteArray(" << length << ") -> 0x" << std::hex << array_addr << std::dec << std::endl;
+    emu->set_reg(0, array_addr);
 }
 
 void bridge_GetByteArrayElements(void* emu_ptr) {
@@ -1493,6 +1678,27 @@ void bridge_GetByteArrayElements(void* emu_ptr) {
 
 void bridge_ReleaseByteArrayElements(void* emu_ptr) {
     // No-op — nothing to release
+}
+
+// SetByteArrayRegion(JNIEnv*, jbyteArray array, jsize start, jsize len, const jbyte* buf)
+void bridge_SetByteArrayRegion(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t array = emu->get_reg(1);   // R1 = array
+    uint32_t start = emu->get_reg(2);   // R2 = start offset
+    uint32_t len = emu->get_reg(3);     // R3 = length
+    // buf is on the stack (5th arg) for ARM32 calling convention
+    uint32_t sp = emu->get_reg(13);
+    uint32_t buf = *(uint32_t*)(memory + sp);
+    
+    if (array && buf && len > 0 && len < 0x1000000) {
+        // Array layout: [uint32_t length][byte data...]
+        uint8_t* dst = memory + array + 4 + start;
+        uint8_t* src = memory + buf;
+        memcpy(dst, src, len);
+        std::cout << "[JNI] SetByteArrayRegion(array=0x" << std::hex << array 
+                  << ", start=" << std::dec << start << ", len=" << len << ")" << std::endl;
+    }
 }
 
 void bridge_GetIntArrayElements(void* emu_ptr) {
@@ -2992,15 +3198,72 @@ void bridge_gl_load_matrixf(void* emu_ptr) {
     if (has_bad) {
         uint32_t lr = emu->get_lr();
         static uint32_t nan_count = 0;
-        if ((++nan_count <= 3) || (nan_count % 1000 == 0)) {
+        ++nan_count;
+        if (nan_count <= 2) {
+            uint32_t raw0;
+            memcpy(&raw0, &m[0], 4);
+            std::cerr << "[MATRIX] NaN/Inf #" << nan_count << " at LR=0x" << std::hex << lr 
+                      << " ptr=0x" << ptr << " raw[0]=0x" << raw0 << std::dec << std::endl;
+            // Dump raw hex of all 16 floats
+            const uint32_t* raw = (const uint32_t*)m;
+            std::cerr << "  raw: ";
+            for (int i = 0; i < 16; i++) std::cerr << std::hex << raw[i] << " ";
+            std::cerr << std::dec << std::endl;
+            
+            // Dump all VFP S-registers via get_vfp_reg()
+            std::cerr << "  VFP: ";
+            for (int i = 0; i < 16; i++) {
+                float fval = emu->get_vfp_reg(i);
+                if (std::isnan(fval)) std::cerr << "S" << i << "=NaN ";
+                else if (std::isinf(fval)) std::cerr << "S" << i << "=Inf ";
+                else if (fval != 0.0f) std::cerr << "S" << i << "=" << fval << " ";
+            }
+            std::cerr << std::endl;
+            
+            // Scan 64 bytes BEFORE the matrix on stack for NaN source data
+            std::cerr << "  Stack[-64..0]: ";
+            for (int i = -16; i < 0; i++) {
+                uint32_t v = *(uint32_t*)(memory + ptr + i * 4);
+                float f;
+                memcpy(&f, &v, 4);
+                if (std::isnan(f)) std::cerr << "[" << (i*4) << "]=NaN ";
+                else if (v != 0) std::cerr << "[" << (i*4) << "]=0x" << std::hex << v << std::dec << " ";
+            }
+            std::cerr << std::endl;
+            
+            // Dump the 8 instructions BEFORE the BL to glLoadMatrixf
+            uint32_t call_site = (lr & ~1) - 4; // BL instruction
+            std::cerr << "  Code before call (0x" << std::hex << (call_site - 16) << "):" << std::dec;
+            for (int i = -8; i <= 0; i++) {
+                uint16_t insn = *(uint16_t*)(memory + call_site + i * 2);
+                std::cerr << " " << std::hex << insn;
+            }
+            std::cerr << std::dec << std::endl;
+        } else if (nan_count % 1000 == 0) {
             std::cout << "[MATRIX] NaN/Inf #" << nan_count << " at LR=0x" << std::hex << lr << std::dec
                       << " [" << m[0] << " " << m[1] << " / " << m[4] << " " << m[5] << "]" << std::endl;
         }
+        // Instead of replacing with identity (puts objects at origin = invisible),
+        // sanitize each NaN/Inf element to the corresponding identity value.
+        // This preserves valid translation/position data while fixing the rotation
+        // NaN caused by Unicorn VFP bug in the BLX at 0x122228c.
         if (g_display_active) {
             if (g_current_matrix_mode == GL_PROJECTION) {
                 glOrtho(0, 800, 480, 0, -1, 1);
             } else {
-                glLoadIdentity();
+                // Identity matrix values: 1 at diagonal (0,5,10,15), 0 elsewhere
+                static const GLfloat identity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+                GLfloat fixed[16];
+                bool any_valid = false;
+                for (int i = 0; i < 16; i++) {
+                    if (std::isnan(m[i]) || std::isinf(m[i])) {
+                        fixed[i] = identity[i];
+                    } else {
+                        fixed[i] = m[i];
+                        any_valid = true;
+                    }
+                }
+                glLoadMatrixf(fixed);
             }
         }
         return;
@@ -4095,7 +4358,7 @@ void bridge_glGetString(void* emu_ptr) {
         strcpy((char*)(memory + 0x40000), "OpenGL ES 2.0 (Swordigo Desktop)");
         strcpy((char*)(memory + 0x40100), "Swordigo Desktop Emulator");
         // Don't advertise ETC1 — forces game to use uncompressed textures (faster, no CPU decode)
-        strcpy((char*)(memory + 0x40200), "GL_OES_texture_npot");
+        strcpy((char*)(memory + 0x40200), "GL_OES_compressed_ETC1_texture_data GL_OES_texture_npot");
         initialized = true;
     }
     uint32_t name = emu->get_reg(0);
@@ -4317,10 +4580,36 @@ void bridge_stack_chk_fail(void* emu_ptr) {
     std::cerr << "[FATAL] __stack_chk_fail called!" << std::endl;
 }
 
-void bridge_cxa_guard(void* emu_ptr) {
-    // __cxa_guard_acquire/release/abort - just succeed
+void bridge_cxa_guard_acquire(void* emu_ptr) {
+    // __cxa_guard_acquire(int32_t* guard_object)
+    // Returns 1 if initialization is needed, 0 if already done
     Emulator* emu = (Emulator*)emu_ptr;
-    emu->set_reg(0, 1);
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t guard_ptr = emu->get_reg(0);
+    if (guard_ptr && guard_ptr < 0xE0000000) {
+        uint8_t guard_byte = memory[guard_ptr];
+        if (guard_byte != 0) {
+            emu->set_reg(0, 0); // already initialized
+            return;
+        }
+    }
+    emu->set_reg(0, 1); // needs initialization
+}
+
+void bridge_cxa_guard_release(void* emu_ptr) {
+    // __cxa_guard_release(int32_t* guard_object) — mark as initialized
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t guard_ptr = emu->get_reg(0);
+    if (guard_ptr && guard_ptr < 0xE0000000) {
+        memory[guard_ptr] = 1; // mark initialized
+    }
+}
+
+void bridge_cxa_guard_abort(void* emu_ptr) {
+    // __cxa_guard_abort — just return
+    Emulator* emu = (Emulator*)emu_ptr;
+    (void)emu;
 }
 
 void bridge_pthread_mutex(void* emu_ptr) {
@@ -4478,6 +4767,23 @@ void JniBridge::init_standard_bridges() {
     register_handler("pow", bridge_pow);
     register_handler("sincosf", bridge_sincosf);
 
+    // Double-precision math (critical for Lua — Lua uses double for ALL numbers)
+    register_handler("floor", bridge_floor_d);
+    register_handler("ceil", bridge_ceil_d);
+    register_handler("sqrt", bridge_sqrt_d);
+    register_handler("fmod", bridge_fmod_d);
+    register_handler("fabs", bridge_fabs_d);
+    register_handler("log", bridge_log_d);
+    register_handler("log10", bridge_log10_d);
+    register_handler("log2", bridge_log2_d);
+    register_handler("exp", bridge_exp_d);
+    register_handler("ldexp", bridge_ldexp_d);
+    register_handler("frexp", bridge_frexp_d);
+    register_handler("modf", bridge_modf_d);
+    register_handler("asin", bridge_asin_d);
+    register_handler("atan", bridge_atan_d);
+    register_handler("atan2", bridge_atan2_d);
+
     // File I/O
     register_handler("fopen", bridge_fopen);
     register_handler("fclose", bridge_fclose);
@@ -4525,8 +4831,9 @@ void JniBridge::init_standard_bridges() {
     register_handler("__cxa_atexit", bridge_cxa_atexit);
     register_handler("__cxa_finalize", bridge_cxa_atexit);
     register_handler("__stack_chk_fail", bridge_stack_chk_fail);
-    register_handler("__cxa_guard_acquire", bridge_cxa_guard);
-    register_handler("__cxa_guard_release", bridge_cxa_guard);
+    register_handler("__cxa_guard_acquire", bridge_cxa_guard_acquire);
+    register_handler("__cxa_guard_release", bridge_cxa_guard_release);
+    register_handler("__cxa_guard_abort", bridge_cxa_guard_abort);
     register_handler("__google_potentially_blocking_region_begin", bridge_google_blocking);
     register_handler("__google_potentially_blocking_region_end", bridge_google_blocking);
     register_handler("time", bridge_time);
@@ -4601,6 +4908,7 @@ void JniBridge::init_standard_bridges() {
     register_handler("NewByteArray", bridge_NewByteArray);
     register_handler("GetByteArrayElements", bridge_GetByteArrayElements);
     register_handler("ReleaseByteArrayElements", bridge_ReleaseByteArrayElements);
+    register_handler("SetByteArrayRegion", bridge_SetByteArrayRegion);
     register_handler("GetIntArrayElements", bridge_GetIntArrayElements);
     register_handler("ReleaseIntArrayElements", bridge_ReleaseIntArrayElements);
     register_handler("SetIntArrayRegion", bridge_SetIntArrayRegion);

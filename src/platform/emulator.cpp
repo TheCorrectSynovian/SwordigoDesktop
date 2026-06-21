@@ -76,6 +76,34 @@ Emulator::Emulator(uint8_t* guest_mem, uint32_t mem_size)
     uint32_t fpexc = 0x40000000;
     uc_reg_write((uc_engine*)uc, UC_ARM_REG_FPEXC, &fpexc);
 
+    // Configure FPSCR to match Android's default VFP settings:
+    // Bit 24: FZ=1 (Flush denormals to zero — critical! Without this,
+    //         near-zero values produce denormals instead of 0, causing
+    //         divisions to produce infinity → NaN cascades in matrix math)
+    // Bit 25: DN=1 (Default NaN — produce standard 0x7FC00000 for any NaN result)
+    uint32_t fpscr = (1 << 24) | (1 << 25);  // FZ | DN
+    uc_reg_write((uc_engine*)uc, UC_ARM_REG_FPSCR, &fpscr);
+
+    // Zero-initialize all VFP/NEON registers (D0-D15 covers S0-S31)
+    // Unicorn may leave these as garbage/NaN. Game code that reads a
+    // VFP register before writing it would produce NaN cascades.
+    {
+        uint64_t zero = 0;
+        int dregs[] = {
+            UC_ARM_REG_D0,  UC_ARM_REG_D1,  UC_ARM_REG_D2,  UC_ARM_REG_D3,
+            UC_ARM_REG_D4,  UC_ARM_REG_D5,  UC_ARM_REG_D6,  UC_ARM_REG_D7,
+            UC_ARM_REG_D8,  UC_ARM_REG_D9,  UC_ARM_REG_D10, UC_ARM_REG_D11,
+            UC_ARM_REG_D12, UC_ARM_REG_D13, UC_ARM_REG_D14, UC_ARM_REG_D15,
+            UC_ARM_REG_D16, UC_ARM_REG_D17, UC_ARM_REG_D18, UC_ARM_REG_D19,
+            UC_ARM_REG_D20, UC_ARM_REG_D21, UC_ARM_REG_D22, UC_ARM_REG_D23,
+            UC_ARM_REG_D24, UC_ARM_REG_D25, UC_ARM_REG_D26, UC_ARM_REG_D27,
+            UC_ARM_REG_D28, UC_ARM_REG_D29, UC_ARM_REG_D30, UC_ARM_REG_D31,
+        };
+        for (int reg : dregs) {
+            uc_reg_write((uc_engine*)uc, reg, &zero);
+        }
+    }
+
     uint32_t stack_base = size - 0x1000; 
     set_reg(13, stack_base); 
 
@@ -97,6 +125,81 @@ Emulator::Emulator(uint8_t* guest_mem, uint32_t mem_size)
     // Hook 3: Unmapped memory
     uc_hook mem_hook;
     uc_hook_add((uc_engine*)uc, &mem_hook, UC_HOOK_MEM_UNMAPPED, (void*)hook_mem_unmapped, this, 1, 0);
+
+    // Hook 4: NaN matrix tracer — traces inside the ARM-mode function that
+    // produces NaN. The BLX at 0x122228c targets an ARM-mode function.
+    // We hook a wide range to catch the target function and trace VFP.
+    static bool nan_traced = false;
+    static uint32_t pc_history[32] = {};
+    static int pc_idx = 0;
+    static auto nan_check = +[](uc_engine *uc, uint64_t address, uint32_t size, void *user_data) {
+        if (nan_traced) return;
+        
+        pc_history[pc_idx % 32] = (uint32_t)address;
+        pc_idx++;
+        
+        // Only check S0 for speed (NaN always appears in S0 first)
+        uint32_t s0_raw;
+        uc_reg_read(uc, UC_ARM_REG_S0, &s0_raw);
+        if (s0_raw != 0x7fc00000) return;
+        
+        nan_traced = true;
+        uint32_t pc, lr, cpsr;
+        uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+        uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+        bool thumb = (cpsr >> 5) & 1;
+        
+        std::cerr << "[NaN-TRACE] First NaN in S0 at PC=0x" << std::hex << pc
+                  << " LR=0x" << lr << " mode=" << (thumb ? "THUMB" : "ARM")
+                  << std::dec << std::endl;
+        
+        // Dump last 32 PCs
+        std::cerr << "  PC history (oldest first):" << std::endl << "  ";
+        int start = (pc_idx >= 32) ? pc_idx - 32 : 0;
+        for (int i = start; i < pc_idx; i++) {
+            std::cerr << std::hex << pc_history[i % 32] << " ";
+            if ((i - start + 1) % 10 == 0) std::cerr << std::endl << "  ";
+        }
+        std::cerr << std::dec << std::endl;
+        
+        // Dump VFP S0-S15
+        for (int i = 0; i < 16; i++) {
+            uint32_t sv;
+            uc_reg_read(uc, UC_ARM_REG_S0 + i, &sv);
+            float fv;
+            memcpy(&fv, &sv, 4);
+            std::cerr << "  S" << i << "=0x" << std::hex << sv << std::dec
+                      << " (" << fv << ")" << std::endl;
+        }
+        
+        // Dump the instruction that produced NaN
+        Emulator* emu = (Emulator*)user_data;
+        uint8_t* memory = emu->get_memory_base();
+        uint32_t prev_pc = pc_history[(pc_idx - 2) % 32];
+        std::cerr << "  Instruction at prev PC=0x" << std::hex << prev_pc << ": ";
+        for (int i = 0; i < 8; i++) {
+            std::cerr << std::hex << (int)memory[prev_pc + i] << " ";
+        }
+        std::cerr << std::dec << std::endl;
+        
+        // Also dump R0-R3 for context
+        for (int r = 0; r < 4; r++) {
+            uint32_t rv;
+            uc_reg_read(uc, UC_ARM_REG_R0 + r, &rv);
+            std::cerr << "  R" << r << "=0x" << std::hex << rv << std::dec << std::endl;
+        }
+    };
+    
+    // Hook the Thumb caller region
+    uc_hook nan_hook1;
+    uc_hook_add((uc_engine*)uc, &nan_hook1, UC_HOOK_CODE, (void*)nan_check,
+                this, 0x1222000, 0x1222400);
+    
+    // Hook a wide ARM-mode target range (covers likely BLX targets)
+    uc_hook nan_hook2;
+    uc_hook_add((uc_engine*)uc, &nan_hook2, UC_HOOK_CODE, (void*)nan_check,
+                this, 0x11A0000, 0x11B0000);
 }
 
 Emulator::~Emulator() {

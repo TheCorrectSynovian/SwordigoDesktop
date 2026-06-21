@@ -19,6 +19,23 @@
     }
 ,
     {
+      "name": "[RL] v6.6-rl [ARM64] (Placeholder)",
+      "filename": "libswordigo.so",
+      "filepath": "engine/rl-v6.6/arm64-v8a/libswordigo.so",
+      "sha256": "",
+      "version": "6.6-rl",
+      "version_dir": "rl-v6.6",
+      "arch": "ARM64",
+      "file_size": 0,
+      "is_default": false,
+      "status": "placeholder",
+      "game_type": "RLSwordigo",
+      "assets_dir": "rl_assets",
+      "dependencies": ["libsre.so", "libmini.so", "libGlossHook.so"],
+      "dep_paths": ["engine/rl-v6.6/arm64-v8a/libsre.so", "engine/rl-v6.6/arm64-v8a/libmini.so", "engine/rl-v6.6/arm64-v8a/libGlossHook.so"]
+    }
+,
+    {
       "name": "[3D] [ARM64] (Unknown)",
       "filename": "libswordigo.so",
       "filepath": "engine/sw3d/arm64-v8a/libswordigo.so",
@@ -31,8 +48,8 @@
       "status": "unknown",
       "game_type": "Swordigo",
       "assets_dir": "assets",
-      "dependencies": ["libmini.so", "libGlossHook.so"],
-      "dep_paths": ["engine/sw3d/arm64-v8a/libmini.so", "engine/sw3d/arm64-v8a/libGlossHook.so"]
+      "dependencies": ["libsre.so", "libmini.so", "libGlossHook.so"],
+      "dep_paths": ["engine/sw3d/arm64-v8a/libsre.so", "engine/sw3d/arm64-v8a/libmini.so", "engine/sw3d/arm64-v8a/libGlossHook.so"]
     }
 ,
     {
@@ -82,8 +99,8 @@
       "status": "tested",
       "game_type": "Swordigo",
       "assets_dir": "assets",
-      "dependencies": [],
-      "dep_paths": []
+      "dependencies": ["libsre.so"],
+      "dep_paths": ["engine/v1.4.12/arm64-v8a/libsre.so"]
     }
 ,
     {
@@ -116,8 +133,8 @@
       "status": "unknown",
       "game_type": "Swordigo",
       "assets_dir": "assets",
-      "dependencies": [],
-      "dep_paths": []
+      "dependencies": ["libsre.so"],
+      "dep_paths": ["engine/v1.4.6/arm64-v8a/libsre.so"]
     }
 ,
     {
@@ -150,8 +167,8 @@
       "status": "unknown",
       "game_type": "Swordigo",
       "assets_dir": "assets",
-      "dependencies": ["libmini.so", "libGlossHook.so", "libopenal-soft.so"],
-      "dep_paths": ["engine/vManson/arm64-v8a/libmini.so", "engine/vManson/arm64-v8a/libGlossHook.so", "engine/vManson/arm64-v8a/libopenal-soft.so"]
+      "dependencies": ["libsre.so", "libmini.so", "libGlossHook.so", "libopenal-soft.so"],
+      "dep_paths": ["engine/vManson/arm64-v8a/libsre.so", "engine/vManson/arm64-v8a/libmini.so", "engine/vManson/arm64-v8a/libGlossHook.so", "engine/vManson/arm64-v8a/libopenal-soft.so"]
     }
 ,
     {

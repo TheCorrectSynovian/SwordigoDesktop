@@ -1,0 +1,246 @@
+/*
+ * sre_string.c — Non-atomic CppString replacement
+ *
+ * Replaces GNU libstdc++ COW std::string functions that use atomic
+ * LDAXR/STLXR for reference counting. In our single-threaded Unicorn
+ * emulator, atomics cause spin loops. These replacements use simple
+ * non-atomic operations.
+ *
+ * Functions replaced:
+ *   CppString_from_char_p  (0x566bb8 in v1.4.12)
+ *   CppString_append_impl  (0x567254 in v1.4.12)
+ *   CppString_assign       (0x56918c in v1.4.12)
+ *   CppString_release      (0x565220 in v1.4.12)
+ */
+
+#include "sre.h"
+
+/* These are resolved from libc by the bridge */
+extern void* malloc(size_t size);
+extern void  free(void* ptr);
+extern void* memcpy(void* dest, const void* src, size_t n);
+extern void* memset(void* s, int c, size_t n);
+extern size_t strlen(const char* s);
+extern void* realloc(void* ptr, size_t size);
+
+/* Global: pointer to the empty string sentinel in libswordigo.so's BSS */
+static char* g_empty_sentinel = 0;
+
+/* =========================================================================
+ * Internal helpers
+ * ========================================================================= */
+
+/* Allocate a new string with given capacity */
+static SreStringRep* sre_string_alloc(uint64_t capacity) {
+    /* Allocate: header + data + NUL terminator */
+    SreStringRep* rep = (SreStringRep*)malloc(sizeof(SreStringRep) + capacity + 1);
+    if (!rep) return 0;
+
+    rep->length   = 0;
+    rep->capacity = capacity;
+    rep->refcount = 0;  /* 0 = one reference, not shared */
+    rep->_pad     = 0;
+
+    /* NUL-terminate */
+    char* data = SRE_DATA(rep);
+    data[0] = '\0';
+
+    return rep;
+}
+
+/* Check if a data pointer is the empty sentinel (refcount -1, never free) */
+static int sre_is_empty_sentinel(const char* data) {
+    if (!data) return 1;
+    if (g_empty_sentinel && data == g_empty_sentinel) return 1;
+    /* Also check refcount == -1 as fallback */
+    SreStringRep* rep = SRE_REP(data);
+    return (rep->refcount == -1);
+}
+
+/* Release a reference — non-atomic */
+static void sre_rep_release(char* data) {
+    if (sre_is_empty_sentinel(data)) return;
+
+    SreStringRep* rep = SRE_REP(data);
+
+    /* Decrement refcount. Convention:
+     *   was 0 (sole owner) → -1 → free
+     *   was >0 (shared)    → >=0 → don't free
+     *   was -1 (static)    → should never happen (caught above)
+     */
+    int old = rep->refcount;
+    rep->refcount = old - 1;
+
+    if (old <= 0) {
+        /* We were the last reference, free the block */
+        free(rep);
+    }
+}
+
+/* Grab (increment) a reference — non-atomic */
+static void sre_rep_grab(char* data) {
+    if (sre_is_empty_sentinel(data)) return;
+
+    SreStringRep* rep = SRE_REP(data);
+    /* Only grab if not static (-1) */
+    if (rep->refcount >= 0) {
+        rep->refcount++;
+    }
+}
+
+/* Clone a shared string (COW: make a private copy) */
+static char* sre_string_clone(const char* old_data, uint64_t len) {
+    SreStringRep* new_rep = sre_string_alloc(len);
+    if (!new_rep) return (char*)old_data;
+
+    char* new_data = SRE_DATA(new_rep);
+    memcpy(new_data, old_data, len);
+    new_data[len] = '\0';
+    new_rep->length = len;
+
+    return new_data;
+}
+
+/* Ensure the string has exclusive ownership (refcount == 0) and enough capacity.
+ * Returns pointer to writable data. May reallocate. */
+static char* sre_string_mutate(SreString* self, uint64_t needed_capacity) {
+    char* data = self->data;
+
+    if (sre_is_empty_sentinel(data)) {
+        /* Empty sentinel → allocate new */
+        SreStringRep* rep = sre_string_alloc(needed_capacity);
+        if (!rep) return data;
+        self->data = SRE_DATA(rep);
+        return self->data;
+    }
+
+    SreStringRep* rep = SRE_REP(data);
+
+    if (rep->refcount > 0) {
+        /* Shared — make a private copy */
+        char* new_data = sre_string_clone(data, rep->length);
+        sre_rep_release(data);  /* release our reference to the shared copy */
+        self->data = new_data;
+        data = new_data;
+        rep = SRE_REP(data);
+    }
+
+    /* Now we have exclusive ownership. Check capacity. */
+    if (rep->capacity < needed_capacity) {
+        /* Need more space — realloc */
+        uint64_t new_cap = needed_capacity;
+        /* Growth factor: at least double */
+        if (new_cap < rep->capacity * 2) {
+            new_cap = rep->capacity * 2;
+        }
+        SreStringRep* new_rep = (SreStringRep*)realloc(rep, sizeof(SreStringRep) + new_cap + 1);
+        if (!new_rep) return data;
+        new_rep->capacity = new_cap;
+        self->data = SRE_DATA(new_rep);
+        data = self->data;
+    }
+
+    return data;
+}
+
+/* =========================================================================
+ * Exported replacement functions
+ * ========================================================================= */
+
+/*
+ * sre_CppString_from_char_p — Replace std::string constructor from char*
+ *
+ * Original at offset 0x566bb8 (v1.4.12)
+ * ARM64 ABI: X0 = this (SreString*), X1 = src (const char*)
+ */
+void sre_CppString_from_char_p(SreString* self, const char* src) {
+    if (!src) {
+        /* NULL source → empty string */
+        self->data = g_empty_sentinel;
+        return;
+    }
+
+    uint64_t len = strlen(src);
+    if (len == 0 && g_empty_sentinel) {
+        self->data = g_empty_sentinel;
+        return;
+    }
+
+    SreStringRep* rep = sre_string_alloc(len);
+    if (!rep) {
+        self->data = g_empty_sentinel;
+        return;
+    }
+
+    char* data = SRE_DATA(rep);
+    memcpy(data, src, len + 1);  /* include NUL */
+    rep->length = len;
+
+    self->data = data;
+}
+
+/*
+ * sre_CppString_assign — Replace std::string::assign(char*, len)
+ *
+ * Original at offset 0x56918c (v1.4.12)
+ * ARM64 ABI: X0 = this (SreString*), X1 = src (const char*), X2 = len
+ */
+void sre_CppString_assign(SreString* self, const char* src, uint64_t len) {
+    if (!src || len == 0) {
+        /* Release old data */
+        sre_rep_release(self->data);
+        self->data = g_empty_sentinel;
+        return;
+    }
+
+    /* Try to reuse existing buffer */
+    char* data = sre_string_mutate(self, len);
+    SreStringRep* rep = SRE_REP(data);
+
+    memcpy(data, src, len);
+    data[len] = '\0';
+    rep->length = len;
+}
+
+/*
+ * sre_CppString_append — Replace std::string::append(char*, len)
+ *
+ * Original at offset 0x567254 (v1.4.12)
+ * ARM64 ABI: X0 = this (SreString*), X1 = src (const char*), X2 = len
+ */
+void sre_CppString_append(SreString* self, const char* src, uint64_t len) {
+    if (!src || len == 0) return;
+
+    char* data = self->data;
+    uint64_t old_len = 0;
+
+    if (!sre_is_empty_sentinel(data)) {
+        old_len = SRE_REP(data)->length;
+    }
+
+    uint64_t new_len = old_len + len;
+
+    /* Ensure we have exclusive ownership and enough space */
+    data = sre_string_mutate(self, new_len);
+    SreStringRep* rep = SRE_REP(data);
+
+    /* Append */
+    memcpy(data + old_len, src, len);
+    data[new_len] = '\0';
+    rep->length = new_len;
+}
+
+/*
+ * sre_CppString_release — Replace std::string destructor / release
+ *
+ * Original at offset 0x565220 (v1.4.12)
+ * ARM64 ABI: X0 = this (SreString*)
+ *
+ * Decrements refcount. If last reference, frees memory.
+ * If empty sentinel, does nothing.
+ */
+void sre_CppString_release(SreString* self) {
+    if (!self) return;
+    sre_rep_release(self->data);
+    self->data = g_empty_sentinel;
+}

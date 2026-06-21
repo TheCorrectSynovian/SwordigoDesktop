@@ -1,0 +1,355 @@
+/* =====================================================================
+ * sre_music.c — SRE Native MusicPlayer
+ * =====================================================================
+ * Replaces Caver::MusicPlayer entirely. The original uses boost::shared_ptr
+ * and C++ exceptions (try/catch) for playlist management — all of which
+ * break under Unicorn emulation.
+ *
+ * Architecture:
+ *   Engine calls MusicPlayer methods (PlayMusicWithName, FadeIn, etc.)
+ *     → SRE intercepts → writes commands to g_sre_music_* globals
+ *     → Host reads globals each frame → executes via OpenAL
+ *
+ * This eliminates ALL C++ exceptions from the music subsystem.
+ *
+ * Hook addresses (ARM64 v1.4.12):
+ *   PlayMusicWithName    = 0x4811a0
+ *   FadeIn               = 0x4814a8
+ *   FadeOut              = 0x4815d8
+ *   Update               = 0x482090
+ *   SetVolume            = 0x482064
+ *   SetLooping           = 0x48206c
+ *   SetEnabled           = 0x481e88
+ *   SetSuspended         = 0x481fc0
+ * =====================================================================
+ */
+
+/* No libc in guest SRE code */
+typedef unsigned long long sre_u64;
+typedef unsigned int       sre_u32;
+
+/* ========== Music Command Interface ==========
+ * SRE writes these globals. Host reads them each frame.
+ * The host clears _pending flags after processing. */
+
+/* Load command: SRE writes name + sets pending flag */
+char g_sre_music_load_name[256] = {0};  /* Music name to load (e.g., "wastelands") */
+int  g_sre_music_load_pending = 0;      /* 1 = host should load this file */
+int  g_sre_music_load_restart = 0;      /* 1 = restart even if same track */
+
+/* Playback commands */
+int  g_sre_music_play_pending = 0;      /* 1 = host should play */
+int  g_sre_music_pause_pending = 0;     /* 1 = host should pause */
+int  g_sre_music_stop_pending = 0;      /* 1 = host should stop */
+
+/* Volume/looping — host reads these continuously */
+float g_sre_music_volume = 1.0f;        /* Current effective volume */
+int   g_sre_music_volume_dirty = 0;     /* 1 = volume changed, host should apply */
+int   g_sre_music_looping = 1;          /* Loop flag */
+int   g_sre_music_looping_dirty = 0;    /* 1 = looping changed */
+
+/* ========== Internal State ========== */
+static float s_master_volume = 1.0f;     /* Engine-set master volume */
+static float s_fade_volume = 1.0f;       /* Current fade multiplier (0..1) */
+static float s_fade_target = 1.0f;       /* Fade destination */
+static float s_fade_speed = 0.0f;        /* Fade rate per second */
+static int   s_enabled = 1;              /* Music enabled by engine */
+static int   s_suspended = 0;            /* Music suspended (app backgrounded) */
+static int   s_playing = 0;              /* Track is loaded and playing */
+
+/* Current music name — for duplicate detection */
+static char s_current_name[256] = {0};
+
+/* ========== Helper: string copy ========== */
+static void sre_strcpy(char* dst, const char* src, int max) {
+    int i;
+    for (i = 0; i < max - 1 && src[i]; i++) {
+        dst[i] = src[i];
+    }
+    dst[i] = 0;
+}
+
+static int sre_strcmp(const char* a, const char* b) {
+    while (*a && *b && *a == *b) { a++; b++; }
+    return *a - *b;
+}
+
+/* ========== Pending track — for fade transitions ========== */
+static char s_pending_name[256] = {0};
+static int  s_has_pending = 0;
+static int  s_pending_restart = 0;
+
+/* Fade speed for automatic transitions (matches original: 1.0 / 1.5 ≈ 0.667) */
+#define FADE_TRANSITION_SPEED 0.667f
+
+/* ========== PlayMusicWithName ==========
+ * Original: Caver::MusicPlayer::PlayMusicWithName(const std::string&, bool)
+ * nm offset: 0x4811a0
+ *
+ * ARM64 ABI:
+ *   X0 = this (MusicPlayer*)
+ *   X1 = const std::string& name (pointer to SreString)
+ *   X2 = bool restart (0 or 1)
+ *
+ * Behavior (matching original decompilation):
+ *   If already playing same track → skip
+ *   If currently playing something else → fadeout, queue new track as pending
+ *   If nothing playing → load immediately with fadein
+ */
+void sre_PlayMusicWithName(void* self, void* name_ref, int restart) {
+    /* Read the std::string */
+    char* data = *(char**)name_ref;
+    if (!data) return;
+    
+    /* Length is at data - 24 (COW _Rep::_M_length) */
+    sre_u64 len = *(sre_u64*)(data - 24);
+    if (len == 0 || len >= 255) return;
+    
+    /* Build name string */
+    char new_name[256];
+    sre_u64 i;
+    for (i = 0; i < len && i < 255; i++) {
+        new_name[i] = data[i];
+    }
+    new_name[i] = 0;
+    
+    /* Check if same track already playing OR already pending (skip reload) */
+    if (!restart) {
+        /* Compare against currently playing track */
+        if (s_playing) {
+            int same = 1;
+            sre_u64 j;
+            for (j = 0; j < len; j++) {
+                if (new_name[j] != s_current_name[j]) { same = 0; break; }
+            }
+            if (same && s_current_name[len] == 0) {
+                return;
+            }
+        }
+        
+        /* Compare against pending track (already queued for transition) */
+        if (s_has_pending) {
+            int same = 1;
+            sre_u64 j;
+            for (j = 0; j < len; j++) {
+                if (new_name[j] != s_pending_name[j]) { same = 0; break; }
+            }
+            if (same && s_pending_name[len] == 0) {
+                return;
+            }
+        }
+    }
+    
+    /* Store as pending track */
+    for (i = 0; new_name[i] && i < 255; i++) {
+        s_pending_name[i] = new_name[i];
+    }
+    s_pending_name[i] = 0;
+    s_pending_restart = restart;
+    s_has_pending = 1;
+    
+    if (s_playing && s_fade_volume > 0.01f) {
+        /* Currently playing — start fadeout, Update will handle transition */
+        s_fade_target = 0.0f;
+        s_fade_speed = FADE_TRANSITION_SPEED;
+    } else {
+        /* Nothing playing — load immediately with fadein */
+        for (i = 0; s_pending_name[i] && i < 255; i++) {
+            g_sre_music_load_name[i] = s_pending_name[i];
+            s_current_name[i] = s_pending_name[i];
+        }
+        g_sre_music_load_name[i] = 0;
+        s_current_name[i] = 0;
+        
+        g_sre_music_load_restart = restart;
+        g_sre_music_load_pending = 1;
+        s_has_pending = 0;
+        s_playing = 1;
+        
+        /* Start fadein */
+        s_fade_volume = 0.0f;
+        s_fade_target = 1.0f;
+        s_fade_speed = FADE_TRANSITION_SPEED;
+        
+        g_sre_music_volume = 0.0f;
+        g_sre_music_volume_dirty = 1;
+    }
+}
+
+/* ========== FadeIn ==========
+ * Original: Caver::MusicPlayer::FadeIn(float duration)
+ * nm offset: 0x4814a8
+ *
+ * Decompiled: this+0x20 = 1, this+0x24 = 1.0/duration
+ */
+void sre_MusicPlayer_FadeIn(void* self, float duration) {
+    s_fade_target = 1.0f;
+    if (duration > 0.01f) {
+        s_fade_speed = 1.0f / duration;
+    } else {
+        s_fade_volume = 1.0f;
+        s_fade_speed = 0.0f;
+        g_sre_music_volume = s_master_volume;
+        g_sre_music_volume_dirty = 1;
+    }
+}
+
+/* ========== FadeOut ==========
+ * Original: Caver::MusicPlayer::FadeOut(float duration)
+ * nm offset: 0x4815d8
+ *
+ * Decompiled: this+0x20 = -1, this+0x24 = 1.0/duration
+ */
+void sre_MusicPlayer_FadeOut(void* self, float duration) {
+    s_fade_target = 0.0f;
+    if (duration > 0.01f) {
+        s_fade_speed = 1.0f / duration;
+    } else {
+        s_fade_volume = 0.0f;
+        s_fade_speed = 0.0f;
+        g_sre_music_volume = 0.0f;
+        g_sre_music_volume_dirty = 1;
+    }
+}
+
+/* ========== Update ==========
+ * Original: Caver::MusicPlayer::Update(float deltaTime)
+ * nm offset: 0x482090
+ *
+ * Called every frame. Handles:
+ *   1. Sync master volume from MusicPlayer object (this+4)
+ *      (SetVolume can't be hooked — trampoline collision)
+ *   2. Apply fade transitions
+ *   3. When fadeout completes: load pending track + start fadein
+ */
+void sre_MusicPlayer_Update(void* self, float deltaTime) {
+    /* === Sync master volume from MusicPlayer object ===
+     * SetVolume (0x482064) can't be hooked (8 bytes from SetLooping).
+     * Original SetVolume stores volume at this+4. Read it here. */
+    float obj_volume = *(float*)((char*)self + 4);
+    if (obj_volume >= 0.0f && obj_volume <= 1.0f) {
+        s_master_volume = obj_volume;
+    }
+    
+    /* === Sync looping flag from MusicPlayer object ===
+     * SetLooping (0x48206c) can't be hooked either (same collision).
+     * Original SetLooping stores at this+8. */
+    int obj_looping = *(unsigned char*)((char*)self + 8);
+    if (obj_looping != g_sre_music_looping) {
+        g_sre_music_looping = obj_looping ? 1 : 0;
+        g_sre_music_looping_dirty = 1;
+    }
+    
+    /* === Apply fade === */
+    if (s_fade_speed > 0.0f) {
+        if (s_fade_volume < s_fade_target) {
+            /* Fading IN */
+            s_fade_volume += s_fade_speed * deltaTime;
+            if (s_fade_volume >= s_fade_target) {
+                s_fade_volume = s_fade_target;
+                s_fade_speed = 0.0f;
+            }
+        } else if (s_fade_volume > s_fade_target) {
+            /* Fading OUT */
+            s_fade_volume -= s_fade_speed * deltaTime;
+            if (s_fade_volume <= s_fade_target) {
+                s_fade_volume = s_fade_target;
+                s_fade_speed = 0.0f;
+                
+                /* Fadeout complete — handle pending or stop */
+                if (s_fade_target <= 0.001f) {
+                    if (s_has_pending) {
+                        /* Load the queued track */
+                        sre_u64 i;
+                        for (i = 0; s_pending_name[i] && i < 255; i++) {
+                            g_sre_music_load_name[i] = s_pending_name[i];
+                            s_current_name[i] = s_pending_name[i];
+                        }
+                        g_sre_music_load_name[i] = 0;
+                        s_current_name[i] = 0;
+                        
+                        g_sre_music_load_restart = s_pending_restart;
+                        g_sre_music_load_pending = 1;
+                        s_has_pending = 0;
+                        s_playing = 1;
+                        
+                        /* Start fadein for new track */
+                        s_fade_volume = 0.0f;
+                        s_fade_target = 1.0f;
+                        s_fade_speed = FADE_TRANSITION_SPEED;
+                    } else {
+                        /* No pending — just stop */
+                        g_sre_music_stop_pending = 1;
+                        s_playing = 0;
+                    }
+                }
+            }
+        }
+    }
+    
+    /* === Apply combined volume every frame === */
+    float vol = s_master_volume * s_fade_volume;
+    if (vol < 0.0f) vol = 0.0f;
+    if (vol > 1.0f) vol = 1.0f;
+    
+    g_sre_music_volume = vol;
+    g_sre_music_volume_dirty = 1;
+}
+
+/* ========== SetVolume / SetLooping ==========
+ * NOT HOOKED — trampoline collision (only 8 bytes apart).
+ * Original SetVolume stores at this+4, our Update reads it.
+ * Original SetLooping calls JNI bridge directly (works).
+ * These stay for reference / future use. */
+
+void sre_MusicPlayer_SetVolume(void* self, float volume) {
+    s_master_volume = volume;
+    float vol = s_master_volume * s_fade_volume;
+    if (vol < 0.0f) vol = 0.0f;
+    if (vol > 1.0f) vol = 1.0f;
+    g_sre_music_volume = vol;
+    g_sre_music_volume_dirty = 1;
+}
+
+void sre_MusicPlayer_SetLooping(void* self, int looping) {
+    g_sre_music_looping = looping ? 1 : 0;
+    g_sre_music_looping_dirty = 1;
+}
+
+/* ========== SetEnabled ==========
+ * Original: Caver::MusicPlayer::SetEnabled(bool)
+ * nm offset: 0x481e88
+ */
+void sre_MusicPlayer_SetEnabled(void* self, int enabled) {
+    s_enabled = enabled ? 1 : 0;
+    
+    if (!s_enabled && s_playing) {
+        g_sre_music_stop_pending = 1;
+    } else if (s_enabled && s_playing) {
+        g_sre_music_play_pending = 1;
+    }
+}
+
+/* ========== SetSuspended ==========
+ * Original: Caver::MusicPlayer::SetSuspended(bool)
+ * nm offset: 0x481fc0
+ */
+void sre_MusicPlayer_SetSuspended(void* self, int suspended) {
+    s_suspended = suspended ? 1 : 0;
+    
+    if (s_suspended && s_playing) {
+        g_sre_music_pause_pending = 1;
+    } else if (!s_suspended && s_playing && s_enabled) {
+        g_sre_music_play_pending = 1;
+    }
+}
+
+/* ========== No-op stubs ========== */
+
+void sre_MusicPlayer_AddPlaylist(void* self, void* playlist) {
+    /* No-op — we don't use playlists */
+}
+
+void sre_MusicPlayer_RegisterProgramLibrary(void* self, void* program_state) {
+    /* No-op — Lua bindings handled by our ProgramState hooks */
+}

@@ -25,6 +25,7 @@ namespace fs = std::filesystem;
 #include "android/asset_manager.h"
 #include "game/camera_override.h"
 #include "game/mod_tools.h"
+#include "game/sky_renderer.h"
 #include "platform/input_config.h"
 #include <cstring>
 #include <chrono>
@@ -58,7 +59,7 @@ static int GAME_W = 1920;
 static int GAME_H = 1080;
 static float TOUCH_SCALE_X = (float)GAME_W / 960.0f;
 // Which game binary to load (switchable via launcher or --lib flag)
-static std::string g_lib_name = "engine/v1.4.12/armeabi-v7a/libswordigo.so";
+static std::string g_lib_name = "engine/v1.4.12/arm64-v8a/libswordigo.so";
 std::string g_assets_dir = "assets";  // "assets" for vanilla, "rl_assets" for RLSwordigo
 static float TOUCH_SCALE_Y = (float)GAME_H / 544.0f;   // ~1.985
 
@@ -86,6 +87,7 @@ SDL_Gamepad* g_gamepad = nullptr;
 FBOScale g_fbo_mode = FBOScale::SHARP_BILINEAR;
 PostFXState g_postfx;
 PostFXPreset g_postfx_preset = PostFXPreset::OFF;
+SkyRenderer g_sky;
 
 // Graphics API selection (enum defined in vulkan_backend.h)
 GraphicsAPI g_graphics_api = GraphicsAPI::OPENGL;
@@ -95,6 +97,71 @@ VulkanBackend g_vk_backend;
 
 // Binary selection system
 BinarySelector g_binary_selector;
+
+// ============================================================
+//  SRE Lua Console — Execute Lua code inside the running engine
+// ============================================================
+static uint64_t g_lua_console_buf_addr = 0;      // Guest addr of SRE's command buffer
+static uint64_t g_lua_console_result_addr = 0;    // Guest addr of SRE's result buffer
+static uint64_t g_lua_console_pending_addr = 0;   // Guest addr of pending flag
+static uint64_t g_lua_console_status_addr = 0;    // Guest addr of status (0=idle,1=ok,2=err)
+static bool     g_lua_console_ready = false;       // true when all addrs resolved
+static bool     g_lua_console_open = false;        // true when console UI is visible
+static std::string g_lua_console_input;            // Current input line
+static std::vector<std::pair<std::string,bool>> g_lua_console_history; // {text, is_error}
+
+// SRE Background Renderer — guest addresses
+static uint64_t bg_mode_addr = 0;       // Guest addr of g_sre_bg_mode
+static uint64_t bg_brightness_addr = 0; // Guest addr of g_sre_bg_brightness
+static uint64_t bg_depth_addr = 0;      // Guest addr of g_sre_bg_depth
+static uint64_t bg_scale_addr = 0;      // Guest addr of g_sre_bg_scale
+static uint64_t bg_cam_z_addr = 0;      // Guest addr of g_sre_bg_cam_z
+
+// SRE Effect hooks — guest addresses
+static uint64_t portal_active_addr = 0;
+static uint64_t portal_x_addr = 0;
+static uint64_t portal_y_addr = 0;
+static uint64_t portal_z_addr = 0;
+static uint64_t portal_count_addr = 0;
+static uint64_t portal_color_r_addr = 0;
+static uint64_t portal_color_g_addr = 0;
+static uint64_t portal_color_b_addr = 0;
+static uint64_t portal_vp_matrix_addr = 0;  // 16 floats — VP matrix for screen positioning
+static uint64_t effect_frame_reset_addr = 0;
+
+// SRE Music — guest addresses for command interface
+static uint64_t sre_music_load_name_addr = 0;    // char[256] — music name to load
+static uint64_t sre_music_load_pending_addr = 0;  // int — 1 = load requested
+static uint64_t sre_music_play_pending_addr = 0;  // int — 1 = play requested
+static uint64_t sre_music_pause_pending_addr = 0; // int — 1 = pause requested
+static uint64_t sre_music_stop_pending_addr = 0;  // int — 1 = stop requested
+static uint64_t sre_music_volume_addr = 0;        // float — current volume
+static uint64_t sre_music_volume_dirty_addr = 0;  // int — 1 = volume changed
+static uint64_t sre_music_looping_addr = 0;       // int — looping flag
+static uint64_t sre_music_looping_dirty_addr = 0; // int — 1 = looping changed
+
+// SRE GUI — player stats (read from GameState via GameSceneView::Update hook)
+static uint64_t sre_player_hp_addr = 0;         // int — current HP
+static uint64_t sre_player_max_hp_addr = 0;     // int — max HP (computed: level*2+4)
+static uint64_t sre_player_mana_addr = 0;       // int — current mana
+static uint64_t sre_player_max_mana_addr = 0;   // int — max mana (computed: level*20+10)
+static uint64_t sre_player_coins_addr = 0;      // int — coins
+static uint64_t sre_player_xp_addr = 0;         // int — experience points
+static uint64_t sre_player_level_addr = 0;       // int — experience level
+static uint64_t sre_player_atk_level_addr = 0;   // int — attack attribute
+static uint64_t sre_gui_scene_active_addr = 0;  // int — 1 when scene is active
+static uint64_t sre_gamestate_ptr_addr = 0;      // uint64_t — guest ptr to GameState
+
+// SRE Music Host API — declared in jni_bridge_arm64.cpp
+extern bool sre_music_host_load(const std::string& name);
+extern void sre_music_host_play();
+extern void sre_music_host_pause();
+extern void sre_music_host_stop();
+extern void sre_music_host_set_volume(float vol);
+extern void sre_music_host_set_looping(bool loop);
+extern const std::string& sre_music_host_get_track();
+extern float sre_music_host_get_volume();
+extern bool sre_music_host_is_playing();
 
 // FWKeyboard API — resolved from game binary symbols
 static uint32_t g_fw_sharedKeyboard = 0;   // Caver::FWKeyboard::sharedKeyboard()
@@ -848,6 +915,10 @@ void load_and_boot() {
                 {
                     draw_batcher_flush(); // Flush any pending batched draws
                     fbo_end_game_and_blit(g_draw_w, g_draw_h, g_fbo_mode, &g_postfx);
+                    // Vanilla portal — DISABLED pending proper fixed-function implementation
+                    // if (!fbo_is_active()) {
+                    //     fbo_draw_portal_vanilla(g_draw_w, g_draw_h);
+                    // }
                 }
             }
 
@@ -1425,11 +1496,9 @@ void load_and_boot() {
                                                 call_handle_touch_event(handleTouchEvent, env_ptr, 0,
                                                     1, macro_tid, accumulated_time,
                                                     opener->game_x, opener->game_y, opener->game_x, opener->game_y, 1);
-                                                call_handle_touch_event(handleTouchEvent, env_ptr, 0,
-                                                    2, macro_tid, accumulated_time + 0.2,
-                                                    opener->game_x, opener->game_y, opener->game_x, opener->game_y, 0);
                                             }
                                             btn->macro_pending = true;
+                                            btn->macro_stage = 1;
                                             btn->macro_fire_time = (uint64_t)(accumulated_time * 1000.0);
                                         } else if (!btn->is_macro) {
                                             // Normal button press/release
@@ -1822,8 +1891,373 @@ void load_and_boot_arm64() {
                       << std::dec << std::endl;
         }
     }
+    // (Duplicate STXR patcher removed — handled by patcher at line ~1745 above)
 
-    // (OLD duplicate STXR patcher and .text protection REMOVED — new version above)
+
+    // =========================================================================
+    // libsre.so — Swordigo Runtime Engine (guest-side ARM64 library)
+    // =========================================================================
+    // Loads libsre.so into guest memory and installs hooks that redirect
+    // problematic functions in libswordigo.so to clean C reimplementations.
+    // This eliminates atomic spin loops (STXR), threading issues, and more.
+    //
+    // IMPORTANT: SRE hooks use hardcoded function offsets that are ONLY valid
+    // for v1.4.12 ARM64. Loading SRE for other versions would crash.
+    {
+        bool sre_compatible = (g_lib_name.find("v1.4.12") != std::string::npos &&
+                               g_lib_name.find("arm64") != std::string::npos);
+        
+        if (!sre_compatible) {
+            std::cerr << "\n============================================" << std::endl;
+            std::cerr << "  [SRE] Skipped — SRE only supports v1.4.12 ARM64" << std::endl;
+            std::cerr << "  Current binary: " << g_lib_name << std::endl;
+            std::cerr << "============================================\n" << std::endl;
+        } else {
+
+        std::cerr << "\n============================================" << std::endl;
+        std::cerr << "  [SRE] Swordigo Runtime Engine — Checking..." << std::endl;
+        std::cerr << "============================================" << std::endl;
+
+        // Derive libsre.so path from g_lib_name's directory
+        // e.g. "engine/v1.4.12/arm64-v8a/libswordigo.so" → "engine/v1.4.12/arm64-v8a/libsre.so"
+        std::string sre_rel = g_lib_name;
+        auto slash = sre_rel.rfind('/');
+        if (slash != std::string::npos) {
+            sre_rel = sre_rel.substr(0, slash + 1) + "libsre.so";
+        } else {
+            sre_rel = "libsre.so";
+        }
+        std::string sre_path = get_data_path(sre_rel);
+        std::cerr << "[SRE] Looking for: " << sre_rel << std::endl;
+        std::cerr << "[SRE] Resolved to: " << (sre_path.empty() ? "(empty)" : sre_path) << std::endl;
+        
+        // Fallback: try current directory
+        if (sre_path.empty() || access(sre_path.c_str(), F_OK) != 0) {
+            if (access("libsre.so", F_OK) == 0) {
+                sre_path = "libsre.so";
+            }
+        }
+
+        if (!sre_path.empty() && access(sre_path.c_str(), F_OK) == 0) {
+            std::cerr << "[SRE] FOUND: " << sre_path << std::endl;
+            std::cout << "\n======== [SRE] Loading Swordigo Runtime Engine ========" << std::endl;
+            std::cout << "[SRE] Path: " << sre_path << std::endl;
+
+            // Load libsre.so at a separate guest address (after libswordigo.so)
+            static so_module_arm64 g_sre_mod = {};
+            uint64_t sre_load_addr = 0x2000000;  // 32MB — well above swordigo's ~7MB
+
+            int sre_ret = g_loader_64->load(&g_sre_mod, sre_path, sre_load_addr);
+            if (sre_ret == 0) {
+                std::cout << "[SRE] Loaded at 0x" << std::hex << sre_load_addr 
+                          << " (text_size=0x" << g_sre_mod.text_size << ")" 
+                          << std::dec << std::endl;
+
+                // Relocate
+                g_loader_64->relocate(&g_sre_mod);
+
+                // Resolve imports (malloc, free, memcpy, strlen, etc.) through bridge
+                g_loader_64->resolve_all_to_bridge(&g_sre_mod, &g_bridge_64, GUEST_GLOBALS_BASE);
+
+                // Call sre_init(swordigo_base, empty_sentinel_bss_offset)
+                uint64_t sre_init_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "sre_init");
+                if (sre_init_addr) {
+                    std::cout << "[SRE] Calling sre_init(0x" << std::hex << load_addr 
+                              << ", 0x14880)" << std::dec << std::endl;
+                    g_emulator_64->call(sre_init_addr, {load_addr, 0x14880});
+                    std::cout << "[SRE] sre_init completed" << std::endl;
+                }
+
+                // ========= Phase 1: Resolve Lua API symbols from libswordigo.so =========
+                // The engine compiles Lua 5.1 with C++ linkage, so symbols are mangled.
+                // Mangled names from SwMini's core/lua.c (ARM64 / __aarch64__).
+                struct LuaSymEntry { const char* name; const char* mangled; };
+                LuaSymEntry lua_syms[] = {
+                    {"lua_pcall",     "_Z9lua_pcallP9lua_Stateiii"},
+                    {"lua_resume",    "_Z10lua_resumeP9lua_Statei"},
+                    {"lua_settop",    "_Z10lua_settopP9lua_Statei"},
+                    {"lua_gettop",    "_Z10lua_gettopP9lua_State"},
+                    {"lua_tolstring", "_Z13lua_tolstringP9lua_StateiPm"},
+                    {"lua_call",      "_Z8lua_callP9lua_Stateii"},
+                    {"lua_pushstring","_Z14lua_pushstringP9lua_StatePKc"},
+                    {"lua_pushcclosure","_Z16lua_pushcclosureP9lua_StatePFiS0_Ei"},
+                    {"lua_setfield",  "_Z12lua_setfieldP9lua_StateiPKc"},
+                    {"lua_getfield",  "_Z12lua_getfieldP9lua_StateiPKc"},
+                    {"lua_createtable","_Z15lua_createtableP9lua_Stateii"},
+                    {"lua_pushnumber","_Z14lua_pushnumberP9lua_Stated"},
+                    {"lua_pushboolean","_Z15lua_pushbooleanP9lua_Statei"},
+                    {"lua_pushnil",   "_Z11lua_pushnilP9lua_State"},
+                    {"lua_tonumber",  "_Z12lua_tonumberP9lua_Statei"},
+                    {"lua_toboolean", "_Z13lua_tobooleanP9lua_Statei"},
+                    {"lua_type",      "_Z8lua_typeP9lua_Statei"},
+                    {"luaL_register", "_Z13luaL_registerP9lua_StatePKcPK8luaL_Reg"},
+                    {"lua_touserdata","_Z14lua_touserdataP9lua_Statei"},
+                    {"lua_pushlightuserdata","_Z21lua_pushlightuserdataP9lua_StatePv"},
+                    {"lua_error",     "_Z9lua_errorP9lua_State"},
+                    {"getSpeedMultiplier", "_ZNK5Caver11SceneObject21updateSpeedMultiplierEv"},
+                };
+                const int NUM_LUA_SYMS = sizeof(lua_syms) / sizeof(lua_syms[0]);
+                
+                // Allocate a struct in guest memory to pass addresses to sre_init_lua
+                // SreLuaAddrs: 22 × uint64_t = 176 bytes
+                uint64_t lua_addrs_guest = 0x48000;  // in our guest globals area
+                uint64_t* lua_addrs = (uint64_t*)(g_guest_memory + lua_addrs_guest);
+                
+                int lua_resolved = 0;
+                std::cout << "[SRE] Resolving " << NUM_LUA_SYMS << " Lua API symbols..." << std::endl;
+                for (int i = 0; i < NUM_LUA_SYMS; i++) {
+                    uint64_t addr = g_loader_64->get_symbol_vaddr(&g_main_mod_64, lua_syms[i].mangled);
+                    lua_addrs[i] = addr;
+                    if (addr) {
+                        lua_resolved++;
+                    } else {
+                        std::cerr << "[SRE] WARNING: Lua symbol not found: " << lua_syms[i].name 
+                                  << " (" << lua_syms[i].mangled << ")" << std::endl;
+                    }
+                }
+                std::cout << "[SRE] Resolved " << lua_resolved << "/" << NUM_LUA_SYMS 
+                          << " Lua symbols" << std::endl;
+                
+                // Call sre_init_lua() in libsre.so to pass the addresses
+                uint64_t sre_init_lua_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "sre_init_lua");
+                if (sre_init_lua_addr && lua_resolved > 0) {
+                    g_emulator_64->call(sre_init_lua_addr, {lua_addrs_guest});
+                    std::cout << "[SRE] Lua API initialized" << std::endl;
+                    
+                    // === Late-install lua_call → sre_lua_call_safe trampoline ===
+                    // MUST be done AFTER sre_init_lua() so g_lua_pcall is populated.
+                    // This wraps ALL lua_call invocations engine-wide with pcall.
+                    // Fixes Wastelands crash: lua_call → error → panic → abort()
+                    {
+                        uint64_t lua_call_vaddr = g_loader_64->get_symbol_vaddr(
+                            &g_main_mod_64, "_Z8lua_callP9lua_Stateii");
+                        uint64_t safe_vaddr = g_loader_64->get_symbol_vaddr(
+                            &g_sre_mod, "sre_lua_call_safe");
+                        if (lua_call_vaddr && safe_vaddr) {
+                            // Write 16-byte trampoline: LDR X16, [PC,#8]; BR X16; .quad addr
+                            uint32_t* code = (uint32_t*)(g_guest_memory + lua_call_vaddr);
+                            code[0] = 0x58000050;  // LDR X16, [PC, #8]
+                            code[1] = 0xD61F0200;  // BR X16
+                            *(uint64_t*)(code + 2) = safe_vaddr;
+                            std::cout << "[SRE] lua_call → sre_lua_call_safe @ 0x" 
+                                      << std::hex << lua_call_vaddr << " → 0x" << safe_vaddr 
+                                      << std::dec << " (LATE INSTALL — pcall ready)" << std::endl;
+                        } else {
+                            std::cerr << "[SRE] WARNING: Could not install lua_call hook"
+                                      << " (lua_call=" << lua_call_vaddr 
+                                      << " safe=" << safe_vaddr << ")" << std::endl;
+                        }
+                    }
+                }
+
+                // ========= Resolve ProgramState symbols for hook targets =========
+                // Map from SRE symbol name → libswordigo mangled symbol name
+                struct SymHookMap { const char* sre_sym; const char* engine_sym; };
+                SymHookMap sym_hooks[] = {
+                    {"sre_ProgramState_Execute", "_ZN5Caver12ProgramState7ExecuteEi"},
+                    {"sre_ProgramState_Resume",  "_ZN5Caver12ProgramState6ResumeEi"},
+                    {"sre_ProgramState_Update",  "_ZN5Caver12ProgramState6UpdateEf"},
+                    // DISABLED: installs before pcall is resolved — breaks game init
+                    // {"sre_lua_call_safe",         "_Z8lua_callP9lua_Stateii"},
+                };
+                const int NUM_SYM_HOOKS = sizeof(sym_hooks) / sizeof(sym_hooks[0]);
+
+                // Read the hook table from libsre.so and install trampolines
+                uint64_t table_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "sre_hook_table");
+                uint64_t count_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "sre_hook_count");
+
+                if (table_addr && count_addr) {
+                    int hook_count = *(int32_t*)(g_guest_memory + count_addr);
+                    std::cout << "[SRE] Installing " << hook_count << " hooks..." << std::endl;
+
+                    struct GuestHookEntry {
+                        uint64_t target_offset;
+                        uint64_t symbol_name_ptr;
+                    };
+
+                    int installed = 0;
+                    for (int i = 0; i < hook_count; i++) {
+                        GuestHookEntry* entry = (GuestHookEntry*)(g_guest_memory + table_addr) + i;
+                        uint64_t target_offset = entry->target_offset;
+                        
+                        if (entry->symbol_name_ptr == 0) continue;  // skip sentinel
+                        const char* sym_name = (const char*)(g_guest_memory + entry->symbol_name_ptr);
+                        
+                        // Look up the replacement function in libsre.so
+                        uint64_t replacement = g_loader_64->get_symbol_vaddr(&g_sre_mod, sym_name);
+                        if (!replacement) {
+                            std::cerr << "[SRE] WARNING: Symbol not found in libsre: " << sym_name << std::endl;
+                            continue;
+                        }
+
+                        // If target_offset is 0, resolve by symbol name from libswordigo.so
+                        if (target_offset == 0) {
+                            // Find matching engine symbol
+                            bool found = false;
+                            for (int j = 0; j < NUM_SYM_HOOKS; j++) {
+                                if (strcmp(sym_name, sym_hooks[j].sre_sym) == 0) {
+                                    uint64_t engine_vaddr = g_loader_64->get_symbol_vaddr(
+                                        &g_main_mod_64, sym_hooks[j].engine_sym);
+                                    if (engine_vaddr) {
+                                        target_offset = engine_vaddr - load_addr;
+                                        found = true;
+                                    } else {
+                                        std::cerr << "[SRE] WARNING: Engine symbol not found: " 
+                                                  << sym_hooks[j].engine_sym << std::endl;
+                                    }
+                                    break;
+                                }
+                            }
+                            if (!found || target_offset == 0) {
+                                std::cerr << "[SRE] SKIP: No engine offset for " << sym_name << std::endl;
+                                continue;
+                            }
+                        }
+
+                        // Write a 16-byte trampoline at the target address:
+                        //   LDR X16, [PC, #8]    ; 0x58000050
+                        //   BR  X16              ; 0xD61F0200
+                        //   .quad replacement    ; 8-byte address
+                        uint64_t target_addr = load_addr + target_offset;
+                        uint32_t* code = (uint32_t*)(g_guest_memory + target_addr);
+                        code[0] = 0x58000050;  // LDR X16, [PC, #8]
+                        code[1] = 0xD61F0200;  // BR X16
+                        *(uint64_t*)(code + 2) = replacement;
+
+                        std::cout << "[SRE] Hook: 0x" << std::hex << target_offset 
+                                  << " -> " << sym_name << " @ 0x" << replacement 
+                                  << std::dec << std::endl;
+                        installed++;
+                    }
+
+                    std::cout << "[SRE] Installed " << installed << "/" << hook_count 
+                              << " hooks successfully" << std::endl;
+                } else {
+                    std::cerr << "[SRE] WARNING: Could not find hook table symbols" << std::endl;
+                }
+
+                // ========= Lua Console Setup =========
+                // Console uses Lua's own loadstring() via pcall — no luaL_loadbuffer needed.
+                // lua_getfield is resolved above as part of the Lua API symbols.
+                
+                // Store guest addresses of console buffers for main loop access
+                g_lua_console_buf_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_lua_console_buf");
+                g_lua_console_result_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_lua_console_result");
+                g_lua_console_pending_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_lua_console_pending");
+                g_lua_console_status_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_lua_console_status");
+                
+                std::cout << "[SRE] Console addrs: buf=0x" << std::hex << g_lua_console_buf_addr
+                          << " result=0x" << g_lua_console_result_addr 
+                          << " pending=0x" << g_lua_console_pending_addr
+                          << " status=0x" << g_lua_console_status_addr 
+                          << std::dec << std::endl;
+                
+                if (g_lua_console_buf_addr) {
+                    g_lua_console_ready = true;
+                    std::cout << "[SRE] Lua console ready! Press ` (backtick) to open" << std::endl;
+                }
+
+                // ========= Background Renderer Setup =========
+                // Our SRE re-implements BackgroundComponent::Draw using
+                // engine building blocks: SetMatrix, SetColor, Sprite::Draw
+                uint64_t sre_init_bg_addr = g_loader_64->get_symbol_vaddr(
+                    &g_sre_mod, "sre_init_background");
+                if (sre_init_bg_addr) {
+                    // SreBgAddrs struct: 4 × uint64_t = 32 bytes
+                    uint64_t bg_addrs_guest = 0x48100;  // in our guest globals area
+                    uint64_t* bg_addrs = (uint64_t*)(g_guest_memory + bg_addrs_guest);
+                    
+                    // Addresses from: nm -D libswordigo.so | grep RenderingContext/Sprite
+                    bg_addrs[0] = g_loader_64->get_symbol_vaddr(&g_main_mod_64,
+                        "_ZN5Caver16RenderingContext9SetMatrixERKNS_7Matrix4E");
+                    bg_addrs[1] = g_loader_64->get_symbol_vaddr(&g_main_mod_64,
+                        "_ZN5Caver16RenderingContext8SetColorERKNS_5ColorE");
+                    bg_addrs[2] = g_loader_64->get_symbol_vaddr(&g_main_mod_64,
+                        "_ZNK5Caver6Sprite4DrawEPNS_16RenderingContextE");
+                    // glDepthMask PLT entry: 0x1fb820 (from objdump -d -j .plt)
+                    bg_addrs[3] = g_main_mod_64.base_addr + 0x1fb820;
+                    
+                    g_emulator_64->call(sre_init_bg_addr, {bg_addrs_guest});
+                    
+                    std::cout << "[SRE] Background renderer: SetMatrix=0x" << std::hex << bg_addrs[0]
+                              << " SetColor=0x" << bg_addrs[1]
+                              << " Sprite::Draw=0x" << bg_addrs[2] 
+                              << " glDepthMask=0x" << bg_addrs[3]
+                              << std::dec << std::endl;
+                }
+                
+                // Resolve bg_mode address for F11 toggle
+                bg_mode_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_bg_mode");
+                bg_brightness_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_bg_brightness");
+                bg_depth_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_bg_depth");
+                bg_scale_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_bg_scale");
+                bg_cam_z_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_bg_cam_z");
+                
+                // Resolve effect hook addresses
+                portal_active_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_portal_active");
+                portal_x_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_portal_x");
+                portal_y_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_portal_y");
+                portal_z_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_portal_z");
+                portal_count_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_portal_count");
+                portal_color_r_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_portal_color_r");
+                portal_color_g_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_portal_color_g");
+                portal_color_b_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_portal_color_b");
+                portal_vp_matrix_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_portal_vp_matrix");
+                effect_frame_reset_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "sre_effects_frame_reset");
+                
+                std::cout << "[SRE] Effects: portal=" << std::hex 
+                          << portal_active_addr << " reset=" << effect_frame_reset_addr
+                          << std::dec << std::endl;
+                
+                // Resolve SRE music command interface addresses
+                sre_music_load_name_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_music_load_name");
+                sre_music_load_pending_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_music_load_pending");
+                sre_music_play_pending_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_music_play_pending");
+                sre_music_pause_pending_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_music_pause_pending");
+                sre_music_stop_pending_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_music_stop_pending");
+                sre_music_volume_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_music_volume");
+                sre_music_volume_dirty_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_music_volume_dirty");
+                sre_music_looping_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_music_looping");
+                sre_music_looping_dirty_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_music_looping_dirty");
+                
+                std::cout << "[SRE] Music: load_name=0x" << std::hex << sre_music_load_name_addr
+                          << " load_pending=0x" << sre_music_load_pending_addr
+                          << std::dec << std::endl;
+                
+                // Resolve SRE GUI player stat addresses
+                sre_player_hp_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_player_hp");
+                sre_player_max_hp_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_player_max_hp");
+                sre_player_mana_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_player_mana");
+                sre_player_max_mana_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_player_max_mana");
+                sre_player_coins_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_player_coins");
+                sre_player_xp_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_player_xp");
+                sre_player_level_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_player_level");
+                sre_player_atk_level_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_player_atk_level");
+                sre_gui_scene_active_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_gui_scene_active");
+                sre_gamestate_ptr_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_gamestate_ptr");
+                
+                std::cout << "[SRE] GUI: hp=0x" << std::hex << sre_player_hp_addr
+                          << " coins=0x" << sre_player_coins_addr
+                          << std::dec << std::endl;
+                
+                std::cout << "======== [SRE] Runtime Engine Ready ========\n" << std::endl;
+            } else {
+                std::cerr << "[SRE] Failed to load libsre.so (error " << sre_ret << ")" << std::endl;
+            }
+        } else {
+            std::cerr << "\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" << std::endl;
+            std::cerr << "  [SRE] WARNING: libsre.so NOT FOUND!" << std::endl;
+            std::cerr << "  libsre.so is REQUIRED for ARM64 instances." << std::endl;
+            std::cerr << "  Without it, atomic spin loops and threading" << std::endl;
+            std::cerr << "  issues WILL cause hangs and crashes." << std::endl;
+            std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" << std::endl;
+            std::cerr << "[SRE] Expected at: " << sre_rel << std::endl;
+            std::cerr << "[SRE] Also tried:  ./libsre.so (current dir)" << std::endl;
+            std::cerr << "[SRE] Fix: run './run_swordigo.sh' to build and install libsre.so" << std::endl;
+            std::cerr << "============================================\n" << std::endl;
+        }
+        } // else (sre_compatible)
+    }
 
     // Run dynamic initializers (.init_array) — entries are uint64_t (8 bytes each)
     if (g_main_mod_64.init_array_vaddr != 0 && g_main_mod_64.init_array_size > 0) {
@@ -2146,33 +2580,22 @@ void load_and_boot_arm64() {
                     mod_toast("Stepped 1 frame", 0.8f);
                 }
             }
-            // --- Death recovery: execv restart after ~3s ---
-            // The death state machine is tied to Android's ad system and can't be
-            // replicated (same issue as PS Vita port). Restart the process cleanly;
-            // the game reloads from the last .gplayer checkpoint.
+            
+            // Render custom sky (after game frame, using depth buffer trick)
+            if (g_sky.enabled && g_display_active) {
+                g_sky.update(dt_seconds);
+                g_sky.render(g_win_w, g_win_h);
+            }
+            // --- Death recovery: handled by SRE ShowAdMaybe hook ---
+            // The old system used execv() to restart the entire process after 3s.
+            // Now, SRE hooks GameOverViewController::ShowAdMaybe() and directly
+            // calls GameOverViewDidContinue() — proper in-game respawn from checkpoint.
+            // This countdown is kept only for logging/diagnostics.
             if (g_death_detected_countdown > 0) {
                 g_death_detected_countdown--;
                 if (g_death_detected_countdown == 0) {
-                    std::cout << "\n[Fix64] Death timeout — restarting from checkpoint..." << std::endl;
-                    SDL_Quit();
-                    extern std::string g_lib_name;
-                    extern char** g_saved_argv;
-                    extern int g_saved_argc;
-                    std::vector<std::string> arg_strs;
-                    std::vector<char*> args;
-                    for (int i = 0; i < g_saved_argc; i++) {
-                        std::string a = g_saved_argv[i];
-                        if ((a == "--lib" || a == "--assets") && i + 1 < g_saved_argc) { i++; continue; }
-                        arg_strs.push_back(a);
-                    }
-                    arg_strs.push_back("--lib");
-                    arg_strs.push_back(g_lib_name);
-                    arg_strs.push_back("--assets");
-                    arg_strs.push_back(g_assets_dir);
-                    for (auto& s : arg_strs) args.push_back(&s[0]);
-                    args.push_back(nullptr);
-                    execv("/proc/self/exe", args.data());
-                    exit(1);
+                    std::cout << "\n[SRE] Death timeout reached — respawn should have been handled by ShowAdMaybe hook" << std::endl;
+                    std::cout << "[SRE] If you're stuck, tap the game over screen to trigger respawn" << std::endl;
                 }
             }
             
@@ -2226,7 +2649,122 @@ void load_and_boot_arm64() {
 #endif
                 {
                     draw_batcher_flush(); // Flush any pending batched draws
+                    
+                    // Read background data from SRE → feed FBO shaders
+                    {
+                        extern float g_bg_depth, g_bg_scale;
+                        extern float g_bg_ambient_r, g_bg_ambient_g, g_bg_ambient_b;
+                        extern float g_portal_active, g_portal_world_x, g_portal_world_y, g_portal_world_z;
+                        extern float g_portal_color_r, g_portal_color_g, g_portal_color_b;
+                        extern float g_portal_intensity, g_portal_speed;
+                        
+                        if (bg_depth_addr)
+                            g_bg_depth = *(float*)(g_guest_memory + bg_depth_addr);
+                        if (bg_scale_addr)
+                            g_bg_scale = *(float*)(g_guest_memory + bg_scale_addr);
+                        
+                        // Read portal effect state
+                        if (portal_active_addr) {
+                            int active = *(int*)(g_guest_memory + portal_active_addr);
+                            g_portal_active = active ? 1.0f : 0.0f;
+                            if (active && portal_x_addr) {
+                                g_portal_world_x = *(float*)(g_guest_memory + portal_x_addr);
+                                g_portal_world_y = *(float*)(g_guest_memory + portal_y_addr);
+                                g_portal_world_z = *(float*)(g_guest_memory + portal_z_addr);
+                                // Read actual portal color from game data
+                                if (portal_color_r_addr) {
+                                    g_portal_color_r = *(float*)(g_guest_memory + portal_color_r_addr);
+                                    g_portal_color_g = *(float*)(g_guest_memory + portal_color_g_addr);
+                                    g_portal_color_b = *(float*)(g_guest_memory + portal_color_b_addr);
+                                }
+                                // Read full VP matrix (16 floats) for portal positioning
+                                if (portal_vp_matrix_addr) {
+                                    extern float g_portal_vp_matrix[16];
+                                    float* src = (float*)(g_guest_memory + portal_vp_matrix_addr);
+                                    for (int i = 0; i < 16; i++) g_portal_vp_matrix[i] = src[i];
+                                }
+                            }
+                        }
+                    }
+                    
                     fbo_end_game_and_blit(g_draw_w, g_draw_h, g_fbo_mode, &g_postfx);
+                    
+                    // Render portal in vanilla mode — DISABLED pending RE of vertex data
+                    // if (!fbo_is_active()) {
+                    //     fbo_draw_portal_vanilla(g_draw_w, g_draw_h);
+                    // }
+                    
+                    // Reset per-frame effect counters for next frame
+                    if (effect_frame_reset_addr) {
+                        g_emulator_64->call(effect_frame_reset_addr, {});
+                    }
+                    
+                    // === SRE Music Command Processing ===
+                    // Read guest globals and dispatch to host OpenAL
+                    if (sre_music_load_pending_addr) {
+                        int load_pending = *(int*)(g_guest_memory + sre_music_load_pending_addr);
+                        if (load_pending) {
+                            // Read music name from guest memory
+                            char name_buf[256] = {0};
+                            memcpy(name_buf, g_guest_memory + sre_music_load_name_addr, 255);
+                            name_buf[255] = 0;
+                            
+                            // Clear pending flag in guest
+                            int zero = 0;
+                            memcpy(g_guest_memory + sre_music_load_pending_addr, &zero, 4);
+                            
+                            // Load and play via host API
+                            sre_music_host_load(std::string(name_buf));
+                        }
+                        
+                        int play_pending = *(int*)(g_guest_memory + sre_music_play_pending_addr);
+                        if (play_pending) {
+                            sre_music_host_play();
+                            int zero = 0;
+                            memcpy(g_guest_memory + sre_music_play_pending_addr, &zero, 4);
+                        }
+                        
+                        int pause_pending = *(int*)(g_guest_memory + sre_music_pause_pending_addr);
+                        if (pause_pending) {
+                            sre_music_host_pause();
+                            int zero = 0;
+                            memcpy(g_guest_memory + sre_music_pause_pending_addr, &zero, 4);
+                        }
+                        
+                        int stop_pending = *(int*)(g_guest_memory + sre_music_stop_pending_addr);
+                        if (stop_pending) {
+                            sre_music_host_stop();
+                            int zero = 0;
+                            memcpy(g_guest_memory + sre_music_stop_pending_addr, &zero, 4);
+                        }
+                        
+                        int vol_dirty = *(int*)(g_guest_memory + sre_music_volume_dirty_addr);
+                        if (vol_dirty) {
+                            float vol = *(float*)(g_guest_memory + sre_music_volume_addr);
+                            sre_music_host_set_volume(vol);
+                            int zero = 0;
+                            memcpy(g_guest_memory + sre_music_volume_dirty_addr, &zero, 4);
+                        }
+                        
+                        int loop_dirty = *(int*)(g_guest_memory + sre_music_looping_dirty_addr);
+                        if (loop_dirty) {
+                            int looping = *(int*)(g_guest_memory + sre_music_looping_addr);
+                            sre_music_host_set_looping(looping != 0);
+                            int zero = 0;
+                            memcpy(g_guest_memory + sre_music_looping_dirty_addr, &zero, 4);
+                        }
+                        
+                        // Music loop watchdog: if looping is enabled but source
+                        // has stopped (e.g. OGG stream ended), restart it.
+                        // AL_LOOPING doesn't always work with streamed audio.
+                        if (sre_music_looping_addr) {
+                            int looping = *(int*)(g_guest_memory + sre_music_looping_addr);
+                            if (looping && !sre_music_host_is_playing()) {
+                                // Source stopped but should loop — restart
+                                sre_music_host_play();
+                            }
+                        }
+                    }
                 }
             }
 
@@ -2302,7 +2840,7 @@ void load_and_boot_arm64() {
                 glColor4ub(0, 0, 0, 180);
                 glBegin(GL_QUADS);
                 glVertex2f(10, g_win_h - 10); glVertex2f(420, g_win_h - 10);
-                glVertex2f(420, g_win_h - 275); glVertex2f(10, g_win_h - 275);
+                glVertex2f(420, g_win_h - 300); glVertex2f(10, g_win_h - 300);
                 glEnd();
                 char dbg[256];
                 snprintf(dbg, sizeof(dbg), "FPS: %.1f", fps);
@@ -2360,6 +2898,33 @@ void load_and_boot_arm64() {
                     g_gui.draw_string("PostFX: Off", 20, g_win_h - 255, 1.2f, 120, 120, 120, 200);
                 }
 
+                // Player Stats (from SRE GUI hook)
+                if (sre_gui_scene_active_addr && g_guest_memory) {
+                    int scene_active = *(int*)(g_guest_memory + sre_gui_scene_active_addr);
+                    if (scene_active && sre_player_hp_addr) {
+                        int hp     = *(int*)(g_guest_memory + sre_player_hp_addr);
+                        int max_hp = *(int*)(g_guest_memory + sre_player_max_hp_addr);
+                        int mana   = *(int*)(g_guest_memory + sre_player_mana_addr);
+                        int max_mn = *(int*)(g_guest_memory + sre_player_max_mana_addr);
+                        int coins  = *(int*)(g_guest_memory + sre_player_coins_addr);
+                        int xp     = sre_player_xp_addr ? *(int*)(g_guest_memory + sre_player_xp_addr) : 0;
+                        int level  = sre_player_level_addr ? *(int*)(g_guest_memory + sre_player_level_addr) : 0;
+                        int atk    = sre_player_atk_level_addr ? *(int*)(g_guest_memory + sre_player_atk_level_addr) : 0;
+                        
+                        snprintf(dbg, sizeof(dbg), "HP: %d/%d  Mana: %d/%d  Coins: %d",
+                                 hp, max_hp, mana, max_mn, coins);
+                        // Color HP based on health: green > yellow > red
+                        int hp_pct = max_hp > 0 ? (hp * 100 / max_hp) : 0;
+                        uint8_t hr = hp_pct > 50 ? 80 : 255;
+                        uint8_t hg = hp_pct > 25 ? 255 : 80;
+                        g_gui.draw_string(dbg, 20, g_win_h - 275, 1.3f, hr, hg, 80, 255);
+                        
+                        snprintf(dbg, sizeof(dbg), "Lv.%d  XP: %d  ATK: %d",
+                                 level, xp, atk);
+                        g_gui.draw_string(dbg, 20, g_win_h - 295, 1.3f, 180, 140, 255, 255);
+                    }
+                }
+
                 glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix();
                 glPopAttrib();
             }
@@ -2374,6 +2939,61 @@ void load_and_boot_arm64() {
                 glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
                 glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                 mod_render_overlay(g_gui, g_win_w, g_win_h, dt_seconds);
+                
+                // ---- Lua Console rendering ----
+                if (g_lua_console_open && g_lua_console_ready) {
+                    // Check for completed results from SRE
+                    int status = *(int32_t*)(g_guest_memory + g_lua_console_status_addr);
+                    if (status != 0) {
+                        const char* result = (const char*)(g_guest_memory + g_lua_console_result_addr);
+                        bool is_error = (status == 2);
+                        if (result[0]) {
+                            g_lua_console_history.push_back({result, is_error});
+                            std::cout << "[LuaConsole] " << (is_error ? "ERROR: " : "=> ") << result << std::endl;
+                        }
+                        *(int32_t*)(g_guest_memory + g_lua_console_status_addr) = 0;
+                    }
+                    
+                    // Draw console panel (bottom 30% of screen)
+                    int panel_h = g_win_h * 3 / 10;
+                    glColor4f(0.05f, 0.05f, 0.15f, 0.85f);
+                    glBegin(GL_QUADS);
+                    glVertex2f(0, 0);
+                    glVertex2f(g_win_w, 0);
+                    glVertex2f(g_win_w, panel_h);
+                    glVertex2f(0, panel_h);
+                    glEnd();
+                    
+                    // Draw separator line
+                    glColor4f(0.3f, 0.6f, 1.0f, 0.8f);
+                    glBegin(GL_LINES);
+                    glVertex2f(0, panel_h);
+                    glVertex2f(g_win_w, panel_h);
+                    glEnd();
+                    
+                    // Draw input line with cursor blink
+                    int line_h = 20;
+                    int y = 10;
+                    std::string prompt = "lua> " + g_lua_console_input;
+                    // Cursor blink every 500ms
+                    if ((int)(SDL_GetTicks() / 500) % 2 == 0) prompt += "_";
+                    g_gui.draw_string(prompt, 10, y, 1.0f, 255, 255, 255, 255);
+                    y += line_h;
+                    
+                    // Draw history (newest first, scrolling up)
+                    int max_lines = (panel_h - 30) / line_h;
+                    int start = (int)g_lua_console_history.size() - max_lines;
+                    if (start < 0) start = 0;
+                    for (int i = start; i < (int)g_lua_console_history.size(); i++) {
+                        auto& entry = g_lua_console_history[i];
+                        int r = entry.second ? 255 : 100;
+                        int g = entry.second ? 100 : 255;
+                        int b = entry.second ? 100 : 150;
+                        g_gui.draw_string(entry.first, 10, y, 1.0f, r, g, b, 220);
+                        y += line_h;
+                    }
+                }
+                
                 glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix();
                 glPopAttrib();
             }
@@ -2501,6 +3121,141 @@ void load_and_boot_arm64() {
                                 }
                                 break;
                             }
+                            // F11 — FREE for experimental features
+                            // (was: bg mode cycle / brightness toggle debug)
+                            
+                            // N — Time of Day cycle: Day → Afternoon → Night → Day
+                            if (event.key.key == SDLK_N && !event.key.repeat && !g_typing_mode && !g_lua_console_open) {
+                                // 0=Day, 1=Afternoon, 2=Night
+                                static int time_of_day = 0;
+                                time_of_day = (time_of_day + 1) % 3;
+                                
+                                // Start from current PostFX preset
+                                postfx_apply_preset(g_postfx, g_postfx_preset);
+                                
+                                if (time_of_day == 0) {
+                                    // === DAY (default) ===
+                                    // Restore background brightness
+                                    if (bg_brightness_addr) {
+                                        *(float*)(g_guest_memory + bg_brightness_addr) = 1.0f;
+                                    }
+                                    mod_toast("Day", 1.5f);
+                                    std::cout << "[TimeOfDay] Day — default" << std::endl;
+                                    
+                                } else if (time_of_day == 1) {
+                                    // === AFTERNOON (1PM warm light) ===
+                                    // No background filter — keep BG bright and warm
+                                    if (bg_brightness_addr) {
+                                        *(float*)(g_guest_memory + bg_brightness_addr) = 1.1f;
+                                    }
+                                    g_postfx.enabled = true;
+                                    // Warm vibrant color grading
+                                    g_postfx.color_adjust = true;
+                                    g_postfx.warmth = 0.35f;        // warm golden tone
+                                    g_postfx.brightness = 0.05f;    // slightly brighter
+                                    g_postfx.contrast = 1.1f;       // punchy contrast
+                                    g_postfx.saturation = 1.2f;     // vivid colors
+                                    // Strong god rays — intense afternoon sun
+                                    g_postfx.god_rays = true;
+                                    g_postfx.god_rays_intensity = 0.8f;
+                                    g_postfx.god_rays_decay = 0.97f;
+                                    g_postfx.sun_x = 0.75f;         // sun to the right
+                                    g_postfx.sun_y = 0.7f;          // lower in sky
+                                    // Strong SSAO — harsh afternoon shadows
+                                    g_postfx.ssao = true;
+                                    g_postfx.ssao_radius = 0.03f;
+                                    g_postfx.ssao_intensity = 1.5f;
+                                    // Bloom — bright sun reflections
+                                    g_postfx.bloom = true;
+                                    g_postfx.bloom_threshold = 0.55f;
+                                    g_postfx.bloom_intensity = 0.35f;
+                                    // Shadows — strong directional
+                                    g_postfx.shadows = true;
+                                    g_postfx.shadow_intensity = 0.55f;
+                                    g_postfx.shadow_light_x = 0.5f;
+                                    g_postfx.shadow_light_y = -0.6f;
+                                    // Subtle vignette
+                                    g_postfx.vignette = true;
+                                    g_postfx.vignette_intensity = 0.15f;
+                                    mod_toast("Afternoon", 1.5f);
+                                    std::cout << "[TimeOfDay] Afternoon — warm, bright, strong shadows" << std::endl;
+                                    
+                                } else {
+                                    // === NIGHT ===
+                                    // Dim the SRE background renderer
+                                    if (bg_brightness_addr) {
+                                        *(float*)(g_guest_memory + bg_brightness_addr) = 0.3f;
+                                    }
+                                    g_postfx.enabled = true;
+                                    // Cool blue desaturated tint
+                                    g_postfx.color_adjust = true;
+                                    g_postfx.brightness = -0.12f;    // dim overall
+                                    g_postfx.contrast = 0.9f;        // softer contrast
+                                    g_postfx.saturation = 0.6f;      // desaturate
+                                    g_postfx.warmth = -0.25f;        // cool blue shift
+                                    // Heavy vignette — darkness at edges
+                                    g_postfx.vignette = true;
+                                    g_postfx.vignette_intensity = 0.55f;
+                                    // SSAO for dark corners
+                                    g_postfx.ssao = true;
+                                    g_postfx.ssao_radius = 0.03f;
+                                    g_postfx.ssao_intensity = 1.6f;
+                                    // No god rays at night — moonlight bloom instead
+                                    g_postfx.god_rays = false;
+                                    g_postfx.bloom = true;
+                                    g_postfx.bloom_threshold = 0.5f;
+                                    g_postfx.bloom_intensity = 0.4f;
+                                    // Film grain for atmosphere
+                                    g_postfx.film_grain = true;
+                                    g_postfx.grain_intensity = 0.03f;
+                                    mod_toast("Night", 1.5f);
+                                    std::cout << "[TimeOfDay] Night — dim, cool, atmospheric" << std::endl;
+                                }
+                                break;
+                            }
+                            // ---- Lua Console: backtick toggles, intercept input when open ----
+                            if (event.key.key == SDLK_GRAVE && !event.key.repeat && g_lua_console_ready) {
+                                g_lua_console_open = !g_lua_console_open;
+                                if (g_lua_console_open) {
+                                    g_lua_console_input.clear();
+                                    SDL_StartTextInput(g_display_ptr->get_window());
+                                    mod_toast("Lua Console opened", 1.0f);
+                                } else {
+                                    SDL_StopTextInput(g_display_ptr->get_window());
+                                    mod_toast("Lua Console closed", 1.0f);
+                                }
+                                break;
+                            }
+                            if (g_lua_console_open && !event.key.repeat) {
+                                if (event.key.key == SDLK_RETURN && !g_lua_console_input.empty()) {
+                                    // Submit command!
+                                    g_lua_console_history.push_back({"> " + g_lua_console_input, false});
+                                    
+                                    // Write command to guest memory
+                                    char* buf = (char*)(g_guest_memory + g_lua_console_buf_addr);
+                                    size_t len = g_lua_console_input.size();
+                                    if (len > 4095) len = 4095;
+                                    memcpy(buf, g_lua_console_input.c_str(), len);
+                                    buf[len] = 0;
+                                    
+                                    // Set pending flag
+                                    *(int32_t*)(g_guest_memory + g_lua_console_pending_addr) = 1;
+                                    *(int32_t*)(g_guest_memory + g_lua_console_status_addr) = 0;
+                                    
+                                    std::cout << "[LuaConsole] Executing: " << g_lua_console_input << std::endl;
+                                    g_lua_console_input.clear();
+                                    break;
+                                } else if (event.key.key == SDLK_ESCAPE) {
+                                    g_lua_console_open = false;
+                                    SDL_StopTextInput(g_display_ptr->get_window());
+                                    break;
+                                } else if (event.key.key == SDLK_BACKSPACE) {
+                                    if (!g_lua_console_input.empty()) g_lua_console_input.pop_back();
+                                    break;
+                                }
+                                // Consume key to prevent game from receiving it
+                                break;
+                            }
                             if (event.key.key == SDLK_EQUALS && !event.key.repeat) { mod_speed_up(); break; }
                             if (event.key.key == SDLK_MINUS && !event.key.repeat) { mod_speed_down(); break; }
                             if (event.key.key == SDLK_0 && !event.key.repeat) { mod_speed_reset(); break; }
@@ -2562,7 +3317,12 @@ void load_and_boot_arm64() {
                         // --- Text input events ---
                         case SDL_EVENT_TEXT_INPUT: {
                             const char* text = event.text.text;
-                            if (g_text_input_active) {
+                            if (g_lua_console_open) {
+                                // Don't append the backtick that opened the console
+                                if (text[0] != '`') {
+                                    g_lua_console_input += text;
+                                }
+                            } else if (g_text_input_active) {
                                 g_text_input_buffer += text;
                                 call_text_change_64(g_text_input_buffer);
                                 std::cout << "[TextInput] \"" << g_text_input_buffer << "\"" << std::endl;
@@ -2611,10 +3371,81 @@ void load_and_boot_arm64() {
                                         case GUI_MOD_RUN_SPEED_DOWN: g_gui.mod_run_speed = std::max(g_gui.mod_run_speed - 0.5f, 0.5f); break;
                                         case GUI_MOD_JUMP_HEIGHT_UP: g_gui.mod_jump_height = std::min(g_gui.mod_jump_height + 0.5f, 10.0f); break;
                                         case GUI_MOD_JUMP_HEIGHT_DOWN: g_gui.mod_jump_height = std::max(g_gui.mod_jump_height - 0.5f, 0.5f); break;
-                                        case GUI_MOD_LEVEL_UP: g_gui.mod_level = std::min(g_gui.mod_level + 1, 99); break;
-                                        case GUI_MOD_LEVEL_DOWN: g_gui.mod_level = std::max(g_gui.mod_level - 1, 0); break;
-                                        case GUI_MOD_EXP_UP: g_gui.mod_exp += 100; break;
-                                        case GUI_MOD_EXP_DOWN: g_gui.mod_exp = std::max(g_gui.mod_exp - 100, 0); break;
+                                        case GUI_MOD_LEVEL_UP:
+                                        case GUI_MOD_LEVEL_DOWN:
+                                        case GUI_MOD_EXP_UP:
+                                        case GUI_MOD_EXP_DOWN: {
+                                            // Direct game state writes via SRE gamestate pointer
+                                            if (sre_gamestate_ptr_addr && g_guest_memory) {
+                                                uint64_t gs = *(uint64_t*)(g_guest_memory + sre_gamestate_ptr_addr);
+                                                if (gs != 0) {
+                                                    // gs is a GUEST pointer — convert to host address
+                                                    char* gs_host = (char*)g_guest_memory + gs;
+                                                    if (gui_action == GUI_MOD_EXP_UP) {
+                                                        *(int*)(gs_host + 0xB4) += 500;  // Add 500 XP
+                                                    } else if (gui_action == GUI_MOD_EXP_DOWN) {
+                                                        int xp = *(int*)(gs_host + 0xB4);
+                                                        *(int*)(gs_host + 0xB4) = xp > 500 ? xp - 500 : 0;
+                                                    } else if (gui_action == GUI_MOD_LEVEL_UP) {
+                                                        *(int*)(gs_host + 0xB8) += 1;  // Level +1
+                                                    } else if (gui_action == GUI_MOD_LEVEL_DOWN) {
+                                                        int lv = *(int*)(gs_host + 0xB8);
+                                                        *(int*)(gs_host + 0xB8) = lv > 1 ? lv - 1 : 1;
+                                                    }
+                                                }
+                                            }
+                                            break;
+                                        }
+                                        case GUI_MOD_HEAL_FULL:
+                                        case GUI_MOD_ADD_COINS:
+                                        case GUI_MOD_REFILL_MANA: {
+                                            if (sre_gamestate_ptr_addr && g_guest_memory) {
+                                                uint64_t gs = *(uint64_t*)(g_guest_memory + sre_gamestate_ptr_addr);
+                                                if (gs != 0) {
+                                                    char* gs_host = (char*)g_guest_memory + gs;
+                                                    if (gui_action == GUI_MOD_HEAL_FULL) {
+                                                        int hp_level = *(int*)(gs_host + 0xBC);
+                                                        int max_hp = hp_level * 2 + 4;
+                                                        *(int*)(gs_host + 0xA8) = max_hp;
+                                                        mod_toast("HP restored to full!", 1.5f);
+                                                    } else if (gui_action == GUI_MOD_ADD_COINS) {
+                                                        *(int*)(gs_host + 0xB0) += 100;
+                                                        char cbuf[64]; snprintf(cbuf, sizeof(cbuf), "Coins: %d (+100)", *(int*)(gs_host + 0xB0));
+                                                        mod_toast(cbuf, 1.5f);
+                                                    } else if (gui_action == GUI_MOD_REFILL_MANA) {
+                                                        int mana_level = *(int*)(gs_host + 0xC4);
+                                                        int max_mana = mana_level * 20 + 10;
+                                                        *(int*)(gs_host + 0xAC) = max_mana;
+                                                        mod_toast("Mana restored to full!", 1.5f);
+                                                    }
+                                                }
+                                            }
+                                            break;
+                                        }
+                                        case GUI_MUSIC_VOL_UP: {
+                                            float v = sre_music_host_get_volume();
+                                            v = std::min(v + 0.1f, 1.0f);
+                                            sre_music_host_set_volume(v);
+                                            char vbuf[64]; snprintf(vbuf, sizeof(vbuf), "Music Volume: %d%%", (int)(v * 100));
+                                            mod_toast(vbuf, 1.5f);
+                                        } break;
+                                        case GUI_MUSIC_VOL_DOWN: {
+                                            float v = sre_music_host_get_volume();
+                                            v = std::max(v - 0.1f, 0.0f);
+                                            sre_music_host_set_volume(v);
+                                            char vbuf[64]; snprintf(vbuf, sizeof(vbuf), "Music Volume: %d%%", (int)(v * 100));
+                                            mod_toast(vbuf, 1.5f);
+                                        } break;
+                                        case GUI_MUSIC_MUTE: {
+                                            float v = sre_music_host_get_volume();
+                                            if (v > 0.01f) {
+                                                sre_music_host_set_volume(0.0f);
+                                                mod_toast("Music: MUTED", 1.5f);
+                                            } else {
+                                                sre_music_host_set_volume(1.0f);
+                                                mod_toast("Music: Unmuted (100%)", 1.5f);
+                                            }
+                                        } break;
                                         default: break;
                                     }
                                 } else {
@@ -2726,20 +3557,17 @@ void load_and_boot_arm64() {
                                     std::cout << "[Macro] Step 1: press " << opener->name 
                                               << " at (" << opener->game_x << ", " << opener->game_y 
                                               << ") touch_id=" << opener->touch_id << std::endl;
-                                    // Press the opener (magic button) — use a unique touch_id (100+btn->touch_id)
-                                    // to avoid conflicting with the actual magic button state
+                                    // Press opener — process_macros releases at 50ms (stage 1→2)
                                     int macro_tid = 100 + btn->touch_id;
                                     call_touch_64(1, macro_tid, accumulated_time,
                                         opener->game_x, opener->game_y, opener->game_x, opener->game_y, 1);
-                                    // Release after a short hold (200ms simulated via second call)
-                                    call_touch_64(2, macro_tid, accumulated_time + 0.2,
-                                        opener->game_x, opener->game_y, opener->game_x, opener->game_y, 0);
                                 }
-                                // Schedule macro step 2 (will tap spell slot after delay)
+                                // Start macro sequence
                                 btn->macro_pending = true;
+                                btn->macro_stage = 1;  // opener pressed, waiting for release
                                 btn->macro_fire_time = (uint64_t)(accumulated_time * 1000.0);
-                                std::cout << "[Macro] Scheduled step 2 for " << btn->name 
-                                          << " in " << btn->macro_delay_ms << "ms" << std::endl;
+                                std::cout << "[Macro] Started: " << btn->name 
+                                          << " delay=" << btn->macro_delay_ms << "ms" << std::endl;
                             } else {
                                 // Normal button press
                                 call_touch_64(1, btn->touch_id, accumulated_time,
@@ -2978,7 +3806,19 @@ int main(int argc, char* argv[]) {
             }
         } else
 #endif
-        if (display.init(1920, 1080, "Swordigo")) {
+        // Get the display's native resolution for correct aspect ratio (16:10, 16:9, etc.)
+        int native_w = 1920, native_h = 1080;
+        {
+            SDL_DisplayID display_id = SDL_GetPrimaryDisplay();
+            const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(display_id);
+            if (mode) {
+                native_w = mode->w;
+                native_h = mode->h;
+                std::cout << "[Main] Native display: " << native_w << "x" << native_h 
+                          << " @ " << mode->refresh_rate << "Hz" << std::endl;
+            }
+        }
+        if (display.init(native_w, native_h, "Swordigo")) {
             g_display_active = true;
             g_display_ptr = &display;
             // Get physical drawable dimensions (HiDPI)
@@ -3000,7 +3840,7 @@ int main(int argc, char* argv[]) {
             TOUCH_SCALE_X = (float)GAME_W / 960.0f;
             TOUCH_SCALE_Y = (float)GAME_H / 544.0f;
 
-            std::cout << "[Main] Display initialized - logical 1920x1080"
+            std::cout << "[Main] Display initialized - native " << native_w << "x" << native_h
                       << " | drawable: " << g_draw_w << "x" << g_draw_h
                       << " | render: " << GAME_W << "x" << GAME_H
                       << " | aspect: " << std::fixed << std::setprecision(3)
