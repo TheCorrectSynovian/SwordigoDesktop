@@ -2,6 +2,32 @@
 
 All notable changes to Swordigo Desktop.
 
+## [v5.0] — 2026-06-21
+
+### Added
+- **libsre.so** — Swordigo Runtime Engine: 17 active hooks replacing entire subsystems
+- **Full music system** — MusicPlayer replaced with OpenAL command interface (6 hooks)
+- **Instant death respawn** — `ShowAdMaybe` → `GameOverViewDidContinue` (no ads, no restart)
+- **HUD reimplementation** — `GameSceneView::Update` fully rewritten in C
+- **Smart coin bar** — shop-aware auto-hide with 3s fade timer
+- **Damage flash** — red overlay on HP decrease
+- **Player stats export** — HP/Mana/Coins/XP/Level/ATK visible in F3 overlay
+- **GameState pointer** — direct host-side game memory access
+- **Music loop watchdog** — detects and restarts stopped looping music
+- **SRE version gate** — only loads for v1.4.12 ARM64, safe skip for other binaries
+- **Lua error recovery** — ARM64 `setjmp`/`longjmp` for safe `lua_pcall`
+- **Background rendering hooks** — 3 custom hooks for sky/parallax
+
+### Changed
+- Architecture renamed: **SRT** (Swordigo Runtime) as the overall framework
+- Mod menu cleaned: only GAME section (Speed/Pause/Camera) visible
+- Package builder updated: includes `libsre.so` in ARM64 engine dirs
+- README rewritten for SRT architecture
+
+### Fixed
+- Music not repeating when track ends in same world
+- Non-atomic string operations eliminate STXR spin loop hangs (4 hooks)
+
 ## [v4.5r] — 2026-06-19
 
 ### Added
