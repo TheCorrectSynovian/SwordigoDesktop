@@ -2,8 +2,34 @@
 set -e
 
 # ============================================================
-# Swordigo Desktop v4.5r — Vanilla Package Builder
-# Builds RPM and/or DEB — vanilla only (v1.4.6 + v1.4.12)
+# Swordigo Desktop v6.0 — Vanilla Package Builder
+# ============================================================
+# Builds RPM and/or DEB with ALL runtime files included.
+# No external downloads, no tar archives — everything is
+# bundled directly into the package.
+#
+# Runtime data layout (Minecraft-style):
+#   ~/.local/share/swordigo-desktop/
+#     ├── assets/resources/     (game textures, models, scenes)
+#     ├── engine/               (ARM binaries + libsre.so)
+#     ├── res/raw/              (music files)
+#     ├── save/                 (user saves — NOT packaged)
+#     └── manifest.json         (launcher instance registry)
+#
+# Package layout:
+#   /usr/bin/swordigo_boot              (main binary)
+#   /usr/bin/asset_viewer               (asset browser)
+#   /usr/share/swordigo-desktop/        (bundled data)
+#     ├── assets/resources/
+#     ├── engine/v1.4.*/
+#     ├── res/raw/
+#     └── manifest.json
+#   /usr/share/applications/            (.desktop entry)
+#   /usr/share/icons/                   (app icon)
+#
+# On install: post-install script copies from /usr/share/
+# to the user's ~/.local/share/swordigo-desktop/ for full
+# user access (like Minecraft launchers do).
 #
 # Usage:
 #   ./package.sh            # Build RPM + DEB
@@ -12,11 +38,14 @@ set -e
 # ============================================================
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="4.5.0"
+VERSION="6.0.0"
 RELEASE="1"
 ARCH="x86_64"
 BUILD_DIR="/tmp/swordigo-packaging"
 PKG_NAME="swordigo-desktop"
+
+# User's local runtime data — this is where assets/engine live
+USER_DATA="$HOME/.local/share/swordigo-desktop"
 
 # Only these engine versions are shipped
 SHIP_VERSIONS=("v1.4.6" "v1.4.12")
@@ -24,72 +53,120 @@ SHIP_VERSIONS=("v1.4.6" "v1.4.12")
 FORMAT="${1:-all}"     # rpm | deb | all
 
 echo "============================================"
-echo " Swordigo Desktop v4.5r — Package Builder"
+echo " Swordigo Desktop v6.0 — Package Builder"
 echo "============================================"
 echo "  Format: $FORMAT"
-echo "  Source:  $ROOT_DIR"
+echo "  Repo:   $ROOT_DIR"
+echo "  Data:   $USER_DATA"
 echo "  Shipped engines: ${SHIP_VERSIONS[*]}"
 echo ""
 
 # ============================================================
-# Step 1: Build the binary via Makefile (NO cmake)
+# Pre-flight: verify everything exists
 # ============================================================
-echo "[1/3] Building swordigo_boot..."
-cd "$ROOT_DIR"
-make -j$(nproc) 2>&1 | tail -3
-if [ ! -f "$ROOT_DIR/swordigo_boot" ]; then
-    echo "  ❌ Build failed — swordigo_boot not found"
+echo "[0/3] Pre-flight checks..."
+
+# Binaries (built on ext4)
+EXT4_DIR="$HOME/SwordigoDesktop"
+for bin in swordigo_boot libsre.so; do
+    if [ ! -f "$EXT4_DIR/$bin" ]; then
+        echo "  ❌ $EXT4_DIR/$bin not found — run 'make' on ext4 first!"
+        exit 1
+    fi
+done
+echo "      ✓ swordigo_boot ($(du -h "$EXT4_DIR/swordigo_boot" | cut -f1))"
+echo "      ✓ libsre.so ($(du -h "$EXT4_DIR/libsre.so" | cut -f1))"
+
+if [ -f "$EXT4_DIR/asset_viewer" ]; then
+    echo "      ✓ asset_viewer ($(du -h "$EXT4_DIR/asset_viewer" | cut -f1))"
+fi
+
+# Assets
+if [ ! -d "$USER_DATA/assets/resources" ]; then
+    echo "  ❌ $USER_DATA/assets/resources/ not found!"
+    echo "     Assets must be installed at ~/.local/share/swordigo-desktop/"
     exit 1
 fi
-echo "      ✓ Built ($(du -h swordigo_boot | cut -f1))"
+ASSET_COUNT=$(find "$USER_DATA/assets/resources" -type f | wc -l)
+echo "      ✓ $ASSET_COUNT game assets"
+
+# Engine binaries
+for ver in "${SHIP_VERSIONS[@]}"; do
+    for arch in armeabi-v7a arm64-v8a; do
+        so="$USER_DATA/engine/$ver/$arch/libswordigo.so"
+        if [ -f "$so" ]; then
+            echo "      ✓ engine/$ver/$arch/libswordigo.so"
+        else
+            echo "  ⚠ engine/$ver/$arch/libswordigo.so not found, skipping"
+        fi
+    done
+done
+
+# Music
+MUSIC_COUNT=0
+if [ -d "$USER_DATA/res/raw" ]; then
+    MUSIC_COUNT=$(find "$USER_DATA/res/raw" -type f | wc -l)
+    echo "      ✓ $MUSIC_COUNT music files"
+fi
+
+echo ""
 
 # ============================================================
-# Step 2: Stage — create the install tree
+# Step 1: Stage — create the install tree
 # ============================================================
 stage_package() {
     local STAGING="$1"
 
     rm -rf "$STAGING"
     mkdir -p "$STAGING/usr/bin"
-    mkdir -p "$STAGING/usr/share/swordigo/src/assets"
+    mkdir -p "$STAGING/usr/share/$PKG_NAME"
     mkdir -p "$STAGING/usr/share/applications"
     mkdir -p "$STAGING/usr/share/icons/hicolor/256x256/apps"
-    mkdir -p "$STAGING/usr/share/licenses/swordigo-desktop"
+    mkdir -p "$STAGING/usr/share/licenses/$PKG_NAME"
 
-    # Binary
-    cp "$ROOT_DIR/swordigo_boot" "$STAGING/usr/bin/"
+    echo "[1/3] Staging package files..."
+
+    # ---- Binaries (from ext4 build) ----
+    cp "$EXT4_DIR/swordigo_boot" "$STAGING/usr/bin/"
     chmod 755 "$STAGING/usr/bin/swordigo_boot"
 
-    # Launcher textures (including icons/ subdirectory)
-    cp -r "$ROOT_DIR/src/assets/"* "$STAGING/usr/share/swordigo/src/assets/" 2>/dev/null || true
+    if [ -f "$EXT4_DIR/asset_viewer" ]; then
+        cp "$EXT4_DIR/asset_viewer" "$STAGING/usr/bin/"
+        chmod 755 "$STAGING/usr/bin/asset_viewer"
+    fi
 
-    # Icon + license
-    cp "$ROOT_DIR/src/assets/icon_gnome.png" "$STAGING/usr/share/icons/hicolor/256x256/apps/swordigo-desktop.png" 2>/dev/null || true
-    cp "$ROOT_DIR/LICENSE" "$STAGING/usr/share/licenses/swordigo-desktop/" 2>/dev/null || true
+    # ---- libsre.so (bundled with engine data) ----
+    # Will be placed alongside engine binaries during post-install
+    cp "$EXT4_DIR/libsre.so" "$STAGING/usr/share/$PKG_NAME/"
 
-    # ---- Engine: ONLY v1.4.6 and v1.4.12 ----
-    mkdir -p "$STAGING/usr/share/swordigo/engine"
+    # ---- Engine binaries (from user's local data) ----
     for ver in "${SHIP_VERSIONS[@]}"; do
-        ver_dir="$ROOT_DIR/engine/$ver"
-        [ -d "$ver_dir" ] || { echo "  ⚠ engine/$ver not found, skipping"; continue; }
-        for arch_dir in "$ver_dir"/armeabi-v7a "$ver_dir"/arm64-v8a; do
+        for arch_dir in "$USER_DATA/engine/$ver"/armeabi-v7a "$USER_DATA/engine/$ver"/arm64-v8a; do
             [ -d "$arch_dir" ] || continue
             arch_name=$(basename "$arch_dir")
-            dest="$STAGING/usr/share/swordigo/engine/$ver/$arch_name"
+            dest="$STAGING/usr/share/$PKG_NAME/engine/$ver/$arch_name"
             mkdir -p "$dest"
             cp "$arch_dir"/*.so "$dest/" 2>/dev/null && \
                 echo "      ✓ engine/$ver/$arch_name/ ($(ls "$arch_dir"/*.so | wc -l) .so files)"
         done
     done
 
-    # ---- Manifest: filter to only shipped versions ----
-    # Generate a clean manifest with only vanilla v1.4.6 and v1.4.12
-    cat > "$STAGING/usr/share/swordigo/engine/manifest.json" << 'MANIFEST'
+    # Copy libsre.so into each ARM64 engine dir so it's ready
+    for ver in "${SHIP_VERSIONS[@]}"; do
+        arm64_dest="$STAGING/usr/share/$PKG_NAME/engine/$ver/arm64-v8a"
+        if [ -d "$arm64_dest" ]; then
+            cp "$EXT4_DIR/libsre.so" "$arm64_dest/"
+        fi
+    done
+    echo "      ✓ libsre.so → all ARM64 engine dirs"
+
+    # ---- Manifest ----
+    cat > "$STAGING/usr/share/$PKG_NAME/engine/manifest.json" << 'MANIFEST'
 {
-  "default": "engine/v1.4.12/armeabi-v7a/libswordigo.so",
+  "default": "engine/v1.4.12/arm64-v8a/libswordigo.so",
   "instances": [
     {
-      "name": "v1.4.12 [ARM64] (Tested)",
+      "name": "v1.4.12 [ARM64] (Recommended)",
       "filename": "libswordigo.so",
       "filepath": "engine/v1.4.12/arm64-v8a/libswordigo.so",
       "sha256": "f847814d1b6f81268567ed5ec2473fea4d4ee3b75d2c6fec7057227225e989f8",
@@ -97,7 +174,7 @@ stage_package() {
       "version_dir": "v1.4.12",
       "arch": "ARM64",
       "file_size": 7230152,
-      "is_default": false,
+      "is_default": true,
       "status": "tested",
       "game_type": "Swordigo",
       "assets_dir": "assets",
@@ -113,7 +190,7 @@ stage_package() {
       "version_dir": "v1.4.12",
       "arch": "ARM32",
       "file_size": 4607136,
-      "is_default": true,
+      "is_default": false,
       "status": "tested",
       "game_type": "Swordigo",
       "assets_dir": "assets",
@@ -155,19 +232,34 @@ stage_package() {
   ]
 }
 MANIFEST
-    echo "      ✓ manifest.json (vanilla only, 4 instances)"
+    echo "      ✓ manifest.json (vanilla, 4 instances)"
 
-    # ---- Game assets (vanilla only, NO rl_assets) ----
-    mkdir -p "$STAGING/usr/share/swordigo/assets/resources"
-    cp -r "$ROOT_DIR/assets/resources/"* "$STAGING/usr/share/swordigo/assets/resources/"
-    echo "      ✓ $(find "$STAGING/usr/share/swordigo/assets/resources" -type f | wc -l) game assets"
+    # ---- Game assets (from user's local data) ----
+    echo "      Copying assets (this may take a moment)..."
+    mkdir -p "$STAGING/usr/share/$PKG_NAME/assets"
+    cp -r "$USER_DATA/assets/resources" "$STAGING/usr/share/$PKG_NAME/assets/"
+    echo "      ✓ $(find "$STAGING/usr/share/$PKG_NAME/assets" -type f | wc -l) game assets"
 
-    # Music
-    mkdir -p "$STAGING/usr/share/swordigo/res/raw"
-    cp "$ROOT_DIR/res/raw/"*.mp3 "$STAGING/usr/share/swordigo/res/raw/" 2>/dev/null || true
-    echo "      ✓ $(find "$STAGING/usr/share/swordigo/res/raw" -type f | wc -l) music files"
+    # ---- Music ----
+    if [ -d "$USER_DATA/res/raw" ]; then
+        mkdir -p "$STAGING/usr/share/$PKG_NAME/res/raw"
+        cp "$USER_DATA/res/raw/"* "$STAGING/usr/share/$PKG_NAME/res/raw/" 2>/dev/null || true
+        echo "      ✓ $(find "$STAGING/usr/share/$PKG_NAME/res/raw" -type f | wc -l) music files"
+    fi
 
-    # Desktop entry
+    # ---- Launcher assets (icons, textures) ----
+    mkdir -p "$STAGING/usr/share/$PKG_NAME/src/assets"
+    cp -r "$ROOT_DIR/src/assets/"* "$STAGING/usr/share/$PKG_NAME/src/assets/" 2>/dev/null || true
+
+    # ---- Icon ----
+    if [ -f "$ROOT_DIR/src/assets/icon_gnome.png" ]; then
+        cp "$ROOT_DIR/src/assets/icon_gnome.png" "$STAGING/usr/share/icons/hicolor/256x256/apps/swordigo-desktop.png"
+    fi
+
+    # ---- License ----
+    cp "$ROOT_DIR/LICENSE" "$STAGING/usr/share/licenses/$PKG_NAME/" 2>/dev/null || true
+
+    # ---- Desktop entry ----
     cat > "$STAGING/usr/share/applications/Swordigo.desktop" << 'EOF'
 [Desktop Entry]
 Name=Swordigo Desktop
@@ -176,18 +268,80 @@ Icon=swordigo-desktop
 Terminal=false
 Type=Application
 Categories=Game;ActionGame;AdventureGame;
-Comment=Swordigo Desktop v4.5r
+Comment=Swordigo Desktop v6.0 — Native Linux runtime
 Keywords=swordigo;game;rpg;adventure;
 StartupWMClass=Swordigo
 EOF
 
+    # ---- Post-install script ----
+    # This script runs after RPM/DEB install to copy data to user's home.
+    # For multi-user systems, each user gets their own copy on first launch.
+    cat > "$STAGING/usr/bin/swordigo-setup" << 'SETUP'
+#!/bin/bash
+# swordigo-setup — Copy bundled data to user's local dir
+# Runs automatically on first launch or manually by the user
+
+DEST="$HOME/.local/share/swordigo-desktop"
+SRC="/usr/share/swordigo-desktop"
+
+if [ ! -d "$SRC" ]; then
+    echo "[Setup] System data not found at $SRC"
+    exit 1
+fi
+
+echo "[Setup] Installing Swordigo Desktop data to $DEST ..."
+mkdir -p "$DEST"
+
+# Copy engine (with libsre.so already inside)
+if [ -d "$SRC/engine" ]; then
+    cp -rn "$SRC/engine" "$DEST/" 2>/dev/null || cp -r "$SRC/engine" "$DEST/"
+    echo "  ✓ Engine binaries"
+fi
+
+# Copy manifest
+if [ -f "$SRC/engine/manifest.json" ]; then
+    cp "$SRC/engine/manifest.json" "$DEST/engine/manifest.json"
+    echo "  ✓ Manifest"
+fi
+
+# Copy assets
+if [ -d "$SRC/assets" ]; then
+    cp -rn "$SRC/assets" "$DEST/" 2>/dev/null || cp -r "$SRC/assets" "$DEST/"
+    echo "  ✓ Game assets"
+fi
+
+# Copy music
+if [ -d "$SRC/res" ]; then
+    cp -rn "$SRC/res" "$DEST/" 2>/dev/null || cp -r "$SRC/res" "$DEST/"
+    echo "  ✓ Music"
+fi
+
+# Copy launcher textures
+if [ -d "$SRC/src/assets" ]; then
+    mkdir -p "$DEST/src/assets"
+    cp -rn "$SRC/src/assets/"* "$DEST/src/assets/" 2>/dev/null || true
+    echo "  ✓ Launcher assets"
+fi
+
+# Copy libsre.so to root (backup)
+if [ -f "$SRC/libsre.so" ]; then
+    cp "$SRC/libsre.so" "$DEST/libsre.so"
+fi
+
+echo ""
+echo "[Setup] Done! Data installed to $DEST"
+echo "        Run 'swordigo_boot' to play."
+SETUP
+    chmod 755 "$STAGING/usr/bin/swordigo-setup"
+
     local TOTAL_FILES=$(find "$STAGING" -type f | wc -l)
     local TOTAL_SIZE=$(du -sh "$STAGING" | cut -f1)
+    echo ""
     echo "      ✓ Staged $TOTAL_FILES files ($TOTAL_SIZE)"
 }
 
 # ============================================================
-# Step 3a: RPM builder
+# Step 2a: RPM builder
 # ============================================================
 build_rpm() {
     local STAGING="${BUILD_DIR}/swordigo-rpm-root"
@@ -195,7 +349,7 @@ build_rpm() {
     local RPM_OUT="${BUILD_DIR}/${PKG_NAME}-${VERSION}-${RELEASE}.${ARCH}.rpm"
 
     echo ""
-    echo "── Building RPM: $PKG_NAME ──"
+    echo "── [2/3] Building RPM ──"
     stage_package "$STAGING"
 
     rm -rf "$RPM_TOPDIR"
@@ -209,7 +363,7 @@ build_rpm() {
 Name:           ${PKG_NAME}
 Version:        ${VERSION}
 Release:        ${RELEASE}
-Summary:        Swordigo Desktop v4.5r
+Summary:        Swordigo Desktop v6.0 — Native Linux runtime
 License:        MIT
 Group:          Amusements/Games
 URL:            https://github.com/TheCorrectSynovian/SwordigoDesktop
@@ -217,38 +371,43 @@ AutoReq:        no
 AutoProv:       no
 
 %description
-Swordigo Desktop v4.5r — Native Linux runtime for Swordigo.
-ARM emulation via Unicorn Engine. SDL3, HiDPI rendering,
-PostFX (SSAO, god rays, bloom, FSR upscaling), draw call batcher,
-threading bridges, binary/mod selector, gamepad support.
+Swordigo Desktop v6.0 — Native Linux runtime for Swordigo.
+ARM emulation via Unicorn Engine. SDL3, OpenGL, OpenAL.
+30+ SRE hooks replacing GUI, music, HUD, death/respawn.
+PostFX pipeline, save editor, asset viewer, gamepad support.
+Includes all game assets, engine binaries, and music.
 
 %install
 cp -a ${BUILDROOT}/* %{buildroot}/
 
+%post
+# Post-install: run setup for the installing user
+if [ -x /usr/bin/swordigo-setup ]; then
+    su "\${SUDO_USER:-\$USER}" -c /usr/bin/swordigo-setup || true
+fi
+
 %files
 /usr/bin/swordigo_boot
-/usr/share/swordigo/
+/usr/bin/swordigo-setup
+/usr/bin/asset_viewer
+/usr/share/${PKG_NAME}/
 /usr/share/applications/Swordigo.desktop
 /usr/share/icons/hicolor/256x256/apps/swordigo-desktop.png
-/usr/share/licenses/swordigo-desktop/
+/usr/share/licenses/${PKG_NAME}/
 
 %changelog
 * $(date +'%a %b %d %Y') QuantumCreeper <quantumcreeper@gmail.com> - ${VERSION}-${RELEASE}
-- v4.5r Release
-- Save Editor: Revamped, moved to launcher window
-- Save Editor: Browse and edit .gplayer saves (coins, health, mana, XP, weapon, keys)
-- ARM64: Entity loop infinite loop fix (NOP at 0x580708)
-- GPU: Draw call batcher (80-140 draws -> ~20 per frame)
-- GPU: FSR 1.0 edge-adaptive spatial upscaling
-- GPU: GLSL #version 330 shaders
-- Threading: Real nanosleep/usleep/pthread_join/pthread_detach bridges
-- PostFX: SSAO, god rays, bloom, vignette, chromatic aberration
-- Launcher: PolyMC-style instance manager with detail panel
-- ARM64: Full ARM64 emulation via Unicorn Engine
-- HiDPI: Native resolution rendering on high-DPI displays
-- SDL3: Complete SDL3 migration
+- v6.0 Release
+- FIXED: Wastelands spinlock (game-breaking freeze)
+- FIXED: Death freeze (instant checkpoint respawn via SRE)
+- SRE: 30+ hooks replacing GUI, music, HUD, death/respawn
+- Full GUI DrawRect stack, smart coin bar, damage flash
+- Save Editor, Asset Viewer, PostFX 6 presets
+- All assets, engine binaries, and music bundled
 SPEC
 
+    echo ""
+    echo "[3/3] Building RPM (this may take a minute)..."
     rpmbuild -bb \
         --define "_topdir $RPM_TOPDIR" \
         "$RPM_TOPDIR/SPECS/${PKG_NAME}.spec" 2>&1 | tail -3
@@ -265,14 +424,14 @@ SPEC
 }
 
 # ============================================================
-# Step 3b: DEB builder
+# Step 2b: DEB builder
 # ============================================================
 build_deb() {
     local STAGING="${BUILD_DIR}/swordigo-deb-root"
     local DEB_OUT="${BUILD_DIR}/${PKG_NAME}_${VERSION}-${RELEASE}_amd64.deb"
 
     echo ""
-    echo "── Building DEB: $PKG_NAME ──"
+    echo "── [2/3] Building DEB ──"
     stage_package "$STAGING"
 
     mkdir -p "$STAGING/DEBIAN"
@@ -283,19 +442,28 @@ Section: games
 Priority: optional
 Architecture: amd64
 Maintainer: QuantumCreeper <quantumcreeper@gmail.com>
-Description: Swordigo Desktop v4.5r
- Native Linux runtime for Swordigo. ARM emulation via Unicorn Engine.
- SDL3, HiDPI rendering, PostFX (SSAO, god rays, bloom, FSR upscaling),
- GPU draw call batcher, save editor, binary/mod selector, gamepad.
+Description: Swordigo Desktop v6.0 — Native Linux runtime
+ Complete Swordigo Desktop with all game assets, engine binaries,
+ music, and tools. Installs to ~/.local/share/swordigo-desktop/
+ for full user access (Minecraft-style data management).
  .
- Changes in v4.5r:
- - Save Editor: Revamped, moved from in-game to launcher window
- - Save Editor: Browse/edit .gplayer saves (coins, health, mana, XP, weapon, keys)
- - ARM64: Entity loop infinite loop fix
- - Version bump to v4.5r
+ v6.0: Wastelands fix, death respawn, 30+ SRE hooks, GUI stack,
+ save editor, asset viewer, PostFX, gamepad support.
 Homepage: https://github.com/TheCorrectSynovian/SwordigoDesktop
 CTRL
 
+    # DEB post-install script
+    cat > "$STAGING/DEBIAN/postinst" << 'POSTINST'
+#!/bin/bash
+# Copy game data to the installing user's home directory
+if [ -x /usr/bin/swordigo-setup ]; then
+    su "${SUDO_USER:-$USER}" -c /usr/bin/swordigo-setup || true
+fi
+POSTINST
+    chmod 755 "$STAGING/DEBIAN/postinst"
+
+    echo ""
+    echo "[3/3] Building DEB (this may take a minute)..."
     dpkg-deb --build "$STAGING" "$DEB_OUT" 2>&1 | tail -1
     if [ -f "$DEB_OUT" ]; then
         echo "  ✅ $DEB_OUT ($(du -h "$DEB_OUT" | cut -f1))"
@@ -330,3 +498,6 @@ echo "============================================"
 echo ""
 echo "Install RPM:  sudo rpm -Uvh <file>.rpm"
 echo "Install DEB:  sudo dpkg -i <file>.deb"
+echo ""
+echo "After install, users can also run: swordigo-setup"
+echo "to re-copy game data to their home directory."

@@ -4,8 +4,153 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Technical Documentation — Swordigo Desktop</title>
+  <meta name="description" content="In-depth technical documentation for the Swordigo Runtime (SRT) architecture — ELF loader, JNI bridge, SRE hook system, and more.">
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚙️</text></svg>">
+  <style>
+    /* Technical page-specific styles */
+    .stack-diagram {
+      background: var(--bg-subtle);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: var(--space-6);
+      margin-bottom: var(--space-6);
+      overflow-x: auto;
+    }
+    .stack-diagram pre {
+      margin: 0;
+      border: none;
+      background: transparent;
+      padding: 0;
+      text-align: center;
+    }
+    .stack-diagram code {
+      color: var(--accent);
+      font-size: 0.9rem;
+      line-height: 1.6;
+    }
+    .stack-diagram .layer-host { color: #58a6ff; }
+    .stack-diagram .layer-jni { color: #79c0ff; }
+    .stack-diagram .layer-unicorn { color: #d2a8ff; }
+    .stack-diagram .layer-sre { color: #7ee787; }
+    .stack-diagram .layer-game { color: #ffa657; }
+
+    .hook-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: var(--space-6);
+      font-size: 0.88rem;
+    }
+    .hook-table th {
+      background: var(--bg-subtle);
+      color: var(--fg-muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-size: 0.75rem;
+      padding: var(--space-3) var(--space-4);
+      text-align: left;
+      border-bottom: 2px solid var(--border);
+    }
+    .hook-table td {
+      padding: var(--space-3) var(--space-4);
+      border-bottom: 1px solid var(--border-muted);
+      color: var(--fg);
+    }
+    .hook-table tr:hover td {
+      background: rgba(47, 129, 247, 0.04);
+    }
+    .hook-table .hook-count {
+      font-family: var(--font-mono);
+      font-weight: 600;
+      color: var(--accent);
+      text-align: center;
+    }
+    .hook-table .hook-category {
+      font-weight: 600;
+      color: #fff;
+    }
+
+    .dir-tree {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: var(--space-4) var(--space-6);
+      margin-bottom: var(--space-6);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      line-height: 1.8;
+      color: var(--fg-muted);
+    }
+    .dir-tree .dir-name {
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .dir-tree .dir-comment {
+      color: var(--fg-subtle);
+    }
+
+    .stat-row {
+      display: flex;
+      gap: var(--space-4);
+      flex-wrap: wrap;
+      margin-bottom: var(--space-6);
+    }
+    .stat-card {
+      flex: 1;
+      min-width: 140px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: var(--space-4) var(--space-6);
+      text-align: center;
+    }
+    .stat-card__value {
+      font-size: 1.75rem;
+      font-weight: 700;
+      color: var(--accent);
+      font-family: var(--font-mono);
+    }
+    .stat-card__label {
+      font-size: 0.78rem;
+      color: var(--fg-subtle);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-top: var(--space-1);
+    }
+
+    .flow-step {
+      display: flex;
+      align-items: flex-start;
+      gap: var(--space-4);
+      padding: var(--space-4);
+      border-radius: 8px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      margin-bottom: var(--space-3);
+      transition: var(--transition);
+    }
+    .flow-step:hover {
+      border-color: var(--fg-subtle);
+    }
+    .flow-step__num {
+      font-family: var(--font-mono);
+      font-weight: 700;
+      font-size: 0.85rem;
+      color: var(--accent);
+      background: var(--accent-muted);
+      border-radius: 6px;
+      padding: 0.2rem 0.6rem;
+      flex-shrink: 0;
+    }
+    .flow-step__text {
+      font-size: 0.92rem;
+      color: var(--fg);
+    }
+    .flow-step__text strong {
+      color: #fff;
+    }
+  </style>
 </head>
 <body>
 
@@ -34,95 +179,451 @@
 
 <main class="container">
   <div class="doc-layout">
+
+    <!-- ==================== SIDEBAR ==================== -->
     <aside class="doc-layout__sidebar">
       <nav class="sidebar-nav">
         <div class="sidebar-nav__group">
           <div class="sidebar-nav__title">Core Architecture</div>
           <a href="#overview" class="sidebar-nav__link">Overview</a>
-          <a href="#compatibility-stack" class="sidebar-nav__link">Compatibility Stack</a>
+          <a href="#stack-diagram" class="sidebar-nav__link">Stack Diagram</a>
           <a href="#execution-flow" class="sidebar-nav__link">Execution Flow</a>
         </div>
         <div class="sidebar-nav__group">
           <div class="sidebar-nav__title">Subsystems</div>
           <a href="#elf-loader" class="sidebar-nav__link">ELF Loader</a>
           <a href="#jni-bridge" class="sidebar-nav__link">JNI Bridge</a>
-          <a href="#rendering" class="sidebar-nav__link">Rendering Pipeline</a>
-          <a href="#audio" class="sidebar-nav__link">Audio Engine</a>
+          <a href="#rendering" class="sidebar-nav__link">Rendering</a>
+          <a href="#audio" class="sidebar-nav__link">Audio</a>
+        </div>
+        <div class="sidebar-nav__group">
+          <div class="sidebar-nav__title">SRE Engine</div>
+          <a href="#hook-system" class="sidebar-nav__link">Hook System</a>
+          <a href="#gui-stack" class="sidebar-nav__link">GUI Stack</a>
+          <a href="#music-system" class="sidebar-nav__link">Music System</a>
+        </div>
+        <div class="sidebar-nav__group">
+          <div class="sidebar-nav__title">Infrastructure</div>
+          <a href="#data-layout" class="sidebar-nav__link">Runtime Data Layout</a>
+          <a href="#build-system" class="sidebar-nav__link">Build System</a>
         </div>
       </nav>
     </aside>
 
+    <!-- ==================== CONTENT ==================== -->
     <div class="doc-layout__content">
+
+      <!-- ── Overview ── -->
       <h1 id="overview">Technical Documentation</h1>
       <p class="hero__subtitle" style="text-align: left; margin-left: 0;">
-        Deep dive into the engineering behind the Swordigo Runtime Environment (SRE).
+        Architecture reference for the <strong>Swordigo Runtime (SRT)</strong> — the layered system
+        that runs a native ARM Android game binary on x86_64 Linux.
       </p>
 
-      <section id="compatibility-stack">
-        <h2>Compatibility Stack</h2>
-        <p>The SRE bridges the gap between the original ARM Android binary and the x86_64 Linux system using a multi-layered approach:</p>
-        <div class="grid grid--2">
-          <div class="card">
-            <h3 class="mt-0">Host Layer</h3>
-            <p class="card__desc mb-0">Native SDL2/3 platform handling, OpenGL context management, and filesystem abstraction.</p>
-          </div>
-          <div class="card">
-            <h3 class="mt-0">Bridge Layer</h3>
-            <p class="card__desc mb-0">JNI shims and Android system service emulators (Log, AssetManager, Configuration).</p>
-          </div>
+      <div class="stat-row">
+        <div class="stat-card">
+          <div class="stat-card__value">200+</div>
+          <div class="stat-card__label">Bridged JNI Functions</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card__value">30+</div>
+          <div class="stat-card__label">SRE Hooks</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card__value">2</div>
+          <div class="stat-card__label">ARM ISAs (v7 + v8)</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card__value">5</div>
+          <div class="stat-card__label">Runtime Layers</div>
+        </div>
+      </div>
+
+      <p>
+        <strong>SRT</strong> (Swordigo Runtime) is the umbrella name for the full desktop runtime architecture.
+        It is a stack of five distinct layers, each solving one part of the problem of running an ARM
+        Android game natively on a Linux desktop:
+      </p>
+      <ul style="list-style: disc; padding-left: var(--space-6); margin-bottom: var(--space-6);">
+        <li><strong>Platform Layer</strong> — SDL3, OpenGL, OpenAL, and Linux platform APIs on the host x86_64 machine.</li>
+        <li><strong>JNI Bridge</strong> — 200+ shimmed functions that emulate the Android Java environment the game expects.</li>
+        <li><strong>ELF Loader</strong> — Custom loader that maps ARM32 and ARM64 ELF shared objects into memory.</li>
+        <li><strong>Unicorn Engine</strong> — CPU emulator that executes ARMv7 and AArch64 instructions on x86_64.</li>
+        <li><strong>libsre.so</strong> — Guest-side ARM64 shared library with 30+ hooks that intercept and replace engine functions.</li>
+        <li><strong>libswordigo.so</strong> — The original game binary, the gameplay kernel, running under emulation.</li>
+      </ul>
+
+      <!-- ── Stack Diagram ── -->
+      <section id="stack-diagram">
+        <h2>Stack Diagram</h2>
+        <p>Execution flows downward. The host platform layer sits at the top; the original game binary is at the bottom, running entirely under emulation.</p>
+        <div class="stack-diagram">
+<pre><code><span class="layer-host">┌───────────────────────────────────────────────────┐
+│  Platform Layer (Host x86_64)                     │
+│  SDL3  ·  OpenGL  ·  OpenAL  ·  Linux             │
+├───────────────────────────────────────────────────┤</span>
+<span class="layer-jni">│  JNI Bridge  (200+ bridged functions)             │
+│  JNIEnv · AssetManager · Log · Configuration      │
+├───────────────────────────────────────────────────┤</span>
+<span class="layer-unicorn">│  Unicorn Engine  (ARMv7 + AArch64 emulation)      │
+│  Memory mapping · Syscall translation · Hooks     │
+├───────────────────────────────────────────────────┤</span>
+<span class="layer-sre">│  libsre.so  (30+ hooks, Guest ARM64)              │
+│  HUD · Music · Background · GUI · Crash recovery  │
+├───────────────────────────────────────────────────┤</span>
+<span class="layer-game">│  libswordigo.so  (Gameplay Kernel)                │
+│  Physics · Scenes · Lua scripting · AI · Renderer  │
+└───────────────────────────────────────────────────┘</span></code></pre>
+        </div>
+        <div class="callout">
+          <div class="callout__title">Why Two ARM Architectures?</div>
+          <p class="mb-0">Swordigo shipped with both <code>armeabi-v7a</code> and <code>arm64-v8a</code> binaries. SRT primarily targets <strong>v1.4.12 ARM64</strong> (AArch64) for best performance under Unicorn, but retains ARMv7 support for older APK versions.</p>
         </div>
       </section>
 
+      <!-- ── Execution Flow ── -->
+      <section id="execution-flow">
+        <h2>Execution Flow</h2>
+        <p>From launch to gameplay — every step of the boot sequence.</p>
+
+        <div class="flow-step">
+          <span class="flow-step__num">01</span>
+          <div class="flow-step__text"><strong>swordigo_boot</strong> — Host x86_64 binary initializes SDL3 window, OpenGL context, and OpenAL audio device.</div>
+        </div>
+        <div class="flow-step">
+          <span class="flow-step__num">02</span>
+          <div class="flow-step__text"><strong>ELF Loader</strong> — Parses <code>libswordigo.so</code> and <code>libsre.so</code> ARM64 ELF headers, maps PT_LOAD segments into emulator memory.</div>
+        </div>
+        <div class="flow-step">
+          <span class="flow-step__num">03</span>
+          <div class="flow-step__text"><strong>Relocation &amp; Linking</strong> — Resolves dynamic relocations, patches the GOT/PLT, and applies SRE hook trampolines.</div>
+        </div>
+        <div class="flow-step">
+          <span class="flow-step__num">04</span>
+          <div class="flow-step__text"><strong>JNI Init</strong> — Constructs a fake <code>JNIEnv</code> vtable with 200+ function pointers. Calls <code>JNI_OnLoad</code> in the guest.</div>
+        </div>
+        <div class="flow-step">
+          <span class="flow-step__num">05</span>
+          <div class="flow-step__text"><strong>Unicorn Execution</strong> — Begins emulating ARM64 instructions starting at <code>Java_com_touchfoo_swordigo_SwordigoLib_init</code>.</div>
+        </div>
+        <div class="flow-step">
+          <span class="flow-step__num">06</span>
+          <div class="flow-step__text"><strong>Hook Interception</strong> — When the game calls a hooked address, Unicorn redirects execution to the corresponding <code>libsre.so</code> function.</div>
+        </div>
+        <div class="flow-step">
+          <span class="flow-step__num">07</span>
+          <div class="flow-step__text"><strong>Main Loop</strong> — The game enters its main loop. SRE's <code>ProgramState</code> hook runs every frame, managing HUD, music, and input.</div>
+        </div>
+      </section>
+
+      <!-- ── ELF Loader ── -->
       <section id="elf-loader">
         <h2>ELF Loader</h2>
-        <p>Our custom ELF loader (<code>src/loader/elf_loader.cpp</code>) is responsible for parsing the ARM ELF32 binary, allocating memory with proper permissions, and resolving relocations.</p>
+        <p>
+          The custom ELF loader (<code>src/loader/elf_loader.cpp</code>) handles ARM32 and ARM64 shared objects.
+          It parses ELF headers, allocates memory with proper permissions via Unicorn's memory API,
+          processes relocations (R_AARCH64_RELATIVE, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT), and resolves symbols.
+        </p>
         <div class="callout">
-          <div class="callout__title">Key Feature: Lazy Relocation</div>
-          <p class="mb-0">Symbol resolution is deferred until first access to minimize startup latency, utilizing a trampoline-based approach for ARM function calls.</p>
+          <div class="callout__title">Key Feature: Dual-Library Loading</div>
+          <p class="mb-0">
+            The loader maps <strong>both</strong> <code>libswordigo.so</code> and <code>libsre.so</code> into the same Unicorn address space.
+            SRE is loaded at a non-conflicting base address, allowing it to directly reference game memory
+            and intercept function calls via the hook table.
+          </p>
         </div>
-        <pre><code>// Example ELF Loading Snippet
-ElfLoader loader("libswordigo.so");
-if (!loader.load()) {
-    Logger::error("Failed to map binary");
+        <pre><code>// Dual-library loading sequence
+ElfLoader game_loader("libswordigo.so", GAME_BASE_ADDR);
+ElfLoader sre_loader("libsre.so", SRE_BASE_ADDR);
+
+if (!game_loader.load(uc) || !sre_loader.load(uc)) {
+    Logger::error("Failed to map ARM64 binaries");
     return -1;
 }
-void* entry = loader.getSymbol("Java_com_touchfoo_swordigo_SwordigoLib_init");</code></pre>
+
+// Resolve cross-library references
+sre_loader.linkAgainst(game_loader);
+
+// Apply hook table
+HookTable::install(uc, sre_loader, game_loader);</code></pre>
       </section>
 
+      <!-- ── JNI Bridge ── -->
       <section id="jni-bridge">
         <h2>JNI Bridge</h2>
-        <p>Since the game engine expects a Java environment, SRE provides a comprehensive JNI bridge that marshals data between the ARM emulator and native C++ code.</p>
-        <ul>
-          <li><strong>Symbol Mapping:</strong> Maps Android-specific symbols to native shims.</li>
-          <li><strong>Thread Management:</strong> Synchronizes the JNI environment across multiple threads.</li>
-          <li><strong>String Marshalling:</strong> Converts UTF-8/UTF-16 strings between environments.</li>
-        </ul>
-      </section>
-
-      <section id="rendering">
-        <h2>Rendering Pipeline</h2>
-        <p>The original game uses GLES 1.x. SRE translates these calls to modern Desktop OpenGL 3.3+ while injecting post-processing effects into the pipeline.</p>
+        <p>
+          The game engine expects a full Android Java environment. SRT provides a comprehensive JNI bridge
+          that constructs a fake <code>JNIEnv</code> struct with 200+ function pointers, each marshalling data
+          between the ARM emulator and native x86_64 C++ code.
+        </p>
         <div class="grid grid--2">
           <div class="card">
-            <h3 class="mt-0">FBO Scaler</h3>
-            <p class="card__desc mb-0">Renders the game to a fixed-resolution buffer before scaling to the window size with high-quality filtering.</p>
+            <h3 class="mt-0">Symbol Mapping</h3>
+            <p class="card__desc mb-0">Maps Android-specific JNI symbols (<code>FindClass</code>, <code>GetMethodID</code>, <code>CallObjectMethod</code>) to native shims that return sensible values.</p>
           </div>
           <div class="card">
-            <h3 class="mt-0">PostFX</h3>
-            <p class="card__desc mb-0">Custom GLSL shaders for SSAO, bloom, and god rays that enhance the visual fidelity without altering game logic.</p>
+            <h3 class="mt-0">String Marshalling</h3>
+            <p class="card__desc mb-0">Converts UTF-8 ↔ modified-UTF-8 ↔ UTF-16 strings between the ARM guest and host, handling JNI <code>jstring</code> lifecycle.</p>
+          </div>
+          <div class="card">
+            <h3 class="mt-0">AssetManager Shim</h3>
+            <p class="card__desc mb-0">Intercepts <code>AAssetManager_open</code> and friends, redirecting file reads to the local <code>assets/resources/</code> directory on disk.</p>
+          </div>
+          <div class="card">
+            <h3 class="mt-0">Service Emulators</h3>
+            <p class="card__desc mb-0">Fakes <code>android.util.Log</code>, <code>Configuration</code>, <code>Display</code>, and <code>SharedPreferences</code> so the game's Java-side logic runs without a VM.</p>
           </div>
         </div>
       </section>
+
+      <!-- ── Rendering ── -->
+      <section id="rendering">
+        <h2>Rendering Pipeline</h2>
+        <p>
+          The original game uses OpenGL ES 1.x fixed-function calls. SRT translates these to desktop
+          OpenGL 3.3+ on the host, while SRE hooks inject custom rendering for backgrounds, HUD, and GUI elements.
+        </p>
+        <div class="grid grid--2">
+          <div class="card">
+            <h3 class="mt-0">GLES → Desktop GL</h3>
+            <p class="card__desc mb-0">Fixed-function calls like <code>glTexEnvi</code>, <code>glColor4f</code>, and matrix stack operations are translated to shader-based equivalents.</p>
+          </div>
+          <div class="card">
+            <h3 class="mt-0">FBO Resolution Scaling</h3>
+            <p class="card__desc mb-0">Game renders to a fixed-resolution FBO, then scales to window size with high-quality filtering for crisp visuals at any resolution.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Audio ── -->
+      <section id="audio">
+        <h2>Audio Engine</h2>
+        <p>
+          SRT replaces the entire Android <code>MediaPlayer</code> and <code>SoundPool</code> stack with an
+          OpenAL-based audio system on the host. Sound effects are decoded from the game's asset files,
+          and music playback is handled entirely by SRE's music system hooks.
+        </p>
+        <div class="grid grid--2">
+          <div class="card">
+            <h3 class="mt-0">OpenAL Backend</h3>
+            <p class="card__desc mb-0">All audio output goes through OpenAL Soft, supporting PulseAudio and PipeWire. Sound effects use AL buffers with 3D spatial positioning.</p>
+          </div>
+          <div class="card">
+            <h3 class="mt-0">MP3 Streaming</h3>
+            <p class="card__desc mb-0">Music files (<code>res/raw/*.mp3</code>) are decoded on the host using minimp3 and streamed into OpenAL buffers with crossfade transitions.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Hook System ── -->
+      <section id="hook-system">
+        <h2>SRE Hook System</h2>
+        <p>
+          <strong>libsre.so</strong> (Swordigo Runtime Engine) is an ARM64 shared library compiled with
+          <code>aarch64-linux-gnu-gcc</code> and loaded into the Unicorn address space alongside
+          <code>libswordigo.so</code>. It provides 30+ function hooks that intercept and replace
+          problematic or missing engine functionality.
+        </p>
+
+        <div class="callout">
+          <div class="callout__title">How Hooks Work</div>
+          <p class="mb-0">
+            Each hook is defined by a <strong>hook table</strong> entry containing three fields:
+            the <em>offset</em> in <code>libswordigo.so</code> to intercept, the <em>name</em> of the original function,
+            and a <em>relay</em> pointer to the replacement function in <code>libsre.so</code>.
+            At load time, the ELF loader patches the game binary's code at each offset with a branch instruction
+            (<code>B relay_addr</code>) that redirects execution to the SRE function. The SRE function runs
+            under the same Unicorn context with full access to guest memory and registers.
+          </p>
+        </div>
+
+        <h3>Hook Categories</h3>
+        <table class="hook-table">
+          <thead>
+            <tr>
+              <th>Category</th>
+              <th style="text-align: center;">Hooks</th>
+              <th>What It Replaces</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="hook-category">CppString</td>
+              <td class="hook-count">4</td>
+              <td>Atomic <code>STXR</code> spin loops that deadlock under emulation — replaced with simple non-atomic string operations.</td>
+            </tr>
+            <tr>
+              <td class="hook-category">MusicPlayer</td>
+              <td class="hook-count">6</td>
+              <td>Entire Android <code>MediaPlayer</code> music system — replaced with host-side OpenAL MP3 streaming.</td>
+            </tr>
+            <tr>
+              <td class="hook-category">Background</td>
+              <td class="hook-count">3</td>
+              <td>Custom sky gradient and parallax background rendering per-biome.</td>
+            </tr>
+            <tr>
+              <td class="hook-category">GameSceneView</td>
+              <td class="hook-count">1</td>
+              <td>Full HUD reimplementation — health bar, mana bar, item slots, and touch controls removed for keyboard/gamepad.</td>
+            </tr>
+            <tr>
+              <td class="hook-category">Death / Respawn</td>
+              <td class="hook-count">1</td>
+              <td>Ad SDK invocation on death — skipped entirely for instant respawn without ad prompts.</td>
+            </tr>
+            <tr>
+              <td class="hook-category">GUI DrawRect</td>
+              <td class="hook-count">8</td>
+              <td>Native button, label, slider, and panel rendering using game UI atlas textures instead of Android Views.</td>
+            </tr>
+            <tr>
+              <td class="hook-category">Lua Safety</td>
+              <td class="hook-count">3</td>
+              <td>Crash recovery wrappers around Lua script execution — catches panics and logs errors instead of segfaulting.</td>
+            </tr>
+            <tr>
+              <td class="hook-category">Audio Volume</td>
+              <td class="hook-count">1</td>
+              <td>Engine volume control calls routed to OpenAL <code>alListenerf(AL_GAIN)</code> on the host.</td>
+            </tr>
+            <tr>
+              <td class="hook-category">ProgramState</td>
+              <td class="hook-count">1</td>
+              <td>Frame-level game loop hook — runs every frame to manage input polling, HUD updates, and music transitions.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <pre><code>// Example hook table entry (src/sre/hook_table.h)
+typedef struct {
+    uint64_t    offset;     // Offset in libswordigo.so to patch
+    const char* name;       // Original function name
+    void*       relay;      // Pointer to SRE replacement function
+} HookEntry;
+
+static const HookEntry HOOK_TABLE[] = {
+    { 0x1A3F40, "MusicPlayer::play",      (void*)sre_music_play      },
+    { 0x1A4120, "MusicPlayer::stop",      (void*)sre_music_stop      },
+    { 0x1A4280, "MusicPlayer::setVolume", (void*)sre_music_set_volume},
+    { 0x09B6C0, "GameSceneView::draw",   (void*)sre_hud_draw        },
+    { 0x0D8A10, "ProgramState::update",  (void*)sre_frame_update    },
+    // ... 25+ more entries
+};</code></pre>
+      </section>
+
+      <!-- ── GUI Stack ── -->
+      <section id="gui-stack">
+        <h2>GUI Stack</h2>
+        <p>
+          SRE completely replaces the game's GUI rendering. The original game used Android <code>View</code> widgets
+          for menus and HUD. On desktop, SRE implements a custom immediate-mode GUI stack that draws directly
+          via OpenGL using the game's own <code>ui_atlas.png</code> sprite sheet.
+        </p>
+        <div class="grid grid--2">
+          <div class="card">
+            <h3 class="mt-0">8 DrawRect Hooks</h3>
+            <p class="card__desc mb-0">Buttons, labels, sliders, panels, and progress bars are all rendered by intercepting the engine's rectangle-drawing functions and replacing them with atlas-textured quads.</p>
+          </div>
+          <div class="card">
+            <h3 class="mt-0">Input Remapping</h3>
+            <p class="card__desc mb-0">Touch coordinates are translated from keyboard/gamepad events. SDL3 input events are injected into the guest as synthetic touch events at button coordinates.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Music System ── -->
+      <section id="music-system">
+        <h2>Music System</h2>
+        <p>
+          The 6 <code>MusicPlayer</code> hooks fully replace Android's <code>MediaPlayer</code> API.
+          Music tracks are MP3 files in <code>res/raw/</code>, decoded on the host with minimp3 and streamed
+          through OpenAL with gapless crossfade transitions between areas.
+        </p>
+        <div class="callout">
+          <div class="callout__title">Crossfade Engine</div>
+          <p class="mb-0">
+            When the game triggers a track change (e.g. entering a cave from the overworld), the music system
+            fades out the current track over 500ms while simultaneously fading in the new track.
+            Two OpenAL sources are maintained at all times to enable seamless blending.
+          </p>
+        </div>
+      </section>
+
+      <!-- ── Runtime Data Layout ── -->
+      <section id="data-layout">
+        <h2>Runtime Data Layout</h2>
+        <p>
+          SRT uses a <strong>Minecraft-style</strong> data layout: all game assets, engine binaries, music, and saves
+          live in the user's home directory. Users have full access to modify, mod, or backup their data.
+        </p>
+        <div class="dir-tree">
+          <span class="dir-name">~/.local/share/swordigo-desktop/</span><br>
+          ├── <span class="dir-name">assets/resources/</span> <span class="dir-comment"># Game textures, models, scenes, Lua scripts</span><br>
+          ├── <span class="dir-name">engine/</span> <span class="dir-comment"># ARM binaries: libswordigo.so + libsre.so per version</span><br>
+          ├── <span class="dir-name">res/raw/</span> <span class="dir-comment"># Music .mp3 files</span><br>
+          ├── <span class="dir-name">save/</span> <span class="dir-comment"># User save files (never packaged)</span><br>
+          └── manifest.json <span class="dir-comment"># Launcher instance registry</span>
+        </div>
+        <div class="callout">
+          <div class="callout__title">Packaging Principle</div>
+          <p class="mb-0">
+            RPM/DEB packages bundle <strong>all</strong> runtime files. No external downloads, no nested archives.
+            On install, a post-install script copies from <code>/usr/share/swordigo-desktop/</code> to the user's
+            <code>~/.local/share/swordigo-desktop/</code> for full user-level access and moddability.
+          </p>
+        </div>
+      </section>
+
+      <!-- ── Build System ── -->
+      <section id="build-system">
+        <h2>Build System</h2>
+        <p>
+          The project uses a <strong>Makefile-based</strong> build system. No CMake. The host components
+          (<code>swordigo_boot</code>, <code>asset_viewer</code>) are compiled with the system GCC, while
+          <code>libsre.so</code> is cross-compiled for AArch64.
+        </p>
+        <div class="grid grid--2">
+          <div class="card">
+            <h3 class="mt-0">Host Build</h3>
+            <p class="card__desc mb-0"><code>gcc</code> / <code>g++</code> targeting x86_64. Links against SDL3, OpenGL, OpenAL, Unicorn, and minimp3. Output: <code>swordigo_boot</code>.</p>
+          </div>
+          <div class="card">
+            <h3 class="mt-0">Guest Cross-Compile</h3>
+            <p class="card__desc mb-0"><code>aarch64-linux-gnu-gcc</code> targeting ARM64. Produces <code>libsre.so</code> — a position-independent shared object loaded into the Unicorn address space.</p>
+          </div>
+        </div>
+        <pre><code># Cross-compile libsre.so for ARM64
+aarch64-linux-gnu-gcc -shared -fPIC -O2 -nostdlib \
+    -o libsre.so \
+    src/sre/hooks.c src/sre/music.c src/sre/gui.c src/sre/hud.c
+
+# Build host runtime
+make -j$(nproc) swordigo_boot
+
+# Package for distribution
+builder/package.sh --rpm --deb</code></pre>
+      </section>
+
     </div>
 
+    <!-- ==================== TABLE OF CONTENTS ==================== -->
     <aside class="doc-layout__toc">
       <div class="toc__title">On this page</div>
       <a href="#overview" class="toc__link">Overview</a>
-      <a href="#compatibility-stack" class="toc__link">Compatibility Stack</a>
+      <a href="#stack-diagram" class="toc__link">Stack Diagram</a>
+      <a href="#execution-flow" class="toc__link">Execution Flow</a>
       <a href="#elf-loader" class="toc__link">ELF Loader</a>
       <a href="#jni-bridge" class="toc__link">JNI Bridge</a>
-      <a href="#rendering" class="toc__link">Rendering Pipeline</a>
+      <a href="#rendering" class="toc__link">Rendering</a>
+      <a href="#audio" class="toc__link">Audio</a>
+      <a href="#hook-system" class="toc__link">Hook System</a>
+      <a href="#gui-stack" class="toc__link">GUI Stack</a>
+      <a href="#music-system" class="toc__link">Music System</a>
+      <a href="#data-layout" class="toc__link">Data Layout</a>
+      <a href="#build-system" class="toc__link">Build System</a>
     </aside>
+
   </div>
 </main>
 

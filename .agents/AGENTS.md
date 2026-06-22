@@ -56,3 +56,31 @@ ext4, then sync back to TVPG for git commits.
 - **SRT** (Swordigo Runtime) — the overall desktop runtime architecture
 - **SRE** (Swordigo Runtime Engine / libsre.so) — ARM64 guest-side library that hooks/replaces engine functions
 - **Primary target** — v1.4.12 ARM64 (arm64-v8a)
+
+## Runtime Data Layout — IMPORTANT
+All game assets, engine binaries, music, and saves live in the **user's home
+directory** — NOT in system dirs, NOT on Google Drive, NOT in tar archives:
+
+```
+~/.local/share/swordigo-desktop/
+  ├── assets/resources/   (game textures, models, scenes, scripts)
+  ├── engine/             (ARM binaries: libswordigo.so + libsre.so per version)
+  ├── res/raw/            (music .mp3 files)
+  ├── save/               (user save files — NEVER packaged)
+  └── manifest.json       (launcher instance registry)
+```
+
+This is the **Minecraft-style** approach: the launcher and game always read from
+`~/.local/share/swordigo-desktop/`. Users have full access to modify, mod, or
+backup their data.
+
+## Packaging Rules — CRITICAL
+- RPM/DEB packages must bundle **ALL** runtime files: swordigo_boot, libsre.so,
+  asset_viewer, engine binaries, game assets, music, launcher textures.
+- **NO external downloads** (no Google Drive, no curl/wget in post-install).
+- **NO nested archives** (no tar.xz inside the package — RPM/DEB compression is enough).
+- Source assets/engine for packaging from `~/.local/share/swordigo-desktop/` on
+  the build machine.
+- On install, a post-install script copies from `/usr/share/swordigo-desktop/`
+  to the user's `~/.local/share/swordigo-desktop/` for full user access.
+- Build script: `builder/package.sh` (RPM + DEB).

@@ -3,10 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Swordigo Desktop — Linux Native Port</title>
-  <meta name="description" content="Swordigo Desktop is a Linux-native port of the classic action-adventure game, powered by the Swordigo Runtime Environment (SRE).">
+  <title>Swordigo Desktop — Native Linux Port | SRT v6.0</title>
+  <meta name="description" content="Swordigo Desktop v6.0 — a native Linux port of the classic action-adventure, powered by the Swordigo Runtime (SRT) with 30+ engine hooks replacing entire subsystems.">
+  <meta name="keywords" content="swordigo, desktop, linux, port, game, rpg, adventure, SRT, SRE, ARM emulation">
   <link rel="stylesheet" href="style.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚔️</text></svg>">
+  <link rel="icon" href="assets/icon_x11.png">
 </head>
 <body>
 
@@ -16,7 +17,8 @@
   <div class="container">
     <div class="navbar__inner">
       <a href="index.html" class="navbar__logo">
-        <span>⚔️</span> Swordigo Desktop
+        <img src="assets/icon_x11.png" alt="Swordigo" width="28" height="28" style="border-radius:4px;">
+        Swordigo Desktop
       </a>
       <ul class="navbar__nav">
         <li><a href="index.html" class="active">Home</a></li>
@@ -27,57 +29,150 @@
       </ul>
       <div class="navbar__cta">
         <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" class="btn btn--secondary btn--sm">GitHub</a>
-        <a href="download.html" class="btn btn--primary btn--sm">Download</a>
+        <a href="download.html" class="btn btn--primary btn--sm">Download v6.0</a>
       </div>
     </div>
   </div>
 </nav>
 
 <main>
-  <section class="hero">
-    <div class="container">
-      <h1 class="hero__title">Swordigo <span class="grad">Desktop</span></h1>
+  <!-- Hero with game background -->
+  <section class="hero hero--bg" style="background-image: linear-gradient(to bottom, rgba(10,14,26,0.4) 0%, rgba(10,14,26,0.85) 70%, rgba(10,14,26,1) 100%), url('assets/hero_bg0.png'); background-size: cover; background-position: center top; min-height: 80vh; display: flex; align-items: center;">
+    <div class="container" style="text-align: center;">
+      <span class="badge" style="margin-bottom: 1.5rem; display: inline-block;">v6.0 — June 2026</span>
+      <h1 class="hero__title" style="font-size: clamp(2.5rem, 6vw, 4.5rem);">Swordigo <span class="grad">Desktop</span></h1>
       <p class="hero__subtitle">
-        A professional Linux-native port of the classic action-adventure. 
-        Powered by the <strong>Swordigo Runtime Environment (SRE)</strong> — a high-performance ARM compatibility layer.
+        The classic 2012 action-adventure — running natively on Linux through the
+        <strong>Swordigo Runtime (SRT)</strong>. 30+ engine hooks. Full GUI ownership.
+        Zero emulation compromises.
       </p>
-      <div class="navbar__cta" style="justify-content: center;">
-        <a href="download.html" class="btn btn--primary">Get Started</a>
-        <a href="technical.html" class="btn btn--secondary">Read the Docs</a>
+      <div style="display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap;">
+        <a href="download.html" class="btn btn--primary" style="font-size: 1.05rem; padding: 0.75rem 2rem;">⬇ Download v6.0</a>
+        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" class="btn btn--secondary" style="font-size: 1.05rem; padding: 0.75rem 2rem;">⭐ GitHub</a>
       </div>
     </div>
   </section>
 
-  <section class="container" style="padding: var(--space-12) 0;">
+  <!-- Stats bar -->
+  <section style="background: var(--bg-surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 2rem 0;">
+    <div class="container">
+      <div class="grid grid--4" style="display: grid; grid-template-columns: repeat(4, 1fr); text-align: center; gap: 1rem;">
+        <div class="stat reveal">
+          <div class="stat__number">30+</div>
+          <div class="stat__label">SRE Hooks</div>
+        </div>
+        <div class="stat reveal">
+          <div class="stat__number">942</div>
+          <div class="stat__label">Game Assets</div>
+        </div>
+        <div class="stat reveal">
+          <div class="stat__number">16</div>
+          <div class="stat__label">SRE Source Files</div>
+        </div>
+        <div class="stat reveal">
+          <div class="stat__number">6</div>
+          <div class="stat__label">PostFX Presets</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Feature Cards -->
+  <section class="container" style="padding: 4rem 0;">
+    <h2 style="text-align: center; border: none; margin-bottom: 2rem;">Why Swordigo Desktop?</h2>
     <div class="grid grid--3">
       <div class="card reveal">
-        <div class="card__icon">⚙️</div>
-        <h3 class="card__title">SRE Core</h3>
-        <p class="card__desc">Custom ARMv7 emulator bridge with zero-overhead syscall translation and native GLES mapping.</p>
+        <div class="card__icon">⚔️</div>
+        <h3 class="card__title">SRE Engine</h3>
+        <p class="card__desc">30+ hooks replacing GUI rendering, music, HUD, death/respawn, and Lua safety. Not patching — <em>owning</em> the subsystems.</p>
       </div>
       <div class="card reveal">
         <div class="card__icon">🎨</div>
-        <h3 class="card__title">Enhanced Visuals</h3>
-        <p class="card__desc">Integrated PostFX pipeline featuring SSAO, God Rays, and high-fidelity texture filtering.</p>
+        <h3 class="card__title">PostFX Pipeline</h3>
+        <p class="card__desc">SSAO, God Rays, Film Grain, Chromatic Aberration, Sharpen. 6 cinematic presets — Cinematic, Retro, Fantasy, Noir, Ethereal, Atmospheric.</p>
       </div>
       <div class="card reveal">
         <div class="card__icon">🐧</div>
         <h3 class="card__title">Linux Native</h3>
-        <p class="card__desc">First-class support for Wayland/X11, SDL3 input, and native PulseAudio/PipeWire integration.</p>
+        <p class="card__desc">SDL3, OpenGL, OpenAL. Full keyboard/gamepad/touch support. Wayland + X11. Minecraft-style data management.</p>
       </div>
     </div>
   </section>
 
-  <section class="container" style="padding-bottom: var(--space-16);">
+  <!-- Milestone Fixes banner -->
+  <section style="background: linear-gradient(135deg, rgba(200,170,80,0.08) 0%, rgba(46,204,113,0.08) 100%); border-top: 1px solid rgba(200,170,80,0.2); border-bottom: 1px solid rgba(200,170,80,0.2); padding: 3rem 0;">
+    <div class="container">
+      <h2 style="text-align: center; border: none; color: var(--accent);">🎉 Two Long-Awaited Bugs — Solved</h2>
+      <div class="grid grid--2" style="margin-top: 1.5rem;">
+        <div class="card reveal" style="border-color: rgba(200,170,80,0.3);">
+          <h3 class="card__title" style="color: var(--accent);">Wastelands Spinlock</h3>
+          <p class="card__desc">The infamous freeze in the Wastelands region that forced players to use ARM32 as a workaround. <strong style="color: #2ecc71;">Fixed.</strong> ARM64 plays through normally now.</p>
+        </div>
+        <div class="card reveal" style="border-color: rgba(200,170,80,0.3);">
+          <h3 class="card__title" style="color: var(--accent);">Death Freeze</h3>
+          <p class="card__desc">Dying in the game caused a permanent freeze (ad SDK path). <strong style="color: #2ecc71;">Fixed.</strong> SRE intercepts death → instant checkpoint respawn.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- What's New - Feature rows with images -->
+  <section class="container" style="padding: 4rem 0;">
+    <h2 style="text-align: center; border: none; margin-bottom: 3rem;">What's New in v6.0</h2>
+
+    <!-- Feature 1: GUI Stack -->
+    <div class="feature-row reveal" style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; align-items: center; margin-bottom: 3rem;">
+      <div>
+        <span class="badge">New in v6.0</span>
+        <h3 style="margin-top: 0.5rem;">Full GUI Ownership</h3>
+        <p style="color: var(--fg-muted);">8 DrawRect hooks give SRE total control over the game's GUI rendering pipeline. Buttons, labels, frames, sliders — all running natively in C. Rename buttons, hide IAP elements, add custom menus.</p>
+      </div>
+      <div style="border-radius: 12px; overflow: hidden; border: 1px solid var(--border);">
+        <img src="assets/ui_panel_flipped.png" alt="GUI Panel" style="width: 100%; display: block;">
+      </div>
+    </div>
+
+    <!-- Feature 2: Save Editor & Asset Viewer -->
+    <div class="feature-row reveal" style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; align-items: center; margin-bottom: 3rem;">
+      <div style="border-radius: 12px; overflow: hidden; border: 1px solid var(--border);">
+        <img src="assets/launcher_bg_flipped.png" alt="Launcher" style="width: 100%; display: block;">
+      </div>
+      <div>
+        <span class="badge">Tools</span>
+        <h3 style="margin-top: 0.5rem;">Save Editor & Asset Viewer</h3>
+        <p style="color: var(--fg-muted);">Save Editor built into the launcher — edit coins, HP, mana, XP, weapons, and keys for any save file. Asset Viewer lets you browse PVR/PNG textures, audio files, and scene data.</p>
+      </div>
+    </div>
+
+    <!-- Feature 3: PostFX -->
+    <div class="feature-row reveal" style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; align-items: center; margin-bottom: 3rem;">
+      <div>
+        <span class="badge">Visuals</span>
+        <h3 style="margin-top: 0.5rem;">6 PostFX Presets</h3>
+        <p style="color: var(--fg-muted);">Cinematic • Retro • Fantasy • Noir • Ethereal • Atmospheric. SSAO with 16-sample hemisphere. 64-sample god rays. Vignette, film grain, chromatic aberration, sharpen. Toggle with F6.</p>
+      </div>
+      <div style="border-radius: 12px; overflow: hidden; border: 1px solid var(--border);">
+        <img src="assets/forest_bg_flipped.png" alt="Forest scene" style="width: 100%; display: block;">
+      </div>
+    </div>
+  </section>
+
+  <!-- Quick Start -->
+  <section class="container" style="padding-bottom: 4rem;">
     <div class="card reveal" style="background: var(--bg-subtle);">
       <h2 class="mt-0">Quick Start</h2>
-      <p>Clone the repository and run the bootstrap script to get started with the development environment.</p>
-      <pre><code>git clone https://github.com/TheCorrectSynovian/SwordigoDesktop.git
-cd SwordigoDesktop
-./instx.sh --bootstrap
-./run_swordigo.sh</code></pre>
-      <div style="display: flex; gap: var(--space-4); margin-top: var(--space-4);">
-        <a href="download.html" class="btn btn--secondary btn--sm">View Installation Guide →</a>
+      <p>Install the pre-built package — everything is bundled (assets, engine, music). No external downloads.</p>
+      <pre><code># Fedora / RHEL
+sudo dnf install ./swordigo-desktop-6.0.0-1.x86_64.rpm
+
+# Debian / Ubuntu
+sudo apt install ./swordigo-desktop_6.0.0-1_amd64.deb
+
+# Launch
+swordigo_boot</code></pre>
+      <div style="display: flex; gap: 1rem; margin-top: 1rem; flex-wrap: wrap;">
+        <a href="download.html" class="btn btn--primary btn--sm">Download v6.0 →</a>
+        <a href="technical.html" class="btn btn--secondary btn--sm">Read the Docs →</a>
       </div>
     </div>
   </section>
@@ -86,7 +181,7 @@ cd SwordigoDesktop
 <footer class="footer">
   <div class="container">
     <div class="footer__inner">
-      <p>&copy; 2026 QuantumCreeper Labs. All rights reserved.</p>
+      <p>&copy; 2026 QuantumCreeper Labs · Swordigo is property of Touch Foo</p>
       <ul class="navbar__nav">
         <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop">GitHub</a></li>
         <li><a href="sitemap.xml">Sitemap</a></li>

@@ -36,49 +36,191 @@
   <section class="hero" style="padding: var(--space-12) 0; text-align: left;">
     <h1 class="hero__title" style="font-size: 2.5rem;">Release <span class="grad">Notes</span></h1>
     <p class="hero__subtitle" style="margin-left: 0; max-width: 800px;">
-      Track the evolution of the Swordigo Runtime Environment.
+      The full development history of Swordigo Desktop — from first boot to current stable.
     </p>
   </section>
 
   <div class="doc-layout" style="grid-template-columns: 1fr;">
     <div class="doc-layout__content">
-      <div class="sidebar-nav__group">
-        <div class="sidebar-nav__title">June 2026</div>
-        <div class="card reveal" style="margin-bottom: var(--space-6);">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-4);">
-            <h3 class="mt-0">v2.0r — "Vanguard"</h3>
-            <span class="btn btn--secondary btn--sm" style="pointer-events: none; border-color: var(--success); color: var(--success);">Current Stable</span>
+      <div class="timeline">
+
+        <!-- v6.0 -->
+        <div class="timeline-item timeline-item--current reveal">
+          <div class="timeline-item__header">
+            <h3 class="timeline-item__version">v6.0</h3>
+            <span class="timeline-item__date">June 22, 2026</span>
+            <span class="timeline-item__badge">Current Stable</span>
           </div>
-          <p>Complete overhaul of the graphics pipeline and migration to the new JNI bridge architecture.</p>
-          <ul>
-            <li><strong>Added:</strong> Full SSAO and God Rays implementation.</li>
-            <li><strong>Added:</strong> Support for high-refresh-rate displays (144Hz+).</li>
-            <li><strong>Improved:</strong> ELF relocation performance (reduced boot time by 40%).</li>
-            <li><strong>Fixed:</strong> Texture corruption on AMD/Mesa drivers.</li>
-          </ul>
+          <p class="timeline-item__desc">
+            The Wastelands release. Two game-breaking freezes killed, SRE expanded to 30+ hooks, full GUI stack, and a complete PostFX pipeline.
+          </p>
+          <div class="timeline-item__changes">
+            <div class="timeline-item__change timeline-item__change--highlight">
+              <span class="emoji">🎉</span>
+              <span><strong>FIXED:</strong> Wastelands spinlock — the infamous game-breaking freeze that locked the main thread in an infinite ARM loop</span>
+            </div>
+            <div class="timeline-item__change timeline-item__change--highlight">
+              <span class="emoji">🎉</span>
+              <span><strong>FIXED:</strong> Death freeze — instant checkpoint respawn via SRE hook, bypassing the ad/prompt system entirely</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">🔧</span>
+              <span>SRE expanded to <strong>30+ active hooks</strong> (was 17 in v5.0)</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">🖼️</span>
+              <span>Full GUI DrawRect stack — 8 native hooks for buttons, labels, frames, and sliders</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">💚</span>
+              <span><code>GameSceneView::Update</code> recovered — HP bar, mana orb, coin counter, and damage flash all functional</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">🪙</span>
+              <span>Smart coin bar with shop-aware auto-hide logic</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">💾</span>
+              <span>Save Editor built into the launcher — edit gold, HP, items, and quest flags</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">📦</span>
+              <span>Asset Viewer for browsing PVR textures, PNG sprites, and audio files</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">✨</span>
+              <span>PostFX pipeline: 6 presets — Cinematic, Retro, Fantasy, Noir, Ethereal, Atmospheric</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">🛡️</span>
+              <span>Crash safety: <code>luaD_throw</code> + <code>ProgramPanic</code> + <code>__cxa_throw</code> interception</span>
+            </div>
+          </div>
+          <div class="timeline-item__callout">
+            <strong>⚠ Known issue:</strong> Bolt/timer misbehavior — some enemies fire projectiles too fast due to ARM timer drift.
+          </div>
         </div>
 
-        <div class="sidebar-nav__title">May 2026</div>
-        <div class="card reveal" style="margin-bottom: var(--space-6); opacity: 0.8;">
-          <h3 class="mt-0">v1.8.2 — Bug Fixes</h3>
-          <p>Maintenance release focusing on stability and input compatibility.</p>
-          <ul>
-            <li><strong>Fixed:</strong> Controller axis drift on specific gamepads.</li>
-            <li><strong>Improved:</strong> OpenAL buffer management.</li>
-            <li><strong>Added:</strong> Experimental Wayland support.</li>
-          </ul>
+        <!-- v5.0 -->
+        <div class="timeline-item reveal">
+          <div class="timeline-item__header">
+            <h3 class="timeline-item__version">v5.0</h3>
+            <span class="timeline-item__date">June 21, 2026</span>
+          </div>
+          <p class="timeline-item__desc">
+            The SRE release. Introduced libsre.so as a guest-side hook library, replacing binary patching with proper function interception.
+          </p>
+          <div class="timeline-item__changes">
+            <div class="timeline-item__change">
+              <span class="emoji">🚀</span>
+              <span><code>libsre.so</code> introduced — 17 active hooks into libswordigo.so at runtime</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">🎵</span>
+              <span>Full music system replacement via OpenAL command interface</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">💀</span>
+              <span>Death/respawn system — skip ads, instant checkpoint teleport</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">📊</span>
+              <span>HUD reimplementation through <code>GameSceneView::Update</code></span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">⚛️</span>
+              <span>Non-atomic string ops — STXR elimination for x86 compatibility</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">📡</span>
+              <span>Player stats (HP, mana, gold, position) exported to host for HUD rendering</span>
+            </div>
+          </div>
         </div>
 
-        <div class="sidebar-nav__title">April 2026</div>
-        <div class="card reveal" style="opacity: 0.6;">
-          <h3 class="mt-0">v1.0.0 — Initial Release</h3>
-          <p>The first public release of the Swordigo Runtime Environment.</p>
-          <ul>
-            <li>Initial ARM emulation core based on Unicorn.</li>
-            <li>GLES 1.x translation layer.</li>
-            <li>Basic SDL2 platform support.</li>
-          </ul>
+        <!-- v4.5r -->
+        <div class="timeline-item reveal">
+          <div class="timeline-item__header">
+            <h3 class="timeline-item__version">v4.5r</h3>
+            <span class="timeline-item__date">June 20, 2026</span>
+          </div>
+          <p class="timeline-item__desc">
+            Launcher tools and rendering improvements. The Save Editor was revamped and integrated directly into the launcher UI.
+          </p>
+          <div class="timeline-item__changes">
+            <div class="timeline-item__change">
+              <span class="emoji">💾</span>
+              <span>Save Editor revamped and moved into the launcher</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">🔩</span>
+              <span>ARM64 entity loop fix — corrected iteration over game objects</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">🎮</span>
+              <span>GPU draw call batcher for reduced overhead</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">✨</span>
+              <span>PostFX pipeline groundwork — SSAO and god rays shaders</span>
+            </div>
+          </div>
         </div>
+
+        <!-- v4.0r -->
+        <div class="timeline-item reveal">
+          <div class="timeline-item__header">
+            <h3 class="timeline-item__version">v4.0r</h3>
+            <span class="timeline-item__date">June 19, 2026</span>
+          </div>
+          <p class="timeline-item__desc">
+            Architecture overhaul. PolyMC-style launcher with instance management, ARM64 emulation via Unicorn Engine, and full SDL3 migration.
+          </p>
+          <div class="timeline-item__changes">
+            <div class="timeline-item__change">
+              <span class="emoji">🖥️</span>
+              <span>PolyMC-style launcher with instance manager and version selector</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">🦾</span>
+              <span>ARM64 emulation via Unicorn Engine (replaced ARM32 core)</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">🪟</span>
+              <span>SDL3 migration complete — modern windowing, input, and audio</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- v1.0 -->
+        <div class="timeline-item reveal">
+          <div class="timeline-item__header">
+            <h3 class="timeline-item__version">v1.0</h3>
+            <span class="timeline-item__date">June 14, 2026</span>
+          </div>
+          <p class="timeline-item__desc">
+            The beginning. First successful boot of Swordigo on a Linux desktop — proof of concept with ARM32 emulation and basic GLES translation.
+          </p>
+          <div class="timeline-item__changes">
+            <div class="timeline-item__change">
+              <span class="emoji">🏁</span>
+              <span>Initial release — first native Linux port of Swordigo</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">⚙️</span>
+              <span>ARM32 emulation core (Unicorn Engine)</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">🔺</span>
+              <span>Basic GLES 1.x translation layer</span>
+            </div>
+            <div class="timeline-item__change">
+              <span class="emoji">🎮</span>
+              <span>SDL2 platform support</span>
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
   </div>

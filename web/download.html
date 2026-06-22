@@ -3,9 +3,172 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Download — Swordigo Desktop</title>
+  <title>Download v6.0 — Swordigo Desktop</title>
+  <meta name="description" content="Download Swordigo Desktop v6.0 for Linux — RPM, DEB, or build from source. Everything is bundled, no external downloads required.">
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⬇️</text></svg>">
+  <style>
+    /* Download page-specific styles */
+    .download-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: var(--space-8);
+      text-align: center;
+      transition: var(--transition);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .download-card:hover {
+      border-color: var(--accent);
+      transform: translateY(-4px);
+      box-shadow: 0 12px 40px rgba(47, 129, 247, 0.1);
+    }
+    .download-card__icon {
+      font-size: 2.5rem;
+      margin-bottom: var(--space-4);
+    }
+    .download-card__title {
+      font-size: 1.25rem;
+      margin: 0 0 var(--space-1) 0;
+      color: #fff;
+      font-weight: 700;
+    }
+    .download-card__distro {
+      font-size: 0.85rem;
+      color: var(--fg-muted);
+      margin-bottom: var(--space-4);
+    }
+    .download-card__size {
+      display: inline-block;
+      background: var(--accent-muted);
+      color: var(--accent);
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.2rem 0.6rem;
+      border-radius: 999px;
+      margin-bottom: var(--space-6);
+      font-family: var(--font-mono);
+    }
+    .download-card .btn {
+      width: 100%;
+      justify-content: center;
+      padding: var(--space-3) var(--space-4);
+      font-size: 0.95rem;
+    }
+
+    .bonus-download {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: var(--space-6);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-6);
+      margin-top: var(--space-8);
+    }
+    .bonus-download:hover {
+      border-color: var(--border);
+    }
+    .bonus-download__info {
+      flex: 1;
+    }
+    .bonus-download__title {
+      font-size: 1rem;
+      color: #fff;
+      font-weight: 600;
+      margin: 0 0 var(--space-1) 0;
+    }
+    .bonus-download__desc {
+      font-size: 0.85rem;
+      color: var(--fg-muted);
+      margin: 0;
+    }
+
+    .install-step {
+      display: flex;
+      gap: var(--space-6);
+      margin-bottom: var(--space-8);
+    }
+    .install-step__number {
+      flex-shrink: 0;
+      width: 40px;
+      height: 40px;
+      background: var(--accent);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 1rem;
+      color: #fff;
+    }
+    .install-step__content {
+      flex: 1;
+      min-width: 0;
+    }
+    .install-step__content h3 {
+      margin-top: 0;
+      margin-bottom: var(--space-2);
+      font-size: 1.1rem;
+    }
+    .install-step__content p {
+      margin-bottom: var(--space-3);
+      color: var(--fg-muted);
+      font-size: 0.95rem;
+    }
+
+    .dep-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-3);
+      margin-top: var(--space-4);
+    }
+    .dep-chip {
+      background: var(--bg-subtle);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: var(--space-2) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      color: var(--fg);
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-2);
+    }
+    .dep-chip__dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+      flex-shrink: 0;
+    }
+
+    .section-label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--accent);
+      margin-bottom: var(--space-2);
+    }
+
+    @media (max-width: 768px) {
+      .bonus-download {
+        flex-direction: column;
+        text-align: center;
+      }
+      .install-step {
+        flex-direction: column;
+        gap: var(--space-3);
+      }
+      .install-step__number {
+        margin: 0;
+      }
+    }
+  </style>
 </head>
 <body>
 
@@ -33,59 +196,142 @@
 </nav>
 
 <main class="container">
+
+  <!-- Hero -->
   <section class="hero" style="padding: var(--space-12) 0; text-align: left;">
-    <h1 class="hero__title" style="font-size: 2.5rem;">Download <span class="grad">v2.0.0</span></h1>
+    <p class="section-label">Latest Release</p>
+    <h1 class="hero__title" style="font-size: 3rem;">Download <span class="grad" style="background: linear-gradient(90deg, #ffd966, #e8a317, #ffd966); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">v6.0</span></h1>
     <p class="hero__subtitle" style="margin-left: 0; max-width: 800px;">
-      Get the latest stable release of Swordigo Desktop for Linux.
+      Everything bundled. No external downloads, no bootstrap scripts. Install the package, run setup, and play.
     </p>
   </section>
 
+  <!-- Download Cards -->
   <div class="grid grid--3">
-    <div class="card reveal">
-      <h3 class="mt-0">RPM Package</h3>
-      <p class="card__desc">Native package for Fedora, RHEL, and other RPM-based distributions.</p>
-      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop-2.0.0-1.fc44.x86_64.rpm" class="btn btn--primary btn--sm">Download .rpm</a>
+    <div class="download-card reveal">
+      <div class="download-card__icon">📦</div>
+      <div class="download-card__title">RPM Package</div>
+      <div class="download-card__distro">Fedora · RHEL · openSUSE</div>
+      <div class="download-card__size">~79 MB</div>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v6/swordigo-desktop-6.0.0-1.x86_64.rpm" class="btn btn--primary">Download .rpm</a>
     </div>
-    <div class="card reveal">
-      <h3 class="mt-0">DEB Package</h3>
-      <p class="card__desc">Native package for Debian, Ubuntu, and Linux Mint distributions.</p>
-      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v2/swordigo-desktop_2.0.0_amd64.deb" class="btn btn--primary btn--sm">Download .deb</a>
+    <div class="download-card reveal">
+      <div class="download-card__icon">🗃️</div>
+      <div class="download-card__title">DEB Package</div>
+      <div class="download-card__distro">Debian · Ubuntu · Linux Mint</div>
+      <div class="download-card__size">~79 MB</div>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v6/swordigo-desktop_6.0.0-1_amd64.deb" class="btn btn--primary">Download .deb</a>
     </div>
-    <div class="card reveal">
-      <h3 class="mt-0">Source Code</h3>
-      <p class="card__desc">Latest source archive. Best for developers and custom builds.</p>
-      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/archive/refs/tags/v2.tar.gz" class="btn btn--secondary btn--sm">Download .tar.gz</a>
+    <div class="download-card reveal">
+      <div class="download-card__icon">🧬</div>
+      <div class="download-card__title">Source Code</div>
+      <div class="download-card__distro">Any distribution · Build from source</div>
+      <div class="download-card__size">.zip</div>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/archive/refs/tags/v6.zip" class="btn btn--secondary">Download Source</a>
     </div>
   </div>
 
-  <section style="margin-top: var(--space-12);">
-    <h2>Installation Instructions</h2>
-    <div class="doc-layout" style="grid-template-columns: 1fr;">
-      <div class="doc-layout__content">
-        <h3>1. Install the Package</h3>
+  <!-- Bonus: libsre.so standalone -->
+  <div class="bonus-download reveal">
+    <div style="font-size: 1.5rem;">⚙️</div>
+    <div class="bonus-download__info">
+      <div class="bonus-download__title">libsre.so — Standalone Runtime Engine</div>
+      <p class="bonus-download__desc">For advanced users who only need the SRE runtime library. Drop-in replacement for existing installations or custom setups.</p>
+    </div>
+    <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v6/libsre.so" class="btn btn--secondary btn--sm">Download libsre.so</a>
+  </div>
+
+  <!-- Installation Instructions -->
+  <section style="margin-top: var(--space-16);">
+    <p class="section-label">Getting Started</p>
+    <h2 style="border-bottom: none; padding-bottom: 0;">Installation</h2>
+    <p style="color: var(--fg-muted); max-width: 700px; margin-bottom: var(--space-8);">
+      Three steps to play. All game assets, engine binaries, and music are bundled inside the package — no external downloads required.
+    </p>
+
+    <div class="install-step reveal">
+      <div class="install-step__number">1</div>
+      <div class="install-step__content">
+        <h3>Install the Package</h3>
         <p>Use your distribution's package manager to install the downloaded file.</p>
-        <pre><code># For RPM (Fedora/RHEL)
-sudo dnf install ./swordigo-desktop-*.rpm
+        <pre><code># Fedora / RHEL
+sudo dnf install ./swordigo-desktop-6.0.0-1.x86_64.rpm
 
-# For DEB (Debian/Ubuntu)
-sudo apt install ./swordigo-desktop_*.deb</code></pre>
+# Debian / Ubuntu
+sudo apt install ./swordigo-desktop_6.0.0-1_amd64.deb</code></pre>
+      </div>
+    </div>
 
-        <h3>2. Run the Bootstrap Script</h3>
-        <p>The bootstrap script will download the necessary game assets and set up the environment.</p>
-        <pre><code>chmod +x instx.sh
-./instx.sh --bootstrap</code></pre>
+    <div class="install-step reveal">
+      <div class="install-step__number">2</div>
+      <div class="install-step__content">
+        <h3>Run Setup</h3>
+        <p>Copy game data from the system-wide install to your home directory. This creates <code>~/.local/share/swordigo-desktop/</code> with all assets, engine binaries, and music.</p>
+        <pre><code>swordigo-setup</code></pre>
+      </div>
+    </div>
 
-        <h3>3. Launch the Game</h3>
-        <p>Run the launcher script to start the game with the SRE runtime.</p>
-        <pre><code>./run_swordigo.sh</code></pre>
+    <div class="install-step reveal">
+      <div class="install-step__number">3</div>
+      <div class="install-step__content">
+        <h3>Launch the Game</h3>
+        <p>Start Swordigo Desktop with the SRE runtime.</p>
+        <pre><code>swordigo_boot</code></pre>
+      </div>
+    </div>
 
-        <div class="callout callout--warning">
-          <div class="callout__title">Dependency Note</div>
-          <p class="mb-0">Ensure you have <code>libsdl2</code> (or <code>libsdl3</code>), <code>libopenal</code>, and <code>mesa-libGL</code> installed if they are not automatically pulled by the package manager.</p>
-        </div>
+    <!-- Dependencies Callout -->
+    <div class="callout reveal">
+      <div class="callout__title">📋 Required Dependencies</div>
+      <p class="mb-0">The following libraries should be installed on your system. Most are pulled automatically by the package manager.</p>
+      <div class="dep-grid">
+        <span class="dep-chip"><span class="dep-chip__dot"></span>SDL3</span>
+        <span class="dep-chip"><span class="dep-chip__dot"></span>OpenAL Soft</span>
+        <span class="dep-chip"><span class="dep-chip__dot"></span>Mesa OpenGL</span>
+        <span class="dep-chip"><span class="dep-chip__dot"></span>Unicorn Engine</span>
+        <span class="dep-chip"><span class="dep-chip__dot"></span>zlib</span>
       </div>
     </div>
   </section>
+
+  <!-- Build from Source -->
+  <section style="margin-top: var(--space-12); padding-bottom: var(--space-16);">
+    <p class="section-label">Advanced</p>
+    <h2 style="border-bottom: none; padding-bottom: 0;">Build from Source</h2>
+    <p style="color: var(--fg-muted); max-width: 700px; margin-bottom: var(--space-6);">
+      For developers or users on unsupported distributions. Requires a C/C++ toolchain, Make, and the dependencies listed above.
+    </p>
+
+    <div class="card reveal" style="background: var(--bg-subtle);">
+      <pre style="margin-bottom: var(--space-4);"><code># Clone the repository
+git clone https://github.com/TheCorrectSynovian/SwordigoDesktop.git
+cd SwordigoDesktop</code></pre>
+
+      <pre style="margin-bottom: var(--space-4);"><code># Install build dependencies (Fedora)
+sudo dnf install SDL3-devel openal-soft-devel mesa-libGL-devel unicorn-devel zlib-devel
+
+# Install build dependencies (Debian/Ubuntu)
+sudo apt install libsdl3-dev libopenal-dev libgl-dev libunicorn-dev zlib1g-dev</code></pre>
+
+      <pre style="margin-bottom: var(--space-4);"><code># Build the project
+make
+
+# Build the SRE runtime engine
+make libsre</code></pre>
+
+      <pre style="margin-bottom: 0;"><code># Install to your system (optional)
+sudo make install
+
+# Or run directly from the build directory
+./swordigo_boot</code></pre>
+    </div>
+
+    <div class="callout callout--warning reveal" style="margin-top: var(--space-6);">
+      <div class="callout__title">⚠️ Game Assets Required</div>
+      <p class="mb-0">Building from source compiles only the launcher, SRE, and tools. You still need the game assets (textures, scenes, scripts) and ARM64 engine binary (<code>libswordigo.so</code>) placed in <code>~/.local/share/swordigo-desktop/</code>. These are included in the RPM/DEB packages but are not part of the source repository.</p>
+    </div>
+  </section>
+
 </main>
 
 <footer class="footer">

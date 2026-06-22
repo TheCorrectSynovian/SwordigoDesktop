@@ -3,9 +3,325 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Research Papers — Swordigo Desktop</title>
+  <title>Research & Community — Swordigo Desktop</title>
+  <meta name="description" content="Reverse engineering research, community contributions, and technical discoveries that power the Swordigo Desktop project.">
   <link rel="stylesheet" href="style.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📄</text></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔬</text></svg>">
+  <style>
+    /* ── Research page scoped styles ── */
+
+    .research-hero {
+      position: relative;
+      padding: var(--space-16) 0 var(--space-12);
+      text-align: center;
+      background:
+        radial-gradient(ellipse at 30% 0%, rgba(95, 230, 210, 0.08) 0%, transparent 50%),
+        radial-gradient(ellipse at 70% 0%, rgba(255, 217, 102, 0.06) 0%, transparent 50%);
+      overflow: hidden;
+    }
+
+    .research-hero::after {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--border), transparent);
+    }
+
+    .research-hero .hero__subtitle {
+      max-width: 640px;
+    }
+
+    /* Source cards */
+    .source-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: var(--space-6);
+      transition: var(--transition);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .source-card:hover {
+      border-color: var(--fg-subtle);
+      transform: translateY(-2px);
+    }
+
+    .source-card__badge {
+      display: inline-block;
+      padding: 0.15rem 0.55rem;
+      font-size: 0.65rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      border-radius: 999px;
+      width: fit-content;
+      margin-bottom: var(--space-3);
+    }
+
+    .source-card__badge--community {
+      border: 1px solid var(--success);
+      color: var(--success);
+      background: rgba(35, 134, 54, 0.1);
+    }
+
+    .source-card__badge--internal {
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      background: var(--accent-muted);
+    }
+
+    .source-card__icon {
+      font-size: 2rem;
+      margin-bottom: var(--space-4);
+    }
+
+    .source-card__by {
+      font-size: 0.8rem;
+      color: var(--fg-subtle);
+      font-family: var(--font-mono);
+      margin-bottom: var(--space-3);
+    }
+
+    .source-card__desc {
+      font-size: 0.9rem;
+      color: var(--fg-muted);
+      line-height: 1.65;
+      flex: 1;
+    }
+
+    /* Discovery items */
+    .discovery {
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-muted);
+      border-radius: 8px;
+      padding: var(--space-4) var(--space-6);
+      transition: var(--transition);
+    }
+
+    .discovery:hover {
+      border-color: var(--border);
+    }
+
+    .discovery__header {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      margin-bottom: var(--space-2);
+    }
+
+    .discovery__icon {
+      font-size: 1.1rem;
+      flex-shrink: 0;
+    }
+
+    .discovery__name {
+      font-size: 1rem;
+      font-weight: 600;
+      color: #fff;
+      font-family: var(--font-mono);
+    }
+
+    .discovery__tag {
+      font-size: 0.65rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 0.1rem 0.45rem;
+      border-radius: 4px;
+      flex-shrink: 0;
+    }
+
+    .discovery__tag--critical {
+      background: rgba(218, 54, 51, 0.15);
+      color: var(--danger);
+    }
+
+    .discovery__tag--engine {
+      background: var(--accent-muted);
+      color: var(--accent);
+    }
+
+    .discovery__tag--runtime {
+      background: rgba(210, 153, 34, 0.12);
+      color: var(--warning);
+    }
+
+    .discovery__desc {
+      font-size: 0.88rem;
+      color: var(--fg-muted);
+      line-height: 1.6;
+      padding-left: calc(1.1rem + var(--space-3));
+    }
+
+    .discovery__code {
+      display: inline;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      background: rgba(47, 129, 247, 0.08);
+      padding: 0.1rem 0.35rem;
+      border-radius: 3px;
+      color: var(--accent);
+    }
+
+    /* Research docs grid */
+    .doc-link {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      padding: var(--space-3) var(--space-4);
+      background: var(--bg-surface);
+      border: 1px solid var(--border-muted);
+      border-radius: 6px;
+      font-size: 0.88rem;
+      color: var(--fg);
+      transition: var(--transition);
+    }
+
+    .doc-link:hover {
+      border-color: var(--accent);
+      background: var(--accent-muted);
+      text-decoration: none;
+      color: #fff;
+    }
+
+    .doc-link__icon {
+      flex-shrink: 0;
+      font-size: 1rem;
+    }
+
+    .doc-link__name {
+      flex: 1;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+    }
+
+    .doc-link__arrow {
+      color: var(--fg-subtle);
+      font-size: 0.8rem;
+      transition: var(--transition);
+    }
+
+    .doc-link:hover .doc-link__arrow {
+      color: var(--accent);
+      transform: translateX(2px);
+    }
+
+    /* Credits */
+    .credit {
+      display: flex;
+      align-items: center;
+      gap: var(--space-4);
+      padding: var(--space-4) var(--space-6);
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      transition: var(--transition);
+    }
+
+    .credit:hover {
+      border-color: var(--fg-subtle);
+    }
+
+    .credit__avatar {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: var(--bg-subtle);
+      border: 2px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.3rem;
+      flex-shrink: 0;
+    }
+
+    .credit__info {
+      flex: 1;
+    }
+
+    .credit__name {
+      font-weight: 600;
+      color: #fff;
+      font-size: 1rem;
+      margin-bottom: 0.15rem;
+    }
+
+    .credit__role {
+      font-size: 0.82rem;
+      color: var(--fg-muted);
+    }
+
+    /* Section headers */
+    .section-header {
+      margin-bottom: var(--space-8);
+    }
+
+    .section-header h2 {
+      border: none;
+      padding: 0;
+      margin-top: 0;
+      font-size: 1.6rem;
+    }
+
+    .section-header p {
+      color: var(--fg-muted);
+      font-size: 0.95rem;
+      max-width: 600px;
+    }
+
+    .section-divider {
+      border: none;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--border), transparent);
+      margin: var(--space-12) 0;
+    }
+
+    /* Discoveries grid */
+    .discoveries-grid {
+      display: grid;
+      gap: var(--space-4);
+    }
+
+    @media (min-width: 768px) {
+      .discoveries-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    /* Docs grid */
+    .docs-grid {
+      display: grid;
+      gap: var(--space-3);
+    }
+
+    @media (min-width: 768px) {
+      .docs-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    @media (min-width: 1024px) {
+      .docs-grid {
+        grid-template-columns: repeat(3, 1fr);
+      }
+    }
+
+    /* Credits grid */
+    .credits-grid {
+      display: grid;
+      gap: var(--space-4);
+    }
+
+    @media (min-width: 768px) {
+      .credits-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+  </style>
 </head>
 <body>
 
@@ -32,79 +348,291 @@
   </div>
 </nav>
 
-<main class="container">
-  <section class="hero" style="padding: var(--space-12) 0; text-align: left;">
-    <h1 class="hero__title" style="font-size: 2.5rem;">Research <span class="grad">Archive</span></h1>
-    <p class="hero__subtitle" style="margin-left: 0; max-width: 800px;">
-      A collection of engineering papers and reverse-engineering logs detailing the development of the Swordigo Runtime Environment.
-    </p>
+<main>
+  <!-- ════════════════════════════ HERO ════════════════════════════ -->
+  <section class="research-hero">
+    <div class="container">
+      <h1 class="hero__title">Research & <span class="grad">Community</span></h1>
+      <p class="hero__subtitle">
+        Swordigo Desktop exists because of years of reverse engineering, binary analysis,
+        and community knowledge. This page documents the sources, discoveries, and people
+        that made a Linux-native port possible.
+      </p>
+    </div>
   </section>
 
-  <div class="doc-layout" style="grid-template-columns: 1fr;">
-    <div class="doc-layout__content">
-      <div class="grid grid--3">
-        <!-- Core Research -->
-        <div class="card reveal">
-          <div class="card__icon">📦</div>
-          <h3 class="card__title">ELF Relocation Analysis</h3>
-          <p class="card__desc">Deep dive into the relocation types required for ARM ELF32 binaries on x86_64 Linux.</p>
-          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
-        </div>
-        <div class="card reveal">
-          <div class="card__icon">🧬</div>
-          <h3 class="card__title">JNI Bridge Design</h3>
-          <p class="card__desc">Architecture of the marshalling layer between the ARM emulator and native C++ shims.</p>
-          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
-        </div>
-        <div class="card reveal">
-          <div class="card__icon">🎬</div>
-          <h3 class="card__title">GLES Translation</h3>
-          <p class="card__desc">Mapping legacy GLES 1.x calls to modern Desktop OpenGL with shader injection.</p>
-          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
-        </div>
-        
-        <!-- Engine Research -->
-        <div class="card reveal">
-          <div class="card__icon">🧩</div>
-          <h3 class="card__title">Caver Engine Internals</h3>
-          <p class="card__desc">Reverse engineering the scene graph, memory layout, and object lifecycle of the Caver engine.</p>
-          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
-        </div>
-        <div class="card reveal">
-          <div class="card__icon">🌙</div>
-          <h3 class="card__title">Lua 5.1 Runtime</h3>
-          <p class="card__desc">Inventory of Lua API exports and debugging the script execution environment.</p>
-          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
-        </div>
-        <div class="card reveal">
-          <div class="card__icon">💾</div>
-          <h3 class="card__title">Save Data Schema</h3>
-          <p class="card__desc">Analysis of the binary save format and protobuf asset definitions.</p>
-          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
-        </div>
+  <!-- ════════════════════════ RESEARCH SOURCES ═══════════════════ -->
+  <section class="container" style="padding: var(--space-12) 0;">
+    <div class="section-header">
+      <h2>Research <span class="grad">Sources</span></h2>
+      <p>The external projects and techniques that provided the foundation for SRE development.</p>
+    </div>
 
-        <!-- Platform Research -->
-        <div class="card reveal">
-          <div class="card__icon">🎮</div>
-          <h3 class="card__title">SDL3 Migration</h3>
-          <p class="card__desc">Planning the transition from SDL2 to SDL3 for improved Wayland and input support.</p>
-          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
+    <div class="grid grid--3">
+      <div class="source-card reveal">
+        <span class="source-card__badge source-card__badge--community">Community</span>
+        <div class="source-card__icon">🧪</div>
+        <h3 class="card__title">SwMini Mod Loader</h3>
+        <div class="source-card__by">by ItsJustSomeDude &amp; Kiziyon</div>
+        <p class="source-card__desc">
+          Decompiled the Swordigo engine source, identified function signatures and object layouts.
+          Critical for SRE hook development — provided the roadmap for intercepting
+          <span class="discovery__code">GameSceneView::Update</span>,
+          <span class="discovery__code">MusicPlayer</span> commands, and GUI view hierarchies.
+        </p>
+      </div>
+
+      <div class="source-card reveal">
+        <span class="source-card__badge source-card__badge--community">Community</span>
+        <div class="source-card__icon">🎮</div>
+        <h3 class="card__title">Swordigo Vita Port</h3>
+        <div class="source-card__by">by Rinnegatamante</div>
+        <p class="source-card__desc">
+          First ARM → desktop porting research for Swordigo. Identified JNI entry points,
+          GL translation patterns, and proved the engine could run outside Android.
+          Established the viability of the entire SwordigoDesktop approach.
+        </p>
+      </div>
+
+      <div class="source-card reveal">
+        <span class="source-card__badge source-card__badge--internal">Internal</span>
+        <div class="source-card__icon">🔬</div>
+        <h3 class="card__title">Binary Analysis</h3>
+        <div class="source-card__by">IDA Pro / Ghidra / radare2</div>
+        <p class="source-card__desc">
+          Direct decompilation of <span class="discovery__code">libswordigo.so</span>
+          (ARM64 v1.4.12). Symbol maps, function tracing, vtable reconstruction, and
+          cross-referencing with SwMini's decompiled source to build the complete
+          native engine map.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <hr class="section-divider">
+
+  <!-- ═══════════════════════ KEY DISCOVERIES ═════════════════════ -->
+  <section class="container" style="padding: var(--space-12) 0;">
+    <div class="section-header">
+      <h2>Key <span class="grad">Discoveries</span></h2>
+      <p>Critical findings from reverse engineering that directly shaped the runtime architecture.</p>
+    </div>
+
+    <div class="discoveries-grid">
+      <div class="discovery reveal">
+        <div class="discovery__header">
+          <span class="discovery__icon">🔄</span>
+          <span class="discovery__name">STXR Spin Loops</span>
+          <span class="discovery__tag discovery__tag--critical">Critical</span>
         </div>
-        <div class="card reveal">
-          <div class="card__icon">💻</div>
-          <h3 class="card__title">ARM Execution Options</h3>
-          <p class="card__desc">Benchmarking different ARM emulation strategies (Unicorn, Dynarmic, QEMU-User).</p>
-          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
+        <p class="discovery__desc">
+          ARM64 exclusive store instructions (<span class="discovery__code">STXR</span> /
+          <span class="discovery__code">LDXR</span>) causing infinite loops on single-threaded
+          emulation. The atomics never succeed because no other thread releases the exclusive
+          monitor. Required SRE to NOP-patch or rewrite these sequences.
+        </p>
+      </div>
+
+      <div class="discovery reveal">
+        <div class="discovery__header">
+          <span class="discovery__icon">🎵</span>
+          <span class="discovery__name">MusicPlayer Architecture</span>
+          <span class="discovery__tag discovery__tag--engine">Engine</span>
         </div>
-        <div class="card reveal">
-          <div class="card__icon">🔍</div>
-          <h3 class="card__title">Crash Investigation</h3>
-          <p class="card__desc">Root cause analysis of boot-sequence memory corruption and ELF loading errors.</p>
-          <a href="#" class="btn btn--secondary btn--sm mt-0">Read Paper</a>
+        <p class="discovery__desc">
+          Shared memory command interface pattern discovered through tracing. The game uses a
+          ring buffer of music commands (play, stop, fade) that the MusicPlayer thread consumes.
+          SRE intercepts this to route audio through native PulseAudio/PipeWire.
+        </p>
+      </div>
+
+      <div class="discovery reveal">
+        <div class="discovery__header">
+          <span class="discovery__icon">🖼️</span>
+          <span class="discovery__name">GUI Object Layout</span>
+          <span class="discovery__tag discovery__tag--engine">Engine</span>
+        </div>
+        <p class="discovery__desc">
+          GUIView hierarchy with reconstructed offsets:
+          <span class="discovery__code">+0x58</span> superview,
+          <span class="discovery__code">+0x100</span> label text,
+          <span class="discovery__code">+0x60</span> subview list.
+          Enabled direct manipulation of the HUD without modifying engine code.
+        </p>
+      </div>
+
+      <div class="discovery reveal">
+        <div class="discovery__header">
+          <span class="discovery__icon">⚔️</span>
+          <span class="discovery__name">GameSceneView::Update</span>
+          <span class="discovery__tag discovery__tag--engine">Engine</span>
+        </div>
+        <p class="discovery__desc">
+          ~400-line function responsible for all HUD rendering — health bars, magic meter,
+          item slots, minimap. Understanding this function was essential for adding custom
+          overlays and the FPS counter without breaking the render pipeline.
+        </p>
+      </div>
+
+      <div class="discovery reveal">
+        <div class="discovery__header">
+          <span class="discovery__icon">💀</span>
+          <span class="discovery__name">Death Handler</span>
+          <span class="discovery__tag discovery__tag--runtime">Runtime</span>
+        </div>
+        <p class="discovery__desc">
+          <span class="discovery__code">GameOverViewController::ShowAdMaybe</span> → calls into
+          the ad SDK which attempts network access and hangs indefinitely without connectivity.
+          SRE hooks this to skip the ad path entirely, restoring instant respawn behavior.
+        </p>
+      </div>
+
+      <div class="discovery reveal">
+        <div class="discovery__header">
+          <span class="discovery__icon">🌀</span>
+          <span class="discovery__name">Wastelands Spinlock</span>
+          <span class="discovery__tag discovery__tag--critical">Critical</span>
+        </div>
+        <p class="discovery__desc">
+          Heavy ARM64 emulation path in the Wastelands zone causing infinite stalls.
+          A tight atomic loop in the physics thread deadlocks when the emulator serializes
+          execution. Fixed by identifying and short-circuiting the contended lock.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <hr class="section-divider">
+
+  <!-- ═══════════════════ RESEARCH DOCUMENTS ══════════════════════ -->
+  <section class="container" style="padding: var(--space-12) 0;">
+    <div class="section-header">
+      <h2>Research <span class="grad">Documents</span></h2>
+      <p>Key engineering documents from the project's research archive, hosted on GitHub.</p>
+    </div>
+
+    <div class="docs-grid">
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/main/research/native_engine_map.md" class="doc-link reveal" target="_blank">
+        <span class="doc-link__icon">📋</span>
+        <span class="doc-link__name">native_engine_map.md</span>
+        <span class="doc-link__arrow">→</span>
+      </a>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/main/research/native_symbol_map.md" class="doc-link reveal" target="_blank">
+        <span class="doc-link__icon">🗺️</span>
+        <span class="doc-link__name">native_symbol_map.md</span>
+        <span class="doc-link__arrow">→</span>
+      </a>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/main/research/engine_intelligence_report.md" class="doc-link reveal" target="_blank">
+        <span class="doc-link__icon">🔍</span>
+        <span class="doc-link__name">engine_intelligence_report.md</span>
+        <span class="doc-link__arrow">→</span>
+      </a>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/main/research/jni_compatibility_findings.md" class="doc-link reveal" target="_blank">
+        <span class="doc-link__icon">🔗</span>
+        <span class="doc-link__name">jni_compatibility_findings.md</span>
+        <span class="doc-link__arrow">→</span>
+      </a>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/main/research/elf_relocation_smoking_gun.md" class="doc-link reveal" target="_blank">
+        <span class="doc-link__icon">📦</span>
+        <span class="doc-link__name">elf_relocation_smoking_gun.md</span>
+        <span class="doc-link__arrow">→</span>
+      </a>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/main/research/crash_investigation_complete.md" class="doc-link reveal" target="_blank">
+        <span class="doc-link__icon">💥</span>
+        <span class="doc-link__name">crash_investigation_complete.md</span>
+        <span class="doc-link__arrow">→</span>
+      </a>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/main/research/lua_runtime_map.md" class="doc-link reveal" target="_blank">
+        <span class="doc-link__icon">🌙</span>
+        <span class="doc-link__name">lua_runtime_map.md</span>
+        <span class="doc-link__arrow">→</span>
+      </a>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/main/research/memory_layout_audit.md" class="doc-link reveal" target="_blank">
+        <span class="doc-link__icon">💾</span>
+        <span class="doc-link__name">memory_layout_audit.md</span>
+        <span class="doc-link__arrow">→</span>
+      </a>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/main/research/arm_execution_options.md" class="doc-link reveal" target="_blank">
+        <span class="doc-link__icon">💻</span>
+        <span class="doc-link__name">arm_execution_options.md</span>
+        <span class="doc-link__arrow">→</span>
+      </a>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/main/research/protobuf_schema.md" class="doc-link reveal" target="_blank">
+        <span class="doc-link__icon">📄</span>
+        <span class="doc-link__name">protobuf_schema.md</span>
+        <span class="doc-link__arrow">→</span>
+      </a>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/main/research/boot_sequence.md" class="doc-link reveal" target="_blank">
+        <span class="doc-link__icon">🚀</span>
+        <span class="doc-link__name">boot_sequence.md</span>
+        <span class="doc-link__arrow">→</span>
+      </a>
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/main/research/lua_command_catalog.md" class="doc-link reveal" target="_blank">
+        <span class="doc-link__icon">📜</span>
+        <span class="doc-link__name">lua_command_catalog.md</span>
+        <span class="doc-link__arrow">→</span>
+      </a>
+    </div>
+
+    <div style="margin-top: var(--space-6); text-align: center;">
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/tree/main/research" class="btn btn--secondary btn--sm" target="_blank">
+        Browse Full Archive on GitHub →
+      </a>
+    </div>
+  </section>
+
+  <hr class="section-divider">
+
+  <!-- ═══════════════════ COMMUNITY CREDITS ═══════════════════════ -->
+  <section class="container" style="padding: var(--space-12) 0 var(--space-16);">
+    <div class="section-header">
+      <h2>Community <span class="grad">Credits</span></h2>
+      <p>The people and teams whose work made this project possible.</p>
+    </div>
+
+    <div class="credits-grid">
+      <div class="credit reveal">
+        <div class="credit__avatar">🛠️</div>
+        <div class="credit__info">
+          <div class="credit__name">ItsJustSomeDude</div>
+          <div class="credit__role">SwMini Mod Loader — Engine decompilation, function signatures, hook research</div>
+        </div>
+      </div>
+
+      <div class="credit reveal">
+        <div class="credit__avatar">⚡</div>
+        <div class="credit__info">
+          <div class="credit__name">Kiziyon</div>
+          <div class="credit__role">SwMini Mod Loader — Object layout analysis, modding framework</div>
+        </div>
+      </div>
+
+      <div class="credit reveal">
+        <div class="credit__avatar">🎮</div>
+        <div class="credit__info">
+          <div class="credit__name">Rinnegatamante</div>
+          <div class="credit__role">Swordigo Vita Port — ARM→desktop porting pioneer, JNI &amp; GL translation research</div>
+        </div>
+      </div>
+
+      <div class="credit reveal">
+        <div class="credit__avatar">🗡️</div>
+        <div class="credit__info">
+          <div class="credit__name">Touch Foo</div>
+          <div class="credit__role">Original Game — Swordigo game developer &amp; Caver engine creator</div>
         </div>
       </div>
     </div>
-  </div>
+
+    <div class="callout" style="margin-top: var(--space-8);">
+      <div class="callout__title">Standing on the shoulders of giants</div>
+      <p class="mb-0">
+        SwordigoDesktop is an independent community project. It would not exist without the
+        reverse engineering efforts of SwMini, the porting research from the Vita community,
+        and the original game created by Touch Foo. We are deeply grateful for their work.
+      </p>
+    </div>
+  </section>
 </main>
 
 <footer class="footer">
