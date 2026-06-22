@@ -144,6 +144,37 @@ static char* sre_string_mutate(SreString* self, uint64_t needed_capacity) {
 }
 
 /* =========================================================================
+ * String Replacement Table
+ * =========================================================================
+ * EDIT THIS TABLE to change ANY text in the game.
+ * Every string the game creates goes through sre_CppString_from_char_p.
+ * Just add { "original", "replacement" } entries and rebuild.
+ *
+ * Examples:
+ *   { "Start",        "Play"          }   — rename menu button
+ *   { "Offers",       "Settings"      }   — repurpose Offers button
+ *   { "Credits",      "About"         }   — rename Credits
+ *   { "Privacy Policy","SRE v1.0"     }   — replace footer text
+ * =========================================================================*/
+
+static const char* g_sre_string_replacements[][2] = {
+    /* ---- Main Menu Buttons ---- */
+    /* { "Start",          "Singleplayer" }, */
+    /* { "Achievements",   "Online"       }, */
+    /* { "Offers",         "Settings"     }, */
+    /* { "Credits",        "About"        }, */
+    /* { "Privacy Policy", "SRE v1.0"     }, */
+
+    { 0, 0 }  /* sentinel — do NOT remove */
+};
+
+/* Simple strcmp — we don't have libc strcmp in freestanding */
+static int sre_strcmp(const char* a, const char* b) {
+    while (*a && *b && *a == *b) { a++; b++; }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+/* =========================================================================
  * Exported replacement functions
  * ========================================================================= */
 
@@ -152,12 +183,26 @@ static char* sre_string_mutate(SreString* self, uint64_t needed_capacity) {
  *
  * Original at offset 0x566bb8 (v1.4.12)
  * ARM64 ABI: X0 = this (SreString*), X1 = src (const char*)
+ *
+ * ALL game strings pass through here. The replacement table above
+ * lets you change any text without touching the binary.
  */
 void sre_CppString_from_char_p(SreString* self, const char* src) {
     if (!src) {
         /* NULL source → empty string */
         self->data = g_empty_sentinel;
         return;
+    }
+
+    /* Apply string replacement table */
+    {
+        int i;
+        for (i = 0; g_sre_string_replacements[i][0] != 0; i++) {
+            if (sre_strcmp(src, g_sre_string_replacements[i][0]) == 0) {
+                src = g_sre_string_replacements[i][1];
+                break;
+            }
+        }
     }
 
     uint64_t len = strlen(src);

@@ -79,6 +79,7 @@ typedef struct {
 typedef struct {
     uint64_t    target_offset;  /* file offset in libswordigo.so */
     const char* symbol_name;    /* symbol name in libsre.so */
+    uint64_t    orig_func;      /* relay stub address (set by host after trampoline install) */
 } SreHookEntry;
 
 /* =========================================================================

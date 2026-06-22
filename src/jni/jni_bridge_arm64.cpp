@@ -174,6 +174,33 @@ void JniBridge64::call_handler(uint64_t address, void* emu_ptr) {
                 {"time",1},{"clock",1},{"clock_gettime",1},{"gettimeofday",1},
                 {"nanosleep",1},{"sched_yield",1},{"lrand48",1},
                 {"dl_iterate_phdr",1},{"strerror",1},
+                {"abort",1},{"exit",1},{"raise",1},
+                {"glBlendFunc",1},{"glEnable",1},{"glDisable",1},
+                {"glClear",1},{"glClearColor",1},{"glViewport",1},
+                {"glBindTexture",1},{"glGenTextures",1},{"glDeleteTextures",1},
+                {"glTexParameteri",1},{"glTexImage2D",1},{"glTexSubImage2D",1},
+                {"glDrawArrays",1},{"glDrawElements",1},
+                {"glBindBuffer",1},{"glBufferData",1},{"glBufferSubData",1},
+                {"glGenBuffers",1},{"glDeleteBuffers",1},
+                {"glVertexAttribPointer",1},{"glEnableVertexAttribArray",1},
+                {"glDisableVertexAttribArray",1},
+                {"glUseProgram",1},{"glGetUniformLocation",1},
+                {"glUniform1f",1},{"glUniform1i",1},{"glUniform2f",1},
+                {"glUniform3f",1},{"glUniform4f",1},{"glUniformMatrix4fv",1},
+                {"glGetError",1},{"glPixelStorei",1},{"glScissor",1},
+                {"glActiveTexture",1},{"glBlendFuncSeparate",1},
+                {"glDepthFunc",1},{"glDepthMask",1},{"glColorMask",1},
+                {"glStencilFunc",1},{"glStencilOp",1},{"glStencilMask",1},
+                {"glBindFramebuffer",1},{"glBindRenderbuffer",1},
+                {"glCompressedTexImage2D",1},{"glLineWidth",1},
+                {"alSourcePlay",1},{"alSourceStop",1},{"alSourcePause",1},
+                {"alSourcef",1},{"alSourcei",1},{"alSource3f",1},
+                {"alGetSourcei",1},{"alGetSourcef",1},
+                {"alGenSources",1},{"alDeleteSources",1},
+                {"alGenBuffers",1},{"alDeleteBuffers",1},
+                {"alBufferData",1},{"alSourceQueueBuffers",1},
+                {"alSourceUnqueueBuffers",1},{"alGetError",1},
+                {"alListenerf",1},{"alListener3f",1},{"alListenerfv",1},
             };
             if (!quiet_funcs.count(func.name)) {
                 std::cout << "[Bridge64] Call: " << func.name << std::endl;
@@ -3199,8 +3226,9 @@ static void bridge_alcGetCurrentContext(void* emu_ptr) {
 static void bridge_exit(void* emu_ptr) {
     EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
     int code = (int)emu->get_reg(0);
-    std::cout << "[Bridge] exit(" << code << ") called" << std::endl;
-    exit(code);
+    std::cerr << "[Bridge] exit(" << code << ") called — ignored (non-fatal)" << std::endl;
+    /* Don't actually exit. luaD_throw will return to caller.
+     * The corrupted ProgramState will be cleaned up by the game loop. */
 }
 
 static void bridge_read(void* emu_ptr) {
@@ -6434,6 +6462,7 @@ bool sre_music_host_load(const std::string& name) {
         { "outdoors_dark",   "1_hero2"         },  /* Dark outdoors, adventure */
         { "dungeon1",        "1_dung73"        },  /* Dungeons */
         { "cave",            "2cave2"          },  /* Caves */
+        { "forest",          "2cave2"          },  /* Forest areas */
         { "boss",            "1_boss23"        },  /* Boss fights */
         { "bosskill",        "momentofwonder"  },  /* After killing boss — fades in slowly */
         { "gameover",        "gameover"        },  /* Death screen */

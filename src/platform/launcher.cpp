@@ -14,6 +14,7 @@
 #include <chrono>
 #include <algorithm>
 #include <filesystem>
+#include <unistd.h>
 #include "platform/save_editor.h"
 
 namespace fs = std::filesystem;
@@ -301,11 +302,28 @@ LaunchConfig show_launcher(BinarySelector& selector) {
 
     // Set launcher window icon (taskbar/Alt-Tab)
     {
-        std::string icon_file = get_data_path("src/assets/launcer_icon.png");
-        SDL_Surface* icon_surf = IMG_Load(icon_file.c_str());
+        std::string icon_via_data = get_data_path("src/assets/launcer_icon.png");
+        const char* icon_paths[] = {
+            icon_via_data.c_str(),
+            "src/assets/launcer_icon.png",
+            "src/assets/icon_gnome.png",  // fallback to engine icon
+            "/usr/share/icons/hicolor/128x128/apps/swordigo-desktop.png",
+            "/usr/share/pixmaps/swordigo-desktop.png",
+            nullptr
+        };
+        SDL_Surface* icon_surf = nullptr;
+        for (int i = 0; icon_paths[i]; i++) {
+            icon_surf = IMG_Load(icon_paths[i]);
+            if (icon_surf) {
+                std::cout << "[Launcher] Icon loaded from: " << icon_paths[i] << std::endl;
+                break;
+            }
+        }
         if (icon_surf) {
             SDL_SetWindowIcon(win, icon_surf);
             SDL_DestroySurface(icon_surf);
+        } else {
+            std::cerr << "[Launcher] Could not load any icon" << std::endl;
         }
     }
 
@@ -677,6 +695,30 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                                 save_sel = -1;
                                 se_status.clear();
                                 state = LauncherState::SAVE_EDITOR_LIST;
+                                break;
+                            }
+
+                            // Asset Viewer button
+                            float avbtn_y_click = sebtn_y_click - 8 - ofbtn_h;
+                            if (hit(mouse_x, mouse_y, ofbtn_x, avbtn_y_click, ofbtn_w, ofbtn_h)) {
+                                // Launch asset_viewer as separate process
+                                std::string av_path = "./asset_viewer";
+                                if (!fs::exists(av_path)) {
+                                    // Try next to the binary
+                                    char exe_buf[4096];
+                                    ssize_t len = readlink("/proc/self/exe", exe_buf, sizeof(exe_buf) - 1);
+                                    if (len > 0) {
+                                        exe_buf[len] = '\0';
+                                        av_path = fs::path(exe_buf).parent_path() / "asset_viewer";
+                                    }
+                                }
+                                if (fs::exists(av_path)) {
+                                    std::string cmd = av_path + " &";
+                                    system(cmd.c_str());
+                                    std::cout << "[Launcher] Launched asset_viewer" << std::endl;
+                                } else {
+                                    std::cerr << "[Launcher] asset_viewer not found — run 'make asset_viewer' first" << std::endl;
+                                }
                                 break;
                             }
                         }
@@ -1162,6 +1204,17 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                  se_hov ? (uint8_t)60 : (uint8_t)50, 220);
             border(ofbtn_x, sebtn_y, ofbtn_w, ofbtn_h, 1.0f, 200, 170, 70, 120);
             text("Save Editor", ofbtn_x + (ofbtn_w - tw("Save Editor", 1.5f))/2, sebtn_y + 10, 1.5f, 255, 220, 130, 255);
+
+            // ==== ASSET VIEWER BUTTON ====
+            dp_cur = sebtn_y - 8;
+            float avbtn_y = dp_cur - ofbtn_h;
+            bool av_hov = hit(mouse_x, mouse_y, ofbtn_x, avbtn_y, ofbtn_w, ofbtn_h);
+            rect(ofbtn_x, avbtn_y, ofbtn_w, ofbtn_h,
+                 av_hov ? (uint8_t)25 : (uint8_t)20,
+                 av_hov ? (uint8_t)55 : (uint8_t)40,
+                 av_hov ? (uint8_t)55 : (uint8_t)45, 220);
+            border(ofbtn_x, avbtn_y, ofbtn_w, ofbtn_h, 1.0f, 70, 200, 190, 120);
+            text("Asset Viewer", ofbtn_x + (ofbtn_w - tw("Asset Viewer", 1.4f))/2, avbtn_y + 10, 1.4f, 130, 255, 240, 255);
         } else if (cur_bins.empty()) {
             // Empty detail panel message
             text("No instance", PANEL_X + 40, H / 2.0f + 10, 2.0f, 136, 136, 170, 160);

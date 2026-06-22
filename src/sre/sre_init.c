@@ -34,7 +34,7 @@ extern char* g_empty_sentinel;
  * Set target_offset = 0 to mark end of table.
  */
 
-const SreHookEntry sre_hook_table[] = {
+SreHookEntry sre_hook_table[] = {
     /* CppString — eliminate atomic refcounting */
     { 0x566bb8, "sre_CppString_from_char_p" },  /* std::string(const char*) */
     { 0x56918c, "sre_CppString_assign"      },  /* std::string::assign()    */
@@ -44,11 +44,23 @@ const SreHookEntry sre_hook_table[] = {
     /* ProgramState — catch Lua errors instead of aborting */
     { 0, "sre_ProgramState_Execute" },  /* offset resolved dynamically by symbol */
     { 0, "sre_ProgramState_Resume"  },  /* offset resolved dynamically by symbol */
-    /* DISABLED — sre_ProgramState_Update skips calling the original, breaking
-     * ALL entity AI/behavior logic. g_orig_ProgramState_Update is never set,
-     * and the trampoline destroys the original function bytes.
-     * Re-enable only after implementing proper trampoline chaining. */
-    /* { 0, "sre_ProgramState_Update"  }, */
+    /* ProgramState::Update — handles timer-based coroutine resume with
+     * error recovery. On ARM64 the resume is inlined (unlike ARM32 where
+     * Update calls Resume separately). After handling the resume safely,
+     * sre_ProgramState_Update calls g_orig_ProgramState_Update (relay stub)
+     * for the child ProgramState iteration loop.
+     * The relay stub is set up by the host after trampoline installation. */
+    { 0, "sre_ProgramState_Update"  },
+
+    /* luaD_throw — ROOT of all Lua error handling. Every Lua error goes
+     * through luaD_throw(L, errcode). Original calls __cxa_throw or
+     * ProgramPanic+exit — both crash in Unicorn. Our replacement uses
+     * setjmp/longjmp recovery instead of C++ exceptions. */
+    { 0x4eb814, "sre_luaD_throw" },
+
+    /* ProgramPanic — safety net (should never fire now that luaD_throw
+     * is hooked, but kept as backup). */
+    { 0x5c0ab4, "sre_ProgramPanic" },
 
     /* Background rendering — our own sky renderer
      * Addresses verified via: aarch64-linux-gnu-nm -D libswordigo.so | grep BackgroundComponent
@@ -67,6 +79,40 @@ const SreHookEntry sre_hook_table[] = {
     /* { 0x2ae884, "sre_PortalEffectComponent_Draw"    }, */  /* Portal swirl */
     /* { 0x2b0e90, "sre_SimpleGlowComponent_Draw"      }, */  /* Glow FX */
     /* { 0x2cb828, "sre_WeaponGlowComponent_Draw"      }, */  /* Weapon glow */
+    /* ========= FULL GUI STACK HOOKS =========
+     * Every GUI class's DrawRect goes through our code.
+     * All use relay stubs to call original, so the game
+     * works normally while we have total control. */
+
+    /* Root window — top of the render tree */
+    { 0x4a28bc, "sre_GUIWindow_DrawRect"    },
+
+    /* Core view classes */
+    { 0x49f310, "sre_GUIView_DrawRect"      },  /* base class: iterates subviews */
+    { 0x49565c, "sre_GUIButton_DrawRect"    },  /* buttons (title + bg) */
+    { 0x497aa0, "sre_GUILabel_DrawRect"     },  /* text labels */
+    { 0x497658, "sre_GUIFrameView_DrawRect" },  /* styled frames */
+
+    /* Interactive controls */
+    { 0x491b54, "sre_GUIAlertView_DrawRect" },  /* modal dialogs */
+    { 0x49cd40, "sre_GUISlider_DrawRect"    },  /* sliders */
+
+    /* Game-specific views */
+    { 0x42bae4, "sre_NewMenuView_DrawRect"  },  /* main menu */
+
+    /* Options button — intercept Offers click at the delegate level.
+     * When Offers is clicked, ButtonPressed calls the delegate method
+     * MainMenuViewDidOpenShop. We hook THAT instead of ButtonPressed
+     * to avoid PC-relative relay issues. */
+    { 0x36f394, "sre_MainMenuVC_DidOpenShop" },
+
+    /* CreditsVC hooks — DISABLED for v6, Options menu WIP.
+     * { 0x38d604, "sre_CreditsVC_LoadView" },
+     * { 0x38d904, "sre_CreditsVC_ButtonPressed" }, */
+
+    /* Death/Respawn fix — desktop has no ad SDK, so ShowAdMaybe hangs.
+     * Hook it to directly call GameOverViewDidContinue (respawn). */
+    { 0x347efc, "sre_GameOverVC_ShowAdMaybe" },
 
     /* Lua error safety — wraps ALL lua_call with pcall
      * Installed as LATE trampoline in main.cpp (after sre_init_lua) */
@@ -89,7 +135,11 @@ const SreHookEntry sre_hook_table[] = {
     { 0x482090, "sre_MusicPlayer_Update"                },  /* Update(float) */
     /* NOTE: SetVolume(0x482064) and SetLooping(0x48206c) are only 8 bytes apart.
      * Our 16-byte trampoline would clobber one from the other. Leave originals —
-     * they call MusicPlayerJNI via JNI bridge (safe). SRE Update handles fading. */
+     * they call MusicPlayerJNI via JNI bridge (safe). SRE Update handles fading.
+     *
+     * However, AudioSystem::SetMusicVolume (0x47f5f0) is the HIGH-LEVEL setter
+     * called by the engine UI. We hook THIS to route slider changes to OpenAL. */
+    { 0x47f5f0, "sre_AudioSystem_SetMusicVolume" },
     { 0x481e88, "sre_MusicPlayer_SetEnabled"            },  /* SetEnabled(bool) */
     { 0x481fc0, "sre_MusicPlayer_SetSuspended"          },  /* SetSuspended(bool) */
     /* NOTE: We do NOT hook AddPlaylist (0x48093c) or RegisterProgramLibrary (0x4821c8).
@@ -102,14 +152,25 @@ const SreHookEntry sre_hook_table[] = {
      * every frame. The native HUD won't animate (we own the display). */
     { 0x34ed2c, "sre_GameSceneView_Update" },  /* GameSceneView::Update(float) */
 
-    /* Death/Respawn System — skip ads, directly respawn.
-     * When player taps "Continue" on game over screen, ShowAdMaybe is called.
-     * Our hook skips all ad logic and calls GameOverViewDidContinue directly,
-     * which reloads from the last checkpoint save. */
-    { 0x347efc, "sre_ShowAdMaybe" },  /* GameOverViewController::ShowAdMaybe() */
+    /* NOTE: Death/Respawn hook at 0x347efc is already defined above
+     * (sre_GameOverVC_ShowAdMaybe). Do NOT duplicate — the old
+     * sre_ShowAdMaybe name was from the TVPG snapshot and doesn't
+     * exist in the current codebase. */
+
+    /* Mod Support — inject Mini/LNI/Components Lua tables.
+     * DISABLED: relay stubs crash because original function uses PC-relative
+     * instructions (ADRP) that break when relocated to 0x3000000.
+     * Mini.* injection is done via sre_lua_call_safe piggyback instead. */
+    /* { 0x4c0f18, "sre_RegisterProgramLibrary", 0 }, */
+
+    /* Virtual Filesystem — mod asset layering.
+     * DISABLED: Same trampoline issue — replaces FileExistsAtPath entirely.
+     * Our stub returns 1 optimistically, breaking actual file checks.
+     * Re-enable after implementing host-side file check delegation. */
+    /* { 0x4b44b8, "sre_FileExistsAtPath" }, */
 
     /* Sentinel — end of table */
-    { 0, 0 }
+    { 0, 0, 0 }
 };
 
 /* Number of entries (excluding sentinel) */

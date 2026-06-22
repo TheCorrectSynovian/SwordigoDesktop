@@ -1,492 +1,389 @@
-/* ============================================================
- * sre_gui.c — SRE GUI System — FULL GameSceneView::Update
- * ============================================================
- * Complete reimplementation of Caver::GameSceneView::Update(float).
- * Calls every sub-function the original does, with non-atomic
- * shared_ptr refcounting where needed.
+/* =====================================================================
+ * sre_gui.c — SRE GUI Rendering Subsystem
+ * =====================================================================
+ * Full access to the Caver engine's GUI stack:
+ *   - Immediate-mode drawing (FillRect, DrawRect, sprites)
+ *   - Text rendering (FontText)
+ *   - View creation (GameInterfaceBuilder → GUILabel, GUIButton, etc.)
+ *   - View hierarchy (AddSubview, SetFrame, RemoveFromSuperview)
+ *   - Modal presentation (GUIWindow::PresentModalView)
+ *   - Texture access (TextureLibrary)
+ *   - Font access (FontLibrary)
  *
- * Function addresses from: nm -D libswordigo.so (v1.4.12 ARM64)
- * Pointer offsets from: Ghidra decompilation of GameSceneView::Update
- * ============================================================ */
+ * All functions use the engine's own C++ methods via function pointers
+ * resolved from nm symbols at init time.
+ * ===================================================================== */
 
 #include "sre.h"
+#include "sre_gui.h"
 
-/* Swordigo base address — defined in sre_init.c */
-extern uint64_t g_swordigo_base;
+/* libc from bridge */
+extern void* malloc(size_t size);
+extern void  free(void* ptr);
+extern void* memcpy(void* dest, const void* src, size_t n);
+extern size_t strlen(const char* s);
 
-/* =========================================================================
- * Function pointer types — matching ARM64 ABI calling convention
- * ========================================================================= */
+/* ========== Function pointers from sre_background.c ========== */
+extern pfn_SetMatrix   g_RenderingContext_SetMatrix;
+extern pfn_SetColor    g_RenderingContext_SetColor;
+extern pfn_SpriteDraw  g_Sprite_Draw;
 
-/* Simple setters: self in X0, int/bool in X1 (W1) */
-typedef void (*fn_void_self_int)(void* self, int val);
-typedef void (*fn_void_self_bool)(void* self, int val);  /* bool passed as int in W1 */
-typedef void (*fn_void_self_float)(void* self, float val);
+/* CppString constructor from sre_string.c */
+extern void sre_CppString_from_char_p(SreString* self, const char* src);
+extern void sre_CppString_release(SreString* self);
 
-/* Query functions: self in X0, return in W0 */
-typedef int  (*fn_int_self)(void* self);
+/* ========== RenderingContext API ========== */
+static pfn_SetProjectionMatrix    g_SetProjectionMatrix = 0;
+static pfn_FillRect               g_FillRect = 0;
+static pfn_DrawRect_RC            g_DrawRect = 0;
+static pfn_SetBlendingEnabled     g_SetBlendingEnabled = 0;
+static pfn_SetTexturingEnabled    g_SetTexturingEnabled = 0;
+static pfn_SetLightingEnabled     g_SetLightingEnabled = 0;
+static pfn_SetDepthTestEnabled    g_SetDepthTestEnabled = 0;
+static pfn_SetDepthWriteEnabled   g_SetDepthWriteEnabled = 0;
+pfn_SetAlpha               g_sre_SetAlpha = 0;  /* non-static: used by sre_gui_native.c */
+static pfn_BindTexture            g_BindTexture = 0;
+static pfn_DrawArrays             g_DrawArrays = 0;
+static pfn_UseProgram             g_UseProgram = 0;
+static pfn_SetVertexAttribPointer g_SetVertexAttribPointer = 0;
 
-/* CanCastSkill: self in X0, shared_ptr ref in X1 */
-typedef int  (*fn_int_self_ptr)(void* self, void* shared_ptr_ref);
+/* ========== FontText ========== */
+pfn_FontText_Draw   g_sre_FontText_Draw = 0;  /* non-static: used by sre_gui_native.c */
+pfn_FontText_AddText   g_sre_FontText_AddText = 0;   /* non-static: Phase 2 text interception */
+pfn_FontText_Clear     g_sre_FontText_Clear = 0;     /* non-static: Phase 2 text interception */
+pfn_FontText_SetColor  g_sre_FontText_SetColor = 0;  /* non-static: Phase 2 text interception */
+static pfn_FontText_Translate g_FontText_Translate = 0;
+static pfn_FontText_AlignH    g_FontText_AlignH = 0;
 
-/* =========================================================================
- * Function offsets — from nm (v1.4.12 ARM64)
- * ========================================================================= */
+/* ========== GUILabel ========== */
+static pfn_GUILabel_AddText      g_GUILabel_AddText = 0;
+static pfn_GUILabel_AddTextColor g_GUILabel_AddTextColor = 0;
+pfn_GUILabel_UpdateText   g_sre_GUILabel_UpdateText = 0;  /* non-static: Phase 2 */
 
-/* HealthBar */
-#define OFF_HealthBar_SetMaxHealth       0x3dad24
-#define OFF_HealthBar_SetCurrentHealth   0x3dad4c
+/* ========== GUIButton ========== */
+pfn_GUIButton_Ctor       g_sre_GUIButton_Ctor = 0;        /* non-static: Phase 2 */
+pfn_GUIButton_SetTitle   g_sre_GUIButton_SetTitle = 0;     /* non-static: Phase 2 */
+static pfn_GUIButton_SetImage   g_GUIButton_SetImage = 0;
+static pfn_GUIButton_titleLabel g_GUIButton_titleLabel = 0;
 
-/* ManaBar */
-#define OFF_ManaBar_SetMaxMana           0x3e0254
-#define OFF_ManaBar_SetCurrentMana       0x3e0328
+/* ========== GUIView ========== */
+pfn_GUIView_SetFrame           g_sre_GUIView_SetFrame = 0;     /* non-static: Phase 2 */
+pfn_GUIView_AddSubview         g_sre_GUIView_AddSubview = 0;   /* non-static: Phase 2 */
+static pfn_GUIView_RemoveFromSuperview g_GUIView_RemoveFromSV = 0;
 
-/* CoinBar */
-#define OFF_CoinBar_SetCurrentCoins      0x3c4c7c
+/* ========== GUIWindow ========== */
+pfn_GUIWindow_mainWindow   g_sre_GUIWindow_mainWindow = 0;    /* non-static: Phase 2 */
+pfn_GUIWindow_PresentModal g_sre_GUIWindow_PresentModal = 0;  /* non-static: Phase 2 */
+pfn_GUIWindow_DismissModal g_sre_GUIWindow_DismissModal = 0;  /* non-static: Phase 2 */
+static pfn_GUIWindow_Dismiss      g_GUIWindow_Dismiss = 0;
 
-/* GameOverlayView */
-#define OFF_GameOverlayView_SetControlsHidden      0x3d6544
-#define OFF_GameOverlayView_SetShowsUseButton      0x3d685c
-#define OFF_GameOverlayView_SetSkillButtonDisabled  0x3d6974
+/* ========== GUIAlertView ========== */
+pfn_GUIAlertView_SetTitle   g_sre_GUIAlertView_SetTitle = 0;   /* non-static: Phase 2 */
+pfn_GUIAlertView_SetMessage g_sre_GUIAlertView_SetMessage = 0; /* non-static: Phase 2 */
+pfn_GUIAlertView_AddButton  g_sre_GUIAlertView_AddButton = 0;  /* non-static: Phase 2 */
 
-/* GUIEffect */
-#define OFF_GUIEffect_FadeOut            0x4a7174
-#define OFF_GUIEffect_FadeIn             0x4a72bc
-#define OFF_GUIEffect_Update             0x4a71a8
+/* ========== GameInterfaceBuilder ========== */
+static pfn_GIB_NormalLabel     g_GIB_NormalLabel = 0;
+static pfn_GIB_SmallLabel      g_GIB_SmallLabel = 0;
+pfn_GIB_FramedButton    g_sre_GIB_FramedButton = 0;     /* non-static: Phase 2 */
+pfn_GIB_MainMenuButton  g_sre_GIB_MainMenuButton = 0;   /* non-static: Phase 2 */
+pfn_GIB_AlertView       g_sre_GIB_AlertView = 0;        /* non-static: Phase 2 */
+static pfn_GIB_Slider          g_GIB_Slider = 0;
+static pfn_GIB_Switch          g_GIB_Switch = 0;
 
-/* GUIView */
-#define OFF_GUIView_Update               0x49e55c
+/* ========== TextureLibrary ========== */
+static pfn_TextureLibrary_shared  g_TexLib_shared = 0;
+static pfn_TextureLibrary_ForName g_TexLib_ForName = 0;
 
-/* CharControllerComponent */
-#define OFF_CharController_CanUse        0x25eaa0
-#define OFF_CharController_CanPickup     0x25ebb8
+/* ========== FontLibrary ========== */
+static pfn_FontLibrary_shared      g_FontLib_shared = 0;
+static pfn_FontLibrary_DefaultFont g_FontLib_DefaultFont = 0;
+static pfn_FontLibrary_SmallFont   g_FontLib_SmallFont = 0;
 
-/* GameSceneController */
-#define OFF_GameSceneController_CanCastSkill  0x34d44c
+/* ========== State ========== */
+int   g_sre_gui_initialized = 0;
+int   g_sre_gui_overlay_enabled = 0;
+float g_sre_gui_screen_w = 960.0f;
+float g_sre_gui_screen_h = 540.0f;
 
-/* GameSceneView (own methods we call on self) */
-#define OFF_GameSceneView_HideCinematicSkipButton  0x34f044
+/* ========== Init ========== */
 
-/* GameOverViewController — death/respawn system */
-#define OFF_GameOverViewDidContinue    0x348060  /* THE respawn function */
+void sre_init_gui(SreGuiAddrs* addrs) {
+    /* RenderingContext */
+    g_SetProjectionMatrix    = (pfn_SetProjectionMatrix)addrs->SetProjectionMatrix;
+    g_FillRect               = (pfn_FillRect)addrs->FillRect;
+    g_DrawRect               = (pfn_DrawRect_RC)addrs->DrawRect;
+    g_SetBlendingEnabled     = (pfn_SetBlendingEnabled)addrs->SetBlendingEnabled;
+    g_SetTexturingEnabled    = (pfn_SetTexturingEnabled)addrs->SetTexturingEnabled;
+    g_SetLightingEnabled     = (pfn_SetLightingEnabled)addrs->SetLightingEnabled;
+    g_SetDepthTestEnabled    = (pfn_SetDepthTestEnabled)addrs->SetDepthTestEnabled;
+    g_SetDepthWriteEnabled   = (pfn_SetDepthWriteEnabled)addrs->SetDepthWriteEnabled;
+    g_sre_SetAlpha           = (pfn_SetAlpha)addrs->SetAlpha;
+    g_BindTexture            = (pfn_BindTexture)addrs->BindTexture;
+    g_DrawArrays             = (pfn_DrawArrays)addrs->DrawArrays;
+    g_UseProgram             = (pfn_UseProgram)addrs->UseProgram;
+    g_SetVertexAttribPointer = (pfn_SetVertexAttribPointer)addrs->SetVertexAttribPointer;
 
-/* =========================================================================
- * Helper: compute function pointer from offset
- * ========================================================================= */
-#define FN(type, offset)  ((type)(g_swordigo_base + (offset)))
+    /* FontText */
+    g_sre_FontText_Draw  = (pfn_FontText_Draw)addrs->FontText_Draw;
+    g_sre_FontText_AddText = (pfn_FontText_AddText)addrs->FontText_AddText;
+    g_sre_FontText_Clear   = (pfn_FontText_Clear)addrs->FontText_Clear;
+    g_sre_FontText_SetColor = (pfn_FontText_SetColor)addrs->FontText_SetColor;
+    g_FontText_Translate = (pfn_FontText_Translate)addrs->FontText_Translate;
+    g_FontText_AlignH    = (pfn_FontText_AlignH)addrs->FontText_AlignH;
 
-/* =========================================================================
- * GameSceneView object layout (from decompiled source)
- * =========================================================================
- *   +0x00   vtable pointer (GUIView base)
- *   +0xF0   shared_ptr<GameSceneController>  → px at +0xF0, pn at +0xF8
- *   +0x100  GameOverlayView* (raw ptr from shared_ptr px)
- *   +0x110  DebugInfoOverlay* (raw ptr from shared_ptr px)
- *   +0x120  NotificationView* (shared_ptr: px=+0x120, pn=+0x128)
- *   +0x130  ItemInfoPopupView* (shared_ptr: px=+0x130, pn=+0x138)
- *   +0x148  CinematicSkipButton* (GUIButton/GUIView*)
- *   +0x158  byte: cinematic skip button visible flag
- *   +0x15C  float: cinematic skip button timer
- *   +0x160  GUIEffect* (screen effect 2)
- *   +0x170  GUIEffect* (damage flash — red overlay)
- *   +0x188  GUIEffect* (cinematic bars)
- *   +0x198  byte: wireframe/combat flag  
- *   +0x1A2  byte: wireframe render flag
- *
- * GameSceneController layout:
- *   +0x08   GameState* (from shared_ptr px)
- *   +0x20   something → +0x20 = enemy count related
- *   +0xE0   CharControllerComponent* (player)
- *
- * GameState layout (CharacterState fields — protobuf order):
- *   +0x68   current Skill shared_ptr px
- *   +0x70   current Skill shared_ptr pn (shared_count*)
- *   +0xA8   currentHP (int)            — proto field 2
- *   +0xAC   currentMana (int)          — proto field 3
- *   +0xB0   coins (int)               — proto field 4
- *   +0xB4   experiencePoints (int)     — proto field 5  [NEW]
- *   +0xB8   experienceLevel (int)      — proto field 6  [NEW]
- *   +0xBC   healthAttribute (int)      — proto field 15
- *   +0xC0   attackAttribute (int)      — proto field 16 [NEW]
- *   +0xC4   magicAttribute (int)       — proto field 17
- *   +0x1CA  coinDoublerShift (byte)
- *
- * GameOverlayView layout:
- *   +0x1E8  HealthBar* (shared_ptr px)
- *   +0x1F8  ManaBar* (shared_ptr px)
- *   +0x238  CoinBar* (shared_ptr px)
- */
+    /* GUILabel */
+    g_GUILabel_AddText      = (pfn_GUILabel_AddText)addrs->GUILabel_AddText;
+    g_GUILabel_AddTextColor = (pfn_GUILabel_AddTextColor)addrs->GUILabel_AddTextColor;
+    g_sre_GUILabel_UpdateText = (pfn_GUILabel_UpdateText)addrs->GUILabel_UpdateText;
 
-/* ========== Player Stats — Exported to Host ========== */
-volatile int g_sre_player_hp = 0;
-volatile int g_sre_player_max_hp = 0;
-volatile int g_sre_player_mana = 0;
-volatile int g_sre_player_max_mana = 0;
-volatile int g_sre_player_coins = 0;
-volatile int g_sre_player_hp_level = 0;
-volatile int g_sre_player_mana_level = 0;
-volatile int g_sre_player_xp = 0;
-volatile int g_sre_player_level = 0;
-volatile int g_sre_player_atk_level = 0;
+    /* GUIButton */
+    g_sre_GUIButton_Ctor   = (pfn_GUIButton_Ctor)addrs->GUIButton_Ctor;
+    g_sre_GUIButton_SetTitle = (pfn_GUIButton_SetTitle)addrs->GUIButton_SetTitle;
+    g_GUIButton_SetImage   = (pfn_GUIButton_SetImage)addrs->GUIButton_SetImage;
+    g_GUIButton_titleLabel = (pfn_GUIButton_titleLabel)addrs->GUIButton_titleLabel;
 
-/* Scene state flags */
-volatile int g_sre_gui_scene_active = 0;
-volatile uint64_t g_sre_gui_scene_view_ptr = 0;
+    /* GUIView */
+    g_sre_GUIView_SetFrame  = (pfn_GUIView_SetFrame)addrs->GUIView_SetFrame;
+    g_sre_GUIView_AddSubview = (pfn_GUIView_AddSubview)addrs->GUIView_AddSubview;
+    g_GUIView_RemoveFromSV  = (pfn_GUIView_RemoveFromSuperview)addrs->GUIView_RemoveFromSV;
 
-/* GameState pointer — exported so host can directly read/write game state.
- * This is a GUEST pointer (offset from guest memory base).
- * Host reads as: *(int*)(g_guest_memory + gamestate_ptr + OFFSET) */
-volatile uint64_t g_sre_gamestate_ptr = 0;
+    /* GUIWindow */
+    g_sre_GUIWindow_mainWindow   = (pfn_GUIWindow_mainWindow)addrs->GUIWindow_mainWindow;
+    g_sre_GUIWindow_PresentModal = (pfn_GUIWindow_PresentModal)addrs->GUIWindow_PresentModal;
+    g_sre_GUIWindow_DismissModal = (pfn_GUIWindow_DismissModal)addrs->GUIWindow_DismissModal;
+    g_GUIWindow_Dismiss      = (pfn_GUIWindow_Dismiss)addrs->GUIWindow_Dismiss;
 
-/* =========================================================================
- * Non-atomic shared_ptr refcount helpers
- * =========================================================================
- * boost::shared_ptr uses LDAXR/STLXR for refcounting which spins in Unicorn.
- * We do it non-atomically (single-threaded anyway).
- *
- * shared_count (sp_counted_base) layout:
- *   +0x00  vtable
- *   +0x08  use_count (long)
- *   +0x10  weak_count (long)
- */
-static void sp_addref(void* pn) {
-    if (pn) {
-        int64_t* use_count = (int64_t*)((char*)pn + 0x08);
-        (*use_count)++;
-    }
+    /* GUIAlertView */
+    g_sre_GUIAlertView_SetTitle   = (pfn_GUIAlertView_SetTitle)addrs->GUIAlertView_SetTitle;
+    g_sre_GUIAlertView_SetMessage = (pfn_GUIAlertView_SetMessage)addrs->GUIAlertView_SetMessage;
+    g_sre_GUIAlertView_AddButton  = (pfn_GUIAlertView_AddButton)addrs->GUIAlertView_AddButton;
+
+    /* GameInterfaceBuilder */
+    g_GIB_NormalLabel    = (pfn_GIB_NormalLabel)addrs->GIB_NormalLabel;
+    g_GIB_SmallLabel     = (pfn_GIB_SmallLabel)addrs->GIB_SmallLabel;
+    g_sre_GIB_FramedButton   = (pfn_GIB_FramedButton)addrs->GIB_FramedButton;
+    g_sre_GIB_MainMenuButton = (pfn_GIB_MainMenuButton)addrs->GIB_MainMenuButton;
+    g_sre_GIB_AlertView      = (pfn_GIB_AlertView)addrs->GIB_AlertView;
+    g_GIB_Slider         = (pfn_GIB_Slider)addrs->GIB_Slider;
+    g_GIB_Switch         = (pfn_GIB_Switch)addrs->GIB_Switch;
+
+    /* TextureLibrary */
+    g_TexLib_shared  = (pfn_TextureLibrary_shared)addrs->TexLib_shared;
+    g_TexLib_ForName = (pfn_TextureLibrary_ForName)addrs->TexLib_ForName;
+
+    /* FontLibrary */
+    g_FontLib_shared      = (pfn_FontLibrary_shared)addrs->FontLib_shared;
+    g_FontLib_DefaultFont = (pfn_FontLibrary_DefaultFont)addrs->FontLib_DefaultFont;
+    g_FontLib_SmallFont   = (pfn_FontLibrary_SmallFont)addrs->FontLib_SmallFont;
+
+    g_sre_gui_initialized = 1;
 }
 
-static void sp_release(void* pn) {
-    if (!pn) return;
-    int64_t* use_count = (int64_t*)((char*)pn + 0x08);
-    (*use_count)--;
-    if (*use_count == 0) {
-        /* Call virtual dispose() — vtable[2] (offset 0x10) */
-        uint64_t vtable = *(uint64_t*)pn;
-        typedef void (*fn_dispose)(void*);
-        fn_dispose dispose = (fn_dispose)(*(uint64_t*)(vtable + 0x10));
-        dispose(pn);
-        /* Decrement weak_count */
-        int64_t* weak_count = (int64_t*)((char*)pn + 0x10);
-        (*weak_count)--;
-        if (*weak_count == 0) {
-            /* Call virtual destroy() — vtable[3] (offset 0x18) */
-            typedef void (*fn_destroy)(void*);
-            fn_destroy destroy = (fn_destroy)(*(uint64_t*)(vtable + 0x18));
-            destroy(pn);
-        }
-    }
+/* ========== Matrix helpers ========== */
+
+static void mat4_ortho(float* m, float left, float right,
+                        float bottom, float top,
+                        float near_val, float far_val) {
+    int i;
+    for (i = 0; i < 16; i++) m[i] = 0.0f;
+    m[0]  = 2.0f / (right - left);
+    m[5]  = 2.0f / (top - bottom);
+    m[10] = -2.0f / (far_val - near_val);
+    m[12] = -(right + left) / (right - left);
+    m[13] = -(top + bottom) / (top - bottom);
+    m[14] = -(far_val + near_val) / (far_val - near_val);
+    m[15] = 1.0f;
 }
 
-/* =========================================================================
- * sre_GameSceneView_Update — FULL reimplementation
- * =========================================================================
- * ARM64 ABI: X0 = this, S0 = float deltaTime
- */
-void sre_GameSceneView_Update(void* self, float deltaTime) {
-    char* this_ = (char*)self;
-    
-    /* Store scene view pointer for host */
-    g_sre_gui_scene_view_ptr = (uint64_t)self;
-    g_sre_gui_scene_active = 1;
-    
-    /* ---- Read core pointers ---- */
-    uint64_t overlay_ptr = *(uint64_t*)(this_ + 0x100);  /* GameOverlayView* */
-    uint64_t ctrl_ptr    = *(uint64_t*)(this_ + 0xF0);   /* GameSceneController* */
-    
-    if (overlay_ptr == 0 || ctrl_ptr == 0) goto do_effects;
-    
-    uint64_t gamestate = *(uint64_t*)(ctrl_ptr + 0x08);   /* GameState* */
-    if (gamestate == 0) goto do_effects;
-    
-    /* Export gamestate pointer for host-side modding */
-    g_sre_gamestate_ptr = (uint64_t)gamestate;
-    
-    /* ---- 1. HEALTH BAR ---- */
-    {
-        uint64_t health_bar = *(uint64_t*)(overlay_ptr + 0x1E8); /* HealthBar* */
-        if (health_bar != 0) {
-            int hp_level = *(int*)(gamestate + 0xBC);
-            int max_hp   = hp_level * 2 + 4;
-            int cur_hp   = *(int*)(gamestate + 0xA8);
-            
-            FN(fn_void_self_int, OFF_HealthBar_SetMaxHealth)((void*)health_bar, max_hp);
-            
-            /* Damage flash: if HP decreased, flash red */
-            int prev_hp = *(int*)((char*)health_bar + 0x110); /* HealthBar::currentHealth */
-            if (cur_hp < prev_hp) {
-                uint64_t dmg_effect = *(uint64_t*)(this_ + 0x170);
-                if (dmg_effect != 0) {
-                    /* Set damage flash color to red: RGBA = 0xCC0000CC */
-                    *(uint32_t*)((char*)dmg_effect + 0x48) = 0xCC0000CC;
-                    FN(fn_void_self_float, OFF_GUIEffect_FadeOut)((void*)dmg_effect, 0.0f);
-                    FN(fn_void_self_float, OFF_GUIEffect_FadeIn)((void*)dmg_effect, 0.6f);
-                }
-                /* Re-read HP after potential effect calls */
-                cur_hp = *(int*)(gamestate + 0xA8);
-                health_bar = *(uint64_t*)(*(uint64_t*)(this_ + 0x100) + 0x1E8);
-            }
-            
-            FN(fn_void_self_int, OFF_HealthBar_SetCurrentHealth)((void*)health_bar, cur_hp);
-            
-            /* Export to host */
-            g_sre_player_hp       = cur_hp;
-            g_sre_player_max_hp   = max_hp;
-            g_sre_player_hp_level = hp_level;
-            g_sre_player_xp       = *(int*)(gamestate + 0xB4);  /* ExperiencePoints */
-            g_sre_player_level    = *(int*)(gamestate + 0xB8);  /* ExperienceLevel */
-            g_sre_player_atk_level = *(int*)(gamestate + 0xC0); /* AttackAttribute */
-        }
-        
-        /* Re-read overlay_ptr (may have been used by sub-calls) */
-        overlay_ptr = *(uint64_t*)(this_ + 0x100);
-    }
-    
-    /* ---- 2. MANA BAR ---- */
-    {
-        uint64_t mana_bar = *(uint64_t*)(overlay_ptr + 0x1F8); /* ManaBar* */
-        if (mana_bar != 0) {
-            int mana_level = *(int*)(gamestate + 0xC4);
-            int max_mana   = mana_level * 20 + 10;
-            int cur_mana   = *(int*)(gamestate + 0xAC);
-            
-            FN(fn_void_self_int, OFF_ManaBar_SetMaxMana)((void*)mana_bar, max_mana);
-            FN(fn_void_self_int, OFF_ManaBar_SetCurrentMana)(
-                (void*)*(uint64_t*)(*(uint64_t*)(this_ + 0x100) + 0x1F8), cur_mana);
-            
-            /* Export to host */
-            g_sre_player_mana       = cur_mana;
-            g_sre_player_max_mana   = max_mana;
-            g_sre_player_mana_level = mana_level;
-            
-            /* ---- 2b. SKILL BUTTON (CanCastSkill) ---- */
-            /* Read the current skill shared_ptr from GameState */
-            uint64_t skill_px = *(uint64_t*)(gamestate + 0x68);
-            void*    skill_pn = *(void**)(gamestate + 0x70);
-            
-            /* Release the old shared_ptr pn (non-atomic) */
-            if (skill_pn != NULL) {
-                int64_t* use_ct = (int64_t*)((char*)skill_pn + 0x08);
-                if (*use_ct == 0) {
-                    /* use_count is 0 means last reference was dropped elsewhere.
-                     * Call dispose + destroy (matches original decompiled pattern). */
-                    sp_release(skill_pn);
-                }
-            }
-            
-            if (skill_px != 0) {
-                /* Build a local shared_ptr on the stack for CanCastSkill */
-                uint64_t skill2_px = *(uint64_t*)(gamestate + 0x68);
-                void*    skill2_pn = *(void**)(gamestate + 0x70);
-                sp_addref(skill2_pn);  /* increment use_count (non-atomic) */
-                
-                /* Local shared_ptr: { px, pn } */
-                uint64_t local_sp[2];
-                local_sp[0] = skill2_px;
-                local_sp[1] = (uint64_t)skill2_pn;
-                
-                /* Call CanCastSkill */
-                void* controller = (void*)*(uint64_t*)(this_ + 0xF0);
-                void* game_overlay = (void*)*(uint64_t*)(this_ + 0x100);
-                int can_cast = FN(fn_int_self_ptr, OFF_GameSceneController_CanCastSkill)(
-                    controller, (void*)local_sp);
-                
-                /* SetSkillButtonDisabled(overlay, !can_cast) */
-                FN(fn_void_self_bool, OFF_GameOverlayView_SetSkillButtonDisabled)(
-                    game_overlay, (can_cast & 1) ^ 1);
-                
-                /* Release local shared_ptr (non-atomic) */
-                sp_release(skill2_pn);
-            }
-        }
-    }
-    
-    /* ---- 3. COIN BAR — smart visibility ---- */
-    /* Rules:
-     * - ALWAYS visible in shops (music = "house" or "squire")
-     * - Shows for 3s when coins change (pickup)
-     * - Shows for 2s on world transition or leaving shop
-     * - Hidden otherwise (catch-all enforces this)
-     *
-     * GUIView hidden flag at offset 0xE4 (0 = visible, 1 = hidden).
-     * Music playlist name from g_sre_music_load_name (sre_music.c) */
-    #define OFF_GUIVIEW_HIDDEN   0xE4
-    #define COIN_SHOW_SECONDS    3.0f
-    #define COIN_TRANSITION_SHOW 2.0f
-    {
-        extern char g_sre_music_load_name[256];
-        
-        static int      prev_coins    = -1;
-        static float    coin_timer    = 0.0f;
-        static uint64_t prev_coin_bar = 0;
-        static int      was_in_shop   = 0;
-        
-        uint64_t coin_bar = *(uint64_t*)(*(uint64_t*)(this_ + 0x100) + 0x238);
-        if (coin_bar != 0) {
-            int coins = *(int*)(gamestate + 0xB0);
-            FN(fn_void_self_int, OFF_CoinBar_SetCurrentCoins)((void*)coin_bar, coins);
-            g_sre_player_coins = coins;
-            
-            /* Check if we're in a shop area (house/town music) */
-            int in_shop = 0;
-            {
-                char* m = g_sre_music_load_name;
-                if (m[0]=='h' && m[1]=='o' && m[2]=='u' && m[3]=='s' && m[4]=='e' && m[5]==0)
-                    in_shop = 1;
-                if (m[0]=='s' && m[1]=='q' && m[2]=='u' && m[3]=='i' && m[4]=='r' && m[5]=='e')
-                    in_shop = 1;
-            }
-            
-            /* Determine visibility */
-            if (in_shop) {
-                /* In shop — ALWAYS show coins */
-                *(uint8_t*)((char*)coin_bar + OFF_GUIVIEW_HIDDEN) = 0;
-                coin_timer = 0.0f;
-                was_in_shop = 1;
-            } else if (was_in_shop) {
-                /* Just LEFT the shop — show briefly then hide */
-                was_in_shop = 0;
-                coin_timer = COIN_TRANSITION_SHOW;
-                /* keep visible during transition */
-            } else if (coin_bar != prev_coin_bar && prev_coins >= 0) {
-                /* New CoinBar (world transition) — show briefly */
-                *(uint8_t*)((char*)coin_bar + OFF_GUIVIEW_HIDDEN) = 0;
-                coin_timer = COIN_TRANSITION_SHOW;
-            } else if (prev_coins >= 0 && coins != prev_coins) {
-                /* Coins changed — show! */
-                *(uint8_t*)((char*)coin_bar + OFF_GUIVIEW_HIDDEN) = 0;
-                coin_timer = COIN_SHOW_SECONDS;
-            } else if (coin_timer > 0.0f) {
-                /* Timer running — count down */
-                coin_timer -= deltaTime;
-                if (coin_timer <= 0.0f) {
-                    *(uint8_t*)((char*)coin_bar + OFF_GUIVIEW_HIDDEN) = 1;
-                    coin_timer = 0.0f;
-                }
-            } else {
-                /* CATCH-ALL: no reason to show → force hide.
-                 * This covers: first load, leaving shop after timer,
-                 * and any weird edge cases. */
-                *(uint8_t*)((char*)coin_bar + OFF_GUIVIEW_HIDDEN) = 1;
-            }
-            
-            prev_coins = coins;
-            prev_coin_bar = coin_bar;
-        }
-    }
-    
-    /* ---- 4. CONTROLS VISIBILITY ---- */
-    /* Original: hide controls if enemy_count >= 1 OR wireframe combat flag set */
-    {
-        uint64_t scene_data = *(uint64_t*)(ctrl_ptr + 0x20);
-        int enemy_count = (scene_data != 0) ? *(int*)(scene_data + 0x20) : 0;
-        int combat_flag = (int)(uint8_t)this_[0x198];
-        
-        void* overlay = (void*)*(uint64_t*)(this_ + 0x100);
-        int hide = (enemy_count >= 1 || combat_flag != 0) ? 1 : 0;
-        FN(fn_void_self_bool, OFF_GameOverlayView_SetControlsHidden)(overlay, hide);
-    }
-    
-    /* ---- 5. USE/PICKUP BUTTON ---- */
-    {
-        uint64_t char_ctrl = *(uint64_t*)(ctrl_ptr + 0xE0);
-        if (char_ctrl != 0) {
-            void* overlay = (void*)*(uint64_t*)(this_ + 0x100);
-            int can_interact;
-            
-            int can_pickup = FN(fn_int_self, OFF_CharController_CanPickup)((void*)char_ctrl);
-            if (can_pickup & 1) {
-                can_interact = 1;
-            } else {
-                can_interact = FN(fn_int_self, OFF_CharController_CanUse)((void*)char_ctrl) & 1;
-            }
-            
-            FN(fn_void_self_bool, OFF_GameOverlayView_SetShowsUseButton)(overlay, can_interact);
-        }
-    }
-    
-    /* ---- 6. CINEMATIC SKIP BUTTON TIMER ---- */
-    {
-        uint8_t skip_visible = (uint8_t)this_[0x158];
-        if (skip_visible != 0) {
-            float* timer = (float*)(this_ + 0x15C);
-            *timer -= deltaTime;
-            if (*timer <= 0.0f) {
-                /* Call HideCinematicSkipButton(this, true) */
-                FN(fn_void_self_bool, OFF_GameSceneView_HideCinematicSkipButton)(self, 1);
-            }
-        }
-    }
-
-do_effects:
-    /* ---- 7. GUI EFFECT UPDATES ---- */
-    /* Cinematic bars effect */
-    {
-        uint64_t effect_bars = *(uint64_t*)(this_ + 0x188);
-        if (effect_bars != 0) {
-            FN(fn_void_self_float, OFF_GUIEffect_Update)((void*)effect_bars, deltaTime);
-        }
-    }
-    /* Screen effect 2 */
-    {
-        uint64_t effect2 = *(uint64_t*)(this_ + 0x160);
-        if (effect2 != 0) {
-            FN(fn_void_self_float, OFF_GUIEffect_Update)((void*)effect2, deltaTime);
-        }
-    }
-    /* Damage flash effect */
-    {
-        uint64_t dmg_flash = *(uint64_t*)(this_ + 0x170);
-        if (dmg_flash != 0) {
-            FN(fn_void_self_float, OFF_GUIEffect_Update)((void*)dmg_flash, deltaTime);
-        }
-    }
-    
-    /* ---- 8. BASE GUIView::Update (animation system) ---- */
-    FN(fn_void_self_float, OFF_GUIView_Update)(self, deltaTime);
+static void mat4_identity(float* m) {
+    int i;
+    for (i = 0; i < 16; i++) m[i] = 0.0f;
+    m[0] = 1.0f; m[5] = 1.0f; m[10] = 1.0f; m[15] = 1.0f;
 }
 
-/* =========================================================================
- * sre_ShowAdMaybe — Death/Respawn System Fix
- * =========================================================================
- * Original: Caver::GameOverViewController::ShowAdMaybe()
- * nm offset: 0x347efc
- *
- * ARM64 ABI: X0 = this (GameOverViewController*)
- *
- * Original flow:
- *   1. Player dies → HandleGameEvent case 3 → creates GameOverVC
- *   2. Game over screen shows → player taps → TouchEnded → ShowAdMaybe
- *   3. ShowAdMaybe checks IsNoAdsUnlockedCheck / IsAdsEnabled
- *   4. If ads: ShowInterstitialAd → callback → GameOverViewDidContinue
- *   5. If no ads: directly → GameOverViewDidContinue
- *
- * Problem: On desktop, the ad system is broken. The no-ads path has
- * additional checks that fail. The old workaround was to restart the
- * ENTIRE PROCESS via execv() after 3 seconds. Terrible.
- *
- * Our fix: Skip ALL ad logic. Directly call GameOverViewDidContinue()
- * which reloads from the last checkpoint save. Clean and instant.
- *
- * GameOverViewDidContinue(GameOverViewController* this, GameOverView* view)
- *   - view parameter is the delegate sender, often unused for respawn logic
- *   - We pass the VC's own view if available, or NULL as fallback
- */
-typedef void (*fn_void_self_ptr)(void* self, void* param);
+/* ========== CppString helpers ========== */
 
-void sre_ShowAdMaybe(void* self) {
-    /* Skip ads entirely — directly trigger respawn from checkpoint.
-     * GameOverViewDidContinue handles:
-     *   1. Re-enabling game events
-     *   2. Loading from last checkpoint save
-     *   3. Transitioning back to gameplay
-     *   4. Resuming music */
-    FN(fn_void_self_ptr, OFF_GameOverViewDidContinue)(self, (void*)0);
+void sre_gui_make_string(SreString* out, const char* text) {
+    sre_CppString_from_char_p(out, text);
 }
 
-/* ========== Reserved for future phases ==========
- * DrawRect @ 0x34f40c — render interception
- * HandleKeyboardEvent @ 0x3505a8 — custom keyboard
- *   Hidden debug keys: Ctrl+D=Die, Ctrl+H=Hurt,
- *   Ctrl+I=DebugInfo, Ctrl+W=Wireframe
- */
+void sre_gui_free_string(SreString* str) {
+    sre_CppString_release(str);
+}
+
+/* ========== 2D Overlay Projection ========== */
+
+void sre_gui_begin_overlay(void* ctx, float screenW, float screenH) {
+    if (!g_SetProjectionMatrix || !g_RenderingContext_SetMatrix) return;
+
+    float ortho[16];
+    mat4_ortho(ortho, 0.0f, screenW, screenH, 0.0f, -1.0f, 1.0f);
+    g_SetProjectionMatrix(ctx, ortho);
+
+    float ident[16];
+    mat4_identity(ident);
+    g_RenderingContext_SetMatrix(ctx, ident);
+
+    if (g_SetBlendingEnabled)  g_SetBlendingEnabled(ctx, 1);
+    if (g_SetTexturingEnabled) g_SetTexturingEnabled(ctx, 0);
+    if (g_SetLightingEnabled)  g_SetLightingEnabled(ctx, 0);
+    if (g_SetDepthTestEnabled) g_SetDepthTestEnabled(ctx, 0);
+    if (g_UseProgram) g_UseProgram(ctx, 0);
+}
+
+void sre_gui_end_overlay(void* ctx) {
+    (void)ctx;
+}
+
+/* ========== Immediate-Mode Drawing ========== */
+
+void sre_gui_fill_rect(void* ctx, float x, float y, float w, float h,
+                        int r, int g, int b, int a) {
+    if (!g_FillRect) return;
+    SreRect rect = { x, y, w, h };
+    SreColor color = { (float)r/255.0f, (float)g/255.0f,
+                        (float)b/255.0f, (float)a/255.0f };
+    g_FillRect(ctx, &rect, &color, color.a);
+}
+
+void sre_gui_draw_rect(void* ctx, float x, float y, float w, float h,
+                        int r, int g, int b, int a) {
+    if (!g_DrawRect) return;
+    SreRect rect = { x, y, w, h };
+    SreColor color = { (float)r/255.0f, (float)g/255.0f,
+                        (float)b/255.0f, (float)a/255.0f };
+    g_DrawRect(ctx, &rect, &color, color.a);
+}
+
+void sre_gui_draw_sprite(void* ctx, void* sprite, float x, float y) {
+    if (!g_Sprite_Draw || !g_RenderingContext_SetMatrix || !sprite) return;
+    float mat[16];
+    mat4_identity(mat);
+    mat[12] = x;
+    mat[13] = y;
+    g_RenderingContext_SetMatrix(ctx, mat);
+    if (g_SetTexturingEnabled) g_SetTexturingEnabled(ctx, 1);
+    g_Sprite_Draw(sprite, ctx);
+    mat4_identity(mat);
+    g_RenderingContext_SetMatrix(ctx, mat);
+}
+
+/* ========== Texture Access ========== */
+
+void* sre_gui_get_texture(const char* name) {
+    if (!g_TexLib_shared || !g_TexLib_ForName) return 0;
+    void* lib = g_TexLib_shared();
+    if (!lib) return 0;
+    
+    SreString str;
+    sre_gui_make_string(&str, name);
+    
+    /* TextureForName returns intrusive_ptr<Texture> via hidden first arg */
+    sre_u64 result[2] = {0, 0};  /* intrusive_ptr is just a raw pointer */
+    g_TexLib_ForName(result, lib, &str, 0);
+    
+    sre_gui_free_string(&str);
+    return (void*)result[0];
+}
+
+/* ========== GameInterfaceBuilder Wrappers ========== */
+
+void sre_gui_create_label(SreSharedPtr* out, const char* text,
+                           int r, int g, int b, int a) {
+    if (!g_GIB_NormalLabel) { out->ptr = 0; out->shared_count = 0; return; }
+    
+    SreString str;
+    sre_gui_make_string(&str, text);
+    
+    SreColor color = { (float)r/255.0f, (float)g/255.0f,
+                        (float)b/255.0f, (float)a/255.0f };
+    SreColor shadow = { 0.0f, 0.0f, 0.0f, 0.5f };
+    
+    g_GIB_NormalLabel(out, &str, &color, &shadow);
+    
+    sre_gui_free_string(&str);
+}
+
+void sre_gui_create_button(SreSharedPtr* out, const char* title) {
+    if (!g_sre_GIB_MainMenuButton) { out->ptr = 0; out->shared_count = 0; return; }
+    
+    SreString str;
+    sre_gui_make_string(&str, title);
+    
+    g_sre_GIB_MainMenuButton(out, &str);
+    
+    sre_gui_free_string(&str);
+}
+
+void sre_gui_create_framed_button(SreSharedPtr* out, const char* title) {
+    if (!g_sre_GIB_FramedButton) { out->ptr = 0; out->shared_count = 0; return; }
+    
+    SreString str;
+    sre_gui_make_string(&str, title);
+    
+    g_sre_GIB_FramedButton(out, &str, 1);
+    
+    sre_gui_free_string(&str);
+}
+
+/* ========== GUIView Manipulation ========== */
+
+void sre_gui_set_frame(void* view, float x, float y, float w, float h) {
+    if (!g_sre_GUIView_SetFrame || !view) return;
+    SreRect rect = { x, y, w, h };
+    g_sre_GUIView_SetFrame(view, &rect);
+}
+
+void sre_gui_add_subview(void* parent, SreSharedPtr* child) {
+    if (!g_sre_GUIView_AddSubview || !parent || !child || !child->ptr) return;
+    g_sre_GUIView_AddSubview(parent, child);
+}
+
+void sre_gui_remove_from_superview(void* view) {
+    if (!g_GUIView_RemoveFromSV || !view) return;
+    g_GUIView_RemoveFromSV(view);
+}
+
+/* ========== GUIWindow Access ========== */
+
+void* sre_gui_main_window(void) {
+    if (!g_sre_GUIWindow_mainWindow) return 0;
+    return g_sre_GUIWindow_mainWindow();
+}
+
+void sre_gui_present_modal(SreSharedPtr* view, int animated) {
+    if (!g_sre_GUIWindow_PresentModal || !g_sre_GUIWindow_mainWindow) return;
+    void* win = g_sre_GUIWindow_mainWindow();
+    if (!win || !view || !view->ptr) return;
+    g_sre_GUIWindow_PresentModal(win, view, animated);
+}
+
+void sre_gui_dismiss_modal(void* view) {
+    if (!g_sre_GUIWindow_DismissModal || !g_sre_GUIWindow_mainWindow) return;
+    void* win = g_sre_GUIWindow_mainWindow();
+    if (!win || !view) return;
+    g_sre_GUIWindow_DismissModal(win, view);
+}
+
+/* =====================================================================
+ * GUI RELAY POINTERS
+ * =====================================================================
+ * Set by host (main.cpp) via table-driven loop.
+ * Used by sre_gui_native.c for fallback (GUIWindow, AlertView, etc.)
+ * and by native implementations that need to call engine sub-functions.
+ *
+ * The actual DrawRect implementations are in sre_gui_native.c.
+ * ===================================================================== */
+
+sre_u64 g_orig_GUIWindow_DrawRect    = 0;
+sre_u64 g_orig_GUIView_DrawRect      = 0;
+sre_u64 g_orig_GUIButton_DrawRect    = 0;
+sre_u64 g_orig_GUILabel_DrawRect     = 0;
+sre_u64 g_orig_GUIFrameView_DrawRect = 0;
+sre_u64 g_orig_GUIAlertView_DrawRect = 0;
+sre_u64 g_orig_GUISlider_DrawRect    = 0;
+sre_u64 g_orig_NewMenuView_DrawRect  = 0;
+sre_u64 g_orig_MainMenuView_ButtonPressed = 0;  /* Phase 2: main menu event interception */
+sre_u64 g_orig_CreditsVC_LoadView = 0;          /* Options menu: CreditsVC view customization */
+sre_u64 g_orig_CreditsVC_ButtonPressed = 0;     /* Options menu: back button detection */

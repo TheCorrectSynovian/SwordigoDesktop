@@ -18,8 +18,7 @@ libsre.so
 *.o
 *.so
 *.so.*
-# Old source backup (renamed to avoid confusion)
-.src/
+# Old source snapshots (archived in trash/)
 # Archives (game asset bundles, compressed builds, etc.)
 *.zip
 *.tar
@@ -138,3 +137,5 @@ docs/research/vita/vistaPort/
 docs/research/vita/*.zip
 # -------- PYTHON SCRIPTS --------
 generate_poc.py
+# -------- TRASH / ARCHIVED SNAPSHOTS --------
+trash/

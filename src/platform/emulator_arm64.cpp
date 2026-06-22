@@ -432,8 +432,15 @@ void EmulatorArm64::run(uint64_t start_pc) {
                 }
                 
                 if (found) {
-                    std::cerr << "[SRE-Recovery] C++ exception — skipping to engine code 0x" 
-                              << std::hex << target_lr << std::dec << std::endl;
+                    static int recovery_count = 0;
+                    recovery_count++;
+                    if (recovery_count <= 3) {
+                        std::cerr << "[SRE-Recovery] C++ exception #" << recovery_count
+                                  << " — skipping to engine code 0x" 
+                                  << std::hex << target_lr << std::dec << std::endl;
+                    } else if (recovery_count == 4) {
+                        std::cerr << "[SRE-Recovery] Suppressing further recovery logs" << std::endl;
+                    }
                     uc_reg_write((uc_engine*)uc, UC_ARM64_REG_PC, &target_lr);
                     uc_reg_write((uc_engine*)uc, UC_ARM64_REG_X29, &target_fp);
                     uc_reg_write((uc_engine*)uc, UC_ARM64_REG_SP, &target_sp);

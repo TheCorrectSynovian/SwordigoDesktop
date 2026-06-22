@@ -82,6 +82,32 @@ static int  s_pending_restart = 0;
 /* Fade speed for automatic transitions (matches original: 1.0 / 1.5 ≈ 0.667) */
 #define FADE_TRANSITION_SPEED 0.667f
 
+/* ========== AudioSystem::SetMusicVolume ==========
+ * Original: Caver::AudioSystem::SetMusicVolume(float)
+ * nm offset: 0x47f5f0
+ *
+ * ARM64 ABI:
+ *   X0 = this (AudioSystem*)
+ *   S0 = float volume (0.0 to 1.0)
+ *
+ * Called by the engine when the music volume slider changes.
+ * The original calls MusicPlayer::SetVolume → MusicPlayerJNI::SetVolume
+ * → broken JNI bridge. We bypass all of that and route directly to
+ * our OpenAL music system via the command interface.
+ */
+void sre_AudioSystem_SetMusicVolume(void* self, float vol) {
+    /* Clamp to valid range */
+    if (vol < 0.0f) vol = 0.0f;
+    if (vol > 1.0f) vol = 1.0f;
+
+    /* Update internal state for fade calculations */
+    s_master_volume = vol;
+
+    /* Write to command interface — host picks this up and applies via OpenAL */
+    g_sre_music_volume = vol * s_fade_volume;
+    g_sre_music_volume_dirty = 1;
+}
+
 /* ========== PlayMusicWithName ==========
  * Original: Caver::MusicPlayer::PlayMusicWithName(const std::string&, bool)
  * nm offset: 0x4811a0

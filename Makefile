@@ -44,7 +44,8 @@ CXX_SRCS := \
     src/platform/data_path.cpp \
     src/platform/binary_selector.cpp \
     src/platform/launcher.cpp \
-    src/platform/save_editor.cpp
+    src/platform/save_editor.cpp \
+    src/platform/srt_overlay.cpp
 
 C_SRCS := \
     src/android/asset_manager.c \
@@ -71,10 +72,10 @@ swordigo_boot: $(ALL_OBJS)
 # This is a guest-side library loaded into the Unicorn emulator.
 # It replaces problematic functions in libswordigo.so with clean C code.
 AARCH64_CC := aarch64-linux-gnu-gcc
-SRE_SRCS   := src/sre/sre_init.c src/sre/sre_string.c src/sre/sre_lua.c src/sre/sre_background.c src/sre/sre_effects.c src/sre/sre_music.c src/sre/sre_gui.c src/sre/sre_setjmp.S
+SRE_SRCS   := src/sre/sre_init.c src/sre/sre_string.c src/sre/sre_lua.c src/sre/sre_background.c src/sre/sre_effects.c src/sre/sre_music.c src/sre/sre_gui.c src/sre/sre_gui_native.c src/sre/sre_scene_update.c src/sre/sre_setjmp.S src/sre/sre_mini_api.c src/sre/sre_vfs.c src/sre/sre_lua_libs.c
 SRE_CFLAGS := -shared -fPIC -O2 -nostdlib -fno-builtin -Isrc/sre
 
-libsre.so: $(SRE_SRCS) src/sre/sre.h src/sre/sre_lua.h src/sre/sre_setjmp.h
+libsre.so: $(SRE_SRCS) src/sre/sre.h src/sre/sre_lua.h src/sre/sre_setjmp.h src/sre/sre_gui.h
 	@echo "[SRE]  Building libsre.so (ARM64)"
 	@$(AARCH64_CC) $(SRE_CFLAGS) -o $@ $(SRE_SRCS)
 	@echo "[SRE]  Built libsre.so (ARM64) — ready for emulator loading"
@@ -84,6 +85,19 @@ install-sre: libsre.so
 	@mkdir -p $(HOME)/.local/share/swordigo-desktop/engine/v1.4.12/arm64-v8a/
 	@cp libsre.so $(HOME)/.local/share/swordigo-desktop/engine/v1.4.12/arm64-v8a/libsre.so
 	@echo "[SRE]  Installed to ~/.local/share/swordigo-desktop/engine/v1.4.12/arm64-v8a/"
+
+# =========================================================================
+# asset_viewer — Standalone asset browser/previewer tool
+# =========================================================================
+# Separate binary with minimal dependencies (no unicorn, no game code).
+AV_SRCS := src/tools/asset_viewer.cpp src/platform/pvr_loader.cpp
+AV_CXXFLAGS := -std=c++17 -g -O1 -Isrc -Iinclude $(SDL3_CFLAGS) $(SDL3I_CFLAGS)
+AV_LIBS := $(SDL3_LIBS) $(SDL3I_LIBS) -lGL
+
+asset_viewer: $(AV_SRCS)
+	@echo "[AV]   Building asset_viewer"
+	@$(CXX) $(AV_CXXFLAGS) -o $@ $(AV_SRCS) $(AV_LIBS)
+	@echo "[AV]   Built asset_viewer — run with: ./asset_viewer"
 
 # C++ compile rule
 build/%.o: src/%.cpp
@@ -101,7 +115,7 @@ build/%.o: src/%.c
 -include $(DEPS)
 
 clean:
-	rm -f $(ALL_OBJS) $(DEPS) swordigo_boot libsre.so
+	rm -f $(ALL_OBJS) $(DEPS) swordigo_boot libsre.so asset_viewer
 
-.PHONY: all clean install-sre
+.PHONY: all clean install-sre asset_viewer
 

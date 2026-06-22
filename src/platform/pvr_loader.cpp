@@ -239,12 +239,33 @@ GLuint pvr_load_texture(const char* path, int* out_width, int* out_height) {
         if (v2->magic == PVR2_MAGIC || v2->header_size == 44) {
             width = v2->width;
             height = v2->height;
-            /* v2 format flag for ETC1 */
-            is_etc1 = ((v2->flags & 0xFF) == 0x36 || (v2->flags & 0xFF) == 0x06);
+            /* v2 format field is in the lower byte of flags.
+             * Known ETC1 codes:
+             *   0x06 = ETC_RGB_4BPP (legacy enum)
+             *   0x12 = ETC1 (PowerVR SDK ePVRTPF_ETC1 = 18)
+             *   0x36 = ETC_RGB_4BPP (alternate code)
+             * Upper bits are metadata flags (mipmaps, twiddle, alpha) */
+            uint32_t fmt = v2->flags & 0xFF;
+            is_etc1 = (fmt == 0x36 || fmt == 0x06 || fmt == 0x12);
+            
+            /* If format isn't recognized but file is valid PVR v2,
+             * try ETC1 anyway — Swordigo only uses ETC1 */
+            if (!is_etc1 && (v2->magic == PVR2_MAGIC) && width > 0 && height > 0 
+                && width <= 4096 && height <= 4096) {
+                size_t expected_etc1_size = (size_t)((width + 3) / 4) * ((height + 3) / 4) * 8;
+                size_t available = file_size - v2->header_size;
+                if (available >= expected_etc1_size) {
+                    std::cout << "[PVR] v2 unknown format 0x" << std::hex << fmt 
+                              << std::dec << " — trying ETC1 (data size matches)" << std::endl;
+                    is_etc1 = true;
+                }
+            }
+            
             pixel_data = file_data.data() + v2->header_size;
             
             std::cout << "[PVR] v2 format: " << width << "x" << height 
-                      << " flags=0x" << std::hex << v2->flags << std::dec << std::endl;
+                      << " flags=0x" << std::hex << v2->flags << std::dec 
+                      << " fmt=0x" << std::hex << fmt << std::dec << std::endl;
         } else {
             std::cerr << "[PVR] Unknown PVR version: 0x" 
                       << std::hex << v3->version << std::dec << std::endl;

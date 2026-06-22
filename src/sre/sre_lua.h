@@ -81,6 +81,48 @@ extern pfn_lua_touserdata  g_lua_touserdata;
 extern pfn_lua_pushlightuserdata g_lua_pushlightuserdata;
 extern pfn_lua_error       g_lua_error;
 
+/* Extended Lua API function pointer types (resolved by sre_init_lua_ext) */
+typedef void  (*pfn_lua_pushvalue)(lua_State* L, int idx);
+typedef void  (*pfn_lua_remove)(lua_State* L, int idx);
+typedef void  (*pfn_lua_insert)(lua_State* L, int idx);
+typedef void  (*pfn_lua_replace)(lua_State* L, int idx);
+typedef int   (*pfn_lua_checkstack)(lua_State* L, int sz);
+typedef void  (*pfn_lua_rawget)(lua_State* L, int idx);
+typedef void  (*pfn_lua_rawset)(lua_State* L, int idx);
+typedef void  (*pfn_lua_rawgeti)(lua_State* L, int idx, int n);
+typedef void  (*pfn_lua_rawseti)(lua_State* L, int idx, int n);
+typedef int   (*pfn_lua_next)(lua_State* L, int idx);
+typedef size_t(*pfn_lua_objlen)(lua_State* L, int idx);
+typedef void  (*pfn_lua_settable)(lua_State* L, int idx);
+typedef void  (*pfn_lua_gettable)(lua_State* L, int idx);
+typedef int   (*pfn_lua_isnumber)(lua_State* L, int idx);
+typedef int   (*pfn_lua_isstring)(lua_State* L, int idx);
+typedef int64_t (*pfn_lua_tointeger)(lua_State* L, int idx);
+typedef void  (*pfn_lua_pushinteger)(lua_State* L, int64_t n);
+typedef void  (*pfn_lua_concat)(lua_State* L, int n);
+typedef void  (*pfn_lua_pushlstring)(lua_State* L, const char* s, size_t len);
+
+/* Extended globals (set by sre_init_lua_ext) */
+extern pfn_lua_pushvalue   g_lua_pushvalue;
+extern pfn_lua_remove      g_lua_remove;
+extern pfn_lua_insert      g_lua_insert;
+extern pfn_lua_replace     g_lua_replace;
+extern pfn_lua_checkstack  g_lua_checkstack;
+extern pfn_lua_rawget      g_lua_rawget;
+extern pfn_lua_rawset      g_lua_rawset;
+extern pfn_lua_rawgeti     g_lua_rawgeti;
+extern pfn_lua_rawseti     g_lua_rawseti;
+extern pfn_lua_next        g_lua_next;
+extern pfn_lua_objlen      g_lua_objlen;
+extern pfn_lua_settable    g_lua_settable;
+extern pfn_lua_gettable    g_lua_gettable;
+extern pfn_lua_isnumber    g_lua_isnumber;
+extern pfn_lua_isstring    g_lua_isstring;
+extern pfn_lua_tointeger   g_lua_tointeger;
+extern pfn_lua_pushinteger g_lua_pushinteger;
+extern pfn_lua_concat      g_lua_concat;
+extern pfn_lua_pushlstring g_lua_pushlstring;
+
 /* Convenience macros */
 #define lua_tostring(L, idx) g_lua_tolstring(L, idx, (sre_size_t*)0)
 #define lua_pop(L, n)        g_lua_settop(L, -(n)-1)

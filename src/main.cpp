@@ -40,6 +40,7 @@ namespace fs = std::filesystem;
 #include "platform/io_thread.h"
 #include "platform/binary_selector.h"
 #include "platform/launcher.h"
+#include "platform/srt_overlay.h"
 
 extern bool g_display_active;
 extern int g_win_w;
@@ -82,6 +83,7 @@ EmulatorArm64* g_emulator_64 = nullptr;
 // Architecture flag — set during boot based on selected binary
 bool g_is_arm64 = false;
 GuiRenderer g_gui;
+SrtOverlay g_srt_overlay;
 InputConfig g_input_config;
 SDL_Gamepad* g_gamepad = nullptr;
 FBOScale g_fbo_mode = FBOScale::SHARP_BILINEAR;
@@ -109,6 +111,16 @@ static bool     g_lua_console_ready = false;       // true when all addrs resolv
 static bool     g_lua_console_open = false;        // true when console UI is visible
 static std::string g_lua_console_input;            // Current input line
 static std::vector<std::pair<std::string,bool>> g_lua_console_history; // {text, is_error}
+
+// SRE lua_resume error monitoring — guest addresses
+static uint64_t g_sre_resume_err_count_addr = 0;
+static uint64_t g_sre_resume_last_err_addr = 0;
+static int g_sre_resume_err_last_seen = 0;  // host-side last read value
+
+// SRE __cxa_throw caller diagnostics — guest addresses
+static uint64_t g_sre_cxa_caller_addr = 0;     // addr of g_sre_cxa_throw_caller
+static uint64_t g_sre_cxa_unrecovered_addr = 0; // addr of g_sre_cxa_throw_unrecovered
+static int g_sre_cxa_last_seen = 0;
 
 // SRE Background Renderer — guest addresses
 static uint64_t bg_mode_addr = 0;       // Guest addr of g_sre_bg_mode
@@ -1083,6 +1095,22 @@ void load_and_boot() {
                 glPopAttrib();
             }
 
+            // Render SRT overlay (inventory editor, etc.) — F11 toggle
+            if (g_display_active && g_srt_overlay.is_visible()) {
+                glPushAttrib(GL_ALL_ATTRIB_BITS);
+                glViewport(0, 0, g_draw_w, g_draw_h);
+                glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+                glOrtho(0, g_win_w, 0, g_win_h, -1, 1);
+                glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+                glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
+                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                g_srt_overlay.render(g_gui, g_win_w, g_win_h,
+                                      mouse_x, mouse_y,
+                                      mouse_pressed, dt_seconds);
+                glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix();
+                glPopAttrib();
+            }
+
             // Show hint for first 5 seconds
             if (g_display_active && !gui_visible && (SDL_GetTicks() - hint_start_time) < 5000) {
                 glPushAttrib(GL_ALL_ATTRIB_BITS);
@@ -1106,7 +1134,7 @@ void load_and_boot() {
                 glVertex2f(cx - 280, cy - 15); glVertex2f(cx + 280, cy - 15);
                 glVertex2f(cx + 280, cy + 15); glVertex2f(cx - 280, cy + 15);
                 glEnd();
-                g_gui.draw_string("WASD:Move  Arrows:Camera  +/-:Speed  F5:Cam  F8:Pause  F12:Fullscreen", cx - 310, cy - 7, 1.1f, 0, 200, 255, 255);
+                g_gui.draw_string("WASD:Move  Arrows:Camera  +/-:Speed  F5:Cam  F11:Inventory  F12:Fullscreen", cx - 340, cy - 7, 1.1f, 0, 200, 255, 255);
                 glPopMatrix();
                 glMatrixMode(GL_PROJECTION);
                 glPopMatrix();
@@ -1394,6 +1422,13 @@ void load_and_boot() {
                             }
                             if (event.key.key == SDLK_F9 && !event.key.repeat) {
                                 mod_step_frame();
+                                break;
+                            }
+                            if (event.key.key == SDLK_F11 && !event.key.repeat) {
+                                /* v6: SRT overlay disabled — WIP.
+                                g_srt_overlay.toggle();
+                                std::cout << "[SRT Overlay] " << (g_srt_overlay.is_visible() ? "ON" : "OFF") << std::endl;
+                                */
                                 break;
                             }
                             if (event.key.key == SDLK_EQUALS && !event.key.repeat) {
@@ -1904,8 +1939,9 @@ void load_and_boot_arm64() {
     // IMPORTANT: SRE hooks use hardcoded function offsets that are ONLY valid
     // for v1.4.12 ARM64. Loading SRE for other versions would crash.
     {
-        bool sre_compatible = (g_lib_name.find("v1.4.12") != std::string::npos &&
-                               g_lib_name.find("arm64") != std::string::npos);
+        bool sre_compatible = (g_lib_name.find("arm64") != std::string::npos &&
+                               (g_lib_name.find("v1.4.12") != std::string::npos ||
+                                g_lib_name.find("rl-") != std::string::npos));
         
         if (!sre_compatible) {
             std::cerr << "\n============================================" << std::endl;
@@ -2023,6 +2059,52 @@ void load_and_boot_arm64() {
                 if (sre_init_lua_addr && lua_resolved > 0) {
                     g_emulator_64->call(sre_init_lua_addr, {lua_addrs_guest});
                     std::cout << "[SRE] Lua API initialized" << std::endl;
+
+                    // ========= Phase 1b: Extended Lua API for standard libs =========
+                    // Additional symbols needed by sre_lua_libs.c (math, table, etc.)
+                    LuaSymEntry lua_ext_syms[] = {
+                        {"lua_pushvalue",   "_Z13lua_pushvalueP9lua_Statei"},
+                        {"lua_remove",      "_Z10lua_removeP9lua_Statei"},
+                        {"lua_insert",      "_Z10lua_insertP9lua_Statei"},
+                        {"lua_replace",     "_Z11lua_replaceP9lua_Statei"},
+                        {"lua_checkstack",  "_Z14lua_checkstackP9lua_Statei"},
+                        {"lua_rawget",      "_Z10lua_rawgetP9lua_Statei"},
+                        {"lua_rawset",      "_Z10lua_rawsetP9lua_Statei"},
+                        {"lua_rawgeti",     "_Z11lua_rawgetiP9lua_Stateii"},
+                        {"lua_rawseti",     "_Z11lua_rawsetiP9lua_Stateii"},
+                        {"lua_next",        "_Z8lua_nextP9lua_Statei"},
+                        {"lua_objlen",      "_Z10lua_objlenP9lua_Statei"},
+                        {"lua_settable",    "_Z12lua_settableP9lua_Statei"},
+                        {"lua_gettable",    "_Z12lua_gettableP9lua_Statei"},
+                        {"lua_isnumber",    "_Z12lua_isnumberP9lua_Statei"},
+                        {"lua_isstring",    "_Z12lua_isstringP9lua_Statei"},
+                        {"lua_tointeger",   "_Z13lua_tointegerP9lua_Statei"},
+                        {"lua_pushinteger", "_Z15lua_pushintegerP9lua_Statel"},
+                        {"lua_concat",      "_Z10lua_concatP9lua_Statei"},
+                        {"lua_pushlstring", "_Z15lua_pushlstringP9lua_StatePKcm"},
+                    };
+                    const int NUM_LUA_EXT_SYMS = sizeof(lua_ext_syms) / sizeof(lua_ext_syms[0]);
+
+                    // SreLuaExtAddrs: 19 × uint64_t = 152 bytes
+                    uint64_t lua_ext_addrs_guest = 0x48200;  // after lua_addrs
+                    uint64_t* lua_ext_addrs = (uint64_t*)(g_guest_memory + lua_ext_addrs_guest);
+
+                    int ext_resolved = 0;
+                    for (int i = 0; i < NUM_LUA_EXT_SYMS; i++) {
+                        uint64_t addr = g_loader_64->get_symbol_vaddr(&g_main_mod_64, lua_ext_syms[i].mangled);
+                        lua_ext_addrs[i] = addr;
+                        if (addr) ext_resolved++;
+                        else std::cerr << "[SRE] WARNING: Ext Lua symbol not found: " << lua_ext_syms[i].name
+                                       << " (" << lua_ext_syms[i].mangled << ")" << std::endl;
+                    }
+                    std::cout << "[SRE] Extended Lua API: " << ext_resolved << "/" << NUM_LUA_EXT_SYMS 
+                              << " symbols resolved" << std::endl;
+
+                    uint64_t sre_init_lua_ext_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "sre_init_lua_ext");
+                    if (sre_init_lua_ext_addr && ext_resolved > 0) {
+                        g_emulator_64->call(sre_init_lua_ext_addr, {lua_ext_addrs_guest});
+                        std::cout << "[SRE] Extended Lua API initialized" << std::endl;
+                    }
                     
                     // === Late-install lua_call → sre_lua_call_safe trampoline ===
                     // MUST be done AFTER sre_init_lua() so g_lua_pcall is populated.
@@ -2046,6 +2128,70 @@ void load_and_boot_arm64() {
                             std::cerr << "[SRE] WARNING: Could not install lua_call hook"
                                       << " (lua_call=" << lua_call_vaddr 
                                       << " safe=" << safe_vaddr << ")" << std::endl;
+                        }
+                    }
+
+                    // === Late-install lua_resume → sre_lua_resume_safe trampoline ===
+                    // BL-scanning doesn't work because ARM64 PIC calls go through PLT.
+                    // Instead: trampoline at lua_resume itself + relay stub for original.
+                    //
+                    // Relay stub (at code cave 0x3000000):
+                    //   [0..15]  = original first 4 instructions of lua_resume
+                    //   [16..23] = LDR X16, [PC, #8]; BR X16
+                    //   [24..31] = .quad (lua_resume + 16)  ← jump back past trampoline
+                    //
+                    // Then g_lua_resume is updated to point to the relay stub, so
+                    // SRE wrappers that call g_lua_resume still reach the original code.
+                    // The trampoline at lua_resume redirects ALL callers to our safe wrapper.
+                    {
+                        uint64_t lua_resume_vaddr = g_loader_64->get_symbol_vaddr(
+                            &g_main_mod_64, "_Z10lua_resumeP9lua_Statei");
+                        uint64_t safe_resume_vaddr = g_loader_64->get_symbol_vaddr(
+                            &g_sre_mod, "sre_lua_resume_safe");
+                        uint64_t g_lua_resume_addr = g_loader_64->get_symbol_vaddr(
+                            &g_sre_mod, "g_lua_resume");
+
+                        if (lua_resume_vaddr && safe_resume_vaddr && g_lua_resume_addr) {
+                            const uint64_t RELAY_CAVE = 0x3000000;  // unused guest memory
+
+                            // Step 1: Copy original first 16 bytes to relay stub
+                            uint8_t* orig = g_guest_memory + lua_resume_vaddr;
+                            uint8_t* cave = g_guest_memory + RELAY_CAVE;
+                            memcpy(cave, orig, 16);  // 4 instructions
+
+                            // Step 2: Append jump-back: LDR X16, [PC,#8]; BR X16; .quad dest
+                            uint32_t* cave32 = (uint32_t*)(cave + 16);
+                            cave32[0] = 0x58000050;  // LDR X16, [PC, #8]
+                            cave32[1] = 0xD61F0200;  // BR X16
+                            *(uint64_t*)(cave32 + 2) = lua_resume_vaddr + 16;
+
+                            // Step 3: Update g_lua_resume to point to relay stub
+                            *(uint64_t*)(g_guest_memory + g_lua_resume_addr) = RELAY_CAVE;
+
+                            // Step 4: Write trampoline at lua_resume → sre_lua_resume_safe
+                            uint32_t* code = (uint32_t*)(g_guest_memory + lua_resume_vaddr);
+                            code[0] = 0x58000050;  // LDR X16, [PC, #8]
+                            code[1] = 0xD61F0200;  // BR X16
+                            *(uint64_t*)(code + 2) = safe_resume_vaddr;
+
+                            std::cout << "[SRE] lua_resume trampoline installed:" << std::endl;
+                            std::cout << "[SRE]   lua_resume @ 0x" << std::hex << lua_resume_vaddr
+                                      << " → sre_lua_resume_safe @ 0x" << safe_resume_vaddr << std::endl;
+                            std::cout << "[SRE]   relay stub @ 0x" << RELAY_CAVE
+                                      << " → lua_resume+16 @ 0x" << (lua_resume_vaddr + 16)
+                                      << std::dec << std::endl;
+
+                            // Print first 4 original instructions for verification
+                            uint32_t* saved = (uint32_t*)cave;
+                            std::cout << "[SRE]   saved insns: "
+                                      << std::hex << saved[0] << " " << saved[1] << " "
+                                      << saved[2] << " " << saved[3] << std::dec << std::endl;
+                        } else {
+                            std::cerr << "[SRE] WARNING: lua_resume trampoline skipped"
+                                      << " (resume=0x" << std::hex << lua_resume_vaddr
+                                      << " safe=0x" << safe_resume_vaddr
+                                      << " g_ptr=0x" << g_lua_resume_addr
+                                      << std::dec << ")" << std::endl;
                         }
                     }
                 }
@@ -2073,7 +2219,103 @@ void load_and_boot_arm64() {
                     struct GuestHookEntry {
                         uint64_t target_offset;
                         uint64_t symbol_name_ptr;
+                        uint64_t orig_func;      // reserved for future relay stubs
                     };
+
+                    // Pre-save __cxa_throw's first 16 bytes BEFORE the hook table
+                    // overwrites them with a trampoline. This relay stub lets
+                    // sre_cxa_throw fall through to the original when depth==0.
+                    const uint64_t CXA_THROW_OFFSET = 0x51e108;
+                    const uint64_t CXA_RELAY = 0x3000040;  // code cave (after lua_resume relay)
+                    uint64_t cxa_throw_vaddr = load_addr + CXA_THROW_OFFSET;
+                    {
+                        uint8_t* orig_cxa = g_guest_memory + cxa_throw_vaddr;
+                        uint8_t* cave = g_guest_memory + CXA_RELAY;
+                        memcpy(cave, orig_cxa, 16);  // save first 4 instructions
+                        uint32_t* cave32 = (uint32_t*)(cave + 16);
+                        cave32[0] = 0x58000050;  // LDR X16, [PC, #8]
+                        cave32[1] = 0xD61F0200;  // BR X16
+                        *(uint64_t*)(cave32 + 2) = cxa_throw_vaddr + 16;  // jump past trampoline
+
+                        uint32_t* saved = (uint32_t*)cave;
+                        std::cout << "[SRE] __cxa_throw relay pre-saved at 0x" << std::hex
+                                  << CXA_RELAY << " (insns: " << saved[0] << " " << saved[1]
+                                  << " " << saved[2] << " " << saved[3] << ")" 
+                                  << std::dec << std::endl;
+                    }
+
+                    // Pre-save ProgramState::Update's first 16 bytes for relay stub.
+                    // sre_ProgramState_Update handles the timer/resume safely, then
+                    // calls g_orig_ProgramState_Update for the child iteration loop.
+                    // (Same approach as SwKiwi: handle resume in hook, call original
+                    // with isSuspended=0 so it skips the resume and only does children.)
+                    const uint64_t UPDATE_RELAY = 0x3000080;  // code cave (after cxa_throw relay)
+                    uint64_t update_vaddr = g_loader_64->get_symbol_vaddr(
+                        &g_main_mod_64, "_ZN5Caver12ProgramState6UpdateEf");
+                    if (update_vaddr) {
+                        uint8_t* orig_update = g_guest_memory + update_vaddr;
+                        uint8_t* cave = g_guest_memory + UPDATE_RELAY;
+                        memcpy(cave, orig_update, 16);  // save first 4 instructions
+                        uint32_t* cave32 = (uint32_t*)(cave + 16);
+                        cave32[0] = 0x58000050;  // LDR X16, [PC, #8]
+                        cave32[1] = 0xD61F0200;  // BR X16
+                        *(uint64_t*)(cave32 + 2) = update_vaddr + 16;
+
+                        uint32_t* saved = (uint32_t*)cave;
+                        std::cout << "[SRE] ProgramState::Update relay pre-saved at 0x" << std::hex
+                                  << UPDATE_RELAY << " (insns: " << saved[0] << " " << saved[1]
+                                  << " " << saved[2] << " " << saved[3] << ")"
+                                  << std::dec << std::endl;
+                    }
+
+                    // ========= GUI Relay Stubs (table-driven) =========
+                    // For each hooked GUI function, save the original's first
+                    // 16 bytes to a code cave so our hook can call-through.
+                    // Adding a new GUI hook = one line here + one in sre_init.c.
+                    struct GuiRelay {
+                        uint64_t nm_offset;      // offset in libswordigo.so
+                        const char* orig_sym;    // g_orig_* symbol in libsre.so
+                        uint64_t cave_addr;      // code cave address
+                    };
+                    GuiRelay gui_relays[] = {
+                        { 0x4a28bc, "g_orig_GUIWindow_DrawRect",    0x30000C0 },
+                        { 0x49f310, "g_orig_GUIView_DrawRect",      0x3000100 },
+                        { 0x49565c, "g_orig_GUIButton_DrawRect",    0x3000140 },
+                        { 0x497aa0, "g_orig_GUILabel_DrawRect",     0x3000180 },
+                        { 0x497658, "g_orig_GUIFrameView_DrawRect", 0x30001C0 },
+                        { 0x491b54, "g_orig_GUIAlertView_DrawRect", 0x3000200 },
+                        { 0x49cd40, "g_orig_GUISlider_DrawRect",    0x3000240 },
+                        { 0x42bae4, "g_orig_NewMenuView_DrawRect",  0x3000280 },
+                        { 0x393094, "g_orig_MainMenuView_ButtonPressed", 0x30002C0 },
+                        /* CreditsVC relays — DISABLED for v6, Options menu WIP.
+                        { 0x38d604, "g_orig_CreditsVC_LoadView",         0x3000300 },
+                        { 0x38d904, "g_orig_CreditsVC_ButtonPressed",    0x3000340 },
+                        */
+                    };
+                    for (auto& r : gui_relays) {
+                        uint64_t vaddr = g_main_mod_64.base_addr + r.nm_offset;
+                        uint8_t* orig = g_guest_memory + vaddr;
+                        uint8_t* cave = g_guest_memory + r.cave_addr;
+
+                        // Save first 4 instructions (16 bytes)
+                        memcpy(cave, orig, 16);
+                        // Append: LDR X16, [PC, #8]; BR X16; .quad target+16
+                        uint32_t* c32 = (uint32_t*)(cave + 16);
+                        c32[0] = 0x58000050;  // LDR X16, [PC, #8]
+                        c32[1] = 0xD61F0200;  // BR X16
+                        *(uint64_t*)(c32 + 2) = vaddr + 16;
+
+                        // Set g_orig_* in libsre.so
+                        uint64_t orig_addr = g_loader_64->get_symbol_vaddr(
+                            &g_sre_mod, r.orig_sym);
+                        if (orig_addr) {
+                            *(uint64_t*)(g_guest_memory + orig_addr) = r.cave_addr;
+                        }
+
+                        std::cout << "[SRE] Relay: " << r.orig_sym
+                                  << " @ 0x" << std::hex << r.cave_addr
+                                  << std::dec << std::endl;
+                    }
 
                     int installed = 0;
                     for (int i = 0; i < hook_count; i++) {
@@ -2130,6 +2372,26 @@ void load_and_boot_arm64() {
                         installed++;
                     }
 
+                    // Set g_original_cxa_throw to point to the relay stub
+                    uint64_t g_orig_cxa_addr = g_loader_64->get_symbol_vaddr(
+                        &g_sre_mod, "g_original_cxa_throw");
+                    if (g_orig_cxa_addr) {
+                        *(uint64_t*)(g_guest_memory + g_orig_cxa_addr) = CXA_RELAY;
+                        std::cout << "[SRE] g_original_cxa_throw → relay @ 0x" 
+                                  << std::hex << CXA_RELAY << std::dec << std::endl;
+                    }
+
+                    // Set g_orig_ProgramState_Update to point to the relay stub
+                    // This lets sre_ProgramState_Update call the original for
+                    // the child ProgramState iteration loop (entity AI, cleanup).
+                    uint64_t g_orig_update_addr = g_loader_64->get_symbol_vaddr(
+                        &g_sre_mod, "g_orig_ProgramState_Update");
+                    if (g_orig_update_addr && update_vaddr) {
+                        *(uint64_t*)(g_guest_memory + g_orig_update_addr) = UPDATE_RELAY;
+                        std::cout << "[SRE] g_orig_ProgramState_Update → relay @ 0x"
+                                  << std::hex << UPDATE_RELAY << std::dec << std::endl;
+                    }
+
                     std::cout << "[SRE] Installed " << installed << "/" << hook_count 
                               << " hooks successfully" << std::endl;
                 } else {
@@ -2155,6 +2417,26 @@ void load_and_boot_arm64() {
                 if (g_lua_console_buf_addr) {
                     g_lua_console_ready = true;
                     std::cout << "[SRE] Lua console ready! Press ` (backtick) to open" << std::endl;
+                }
+
+                // Resolve lua_resume error monitoring symbols
+                g_sre_resume_err_count_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_resume_err_count");
+                g_sre_resume_last_err_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_resume_last_err");
+                if (g_sre_resume_err_count_addr) {
+                    std::cout << "[SRE] lua_resume error monitoring active"
+                              << " (count=0x" << std::hex << g_sre_resume_err_count_addr
+                              << " msg=0x" << g_sre_resume_last_err_addr
+                              << std::dec << ")" << std::endl;
+                }
+
+                // Resolve __cxa_throw caller diagnostic symbols
+                g_sre_cxa_caller_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_cxa_throw_caller");
+                g_sre_cxa_unrecovered_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_cxa_throw_unrecovered");
+                if (g_sre_cxa_caller_addr) {
+                    std::cout << "[SRE] __cxa_throw caller diagnostics active"
+                              << " (caller=0x" << std::hex << g_sre_cxa_caller_addr
+                              << " count=0x" << g_sre_cxa_unrecovered_addr
+                              << std::dec << ")" << std::endl;
                 }
 
                 // ========= Background Renderer Setup =========
@@ -2185,6 +2467,119 @@ void load_and_boot_arm64() {
                               << " glDepthMask=0x" << bg_addrs[3]
                               << std::dec << std::endl;
                 }
+                
+                // ========= GUI Subsystem Setup =========
+                // Resolve SRE GUI init and pass all engine GUI function addresses
+                uint64_t sre_init_gui_addr = g_loader_64->get_symbol_vaddr(
+                    &g_sre_mod, "sre_init_gui");
+                if (sre_init_gui_addr) {
+                    // SreGuiAddrs struct: 49 × uint64_t = 392 bytes
+                    uint64_t gui_addrs_guest = 0x48200;
+                    uint64_t* ga = (uint64_t*)(g_guest_memory + gui_addrs_guest);
+                    uint64_t B = g_main_mod_64.base_addr;  // base for brevity
+                    
+                    // [0-12] RenderingContext
+                    ga[0]  = B + 0x48b184;  // SetProjectionMatrix
+                    ga[1]  = B + 0x48c6a0;  // FillRect(rect, color, alpha)
+                    ga[2]  = B + 0x48c9f8;  // DrawRect(rect, color, alpha)
+                    ga[3]  = B + 0x48b8d8;  // SetBlendingEnabled
+                    ga[4]  = B + 0x48b900;  // SetTexturingEnabled
+                    ga[5]  = B + 0x48b934;  // SetLightingEnabled
+                    ga[6]  = B + 0x48b990;  // SetDepthTestEnabled
+                    ga[7]  = B + 0x48b9b8;  // SetDepthWriteEnabled
+                    ga[8]  = B + 0x48b4bc;  // SetAlpha
+                    ga[9]  = B + 0x48bfa4;  // BindTexture
+                    ga[10] = B + 0x48c330;  // DrawArrays
+                    ga[11] = B + 0x48bcec;  // UseProgram
+                    ga[12] = B + 0x48c2bc;  // SetVertexAttribPointer
+                    ga[13] = 0;             // reserved
+                    
+                    // [14-19] FontText
+                    ga[14] = B + 0x4c66dc;  // Draw
+                    ga[15] = B + 0x4c53e4;  // AddText(str, fontSize, pos)
+                    ga[16] = B + 0x4c5124;  // Clear
+                    ga[17] = B + 0x4c5170;  // SetColor
+                    ga[18] = B + 0x4c6210;  // Translate
+                    ga[19] = B + 0x4c6280;  // AlignHorizontally
+                    
+                    // [20-22] GUILabel
+                    ga[20] = B + 0x497fdc;  // AddText(str)
+                    ga[21] = B + 0x4980fc;  // AddText(str, color)
+                    ga[22] = B + 0x497b54;  // UpdateText
+                    
+                    // [23-26] GUIButton
+                    ga[23] = B + 0x4950a4;  // Constructor(type)
+                    ga[24] = B + 0x495a74;  // SetTitle(str)
+                    ga[25] = B + 0x495b00;  // SetImage(str)
+                    ga[26] = B + 0x33f9e4;  // titleLabel()
+                    
+                    // [27-29] GUIView
+                    ga[27] = B + 0x49f5c8;  // SetFrame(rect)
+                    ga[28] = B + 0x49f6ec;  // AddSubview(shared_ptr)
+                    ga[29] = B + 0x49fa60;  // RemoveFromSuperview
+                    
+                    // [30-33] GUIWindow
+                    ga[30] = B + 0x4a21ec;  // mainWindow()
+                    ga[31] = B + 0x4a31b4;  // PresentModalView(shared_ptr, bool)
+                    ga[32] = B + 0x4a3540;  // DismissModalView(view)
+                    ga[33] = B + 0x4a3590;  // Dismiss
+                    
+                    // [34-36] GUIAlertView
+                    ga[34] = B + 0x490628;  // SetTitle(str)
+                    ga[35] = B + 0x490850;  // SetMessage(str)
+                    ga[36] = B + 0x490bf4;  // AddButton(shared_ptr)
+                    
+                    // [37-43] GameInterfaceBuilder
+                    ga[37] = B + 0x33ea24;  // NormalLabel(str, color, color)
+                    ga[38] = B + 0x33ee2c;  // SmallLabel(str, color, color)
+                    ga[39] = B + 0x33ff98;  // FramedButtonWithTitle(str, bool)
+                    ga[40] = B + 0x340504;  // MainMenuButtonWithTitle(str)
+                    ga[41] = B + 0x3408e0;  // AlertView(str, str, int, str*, int)
+                    ga[42] = B + 0x341108;  // Slider(float, float)
+                    ga[43] = B + 0x34188c;  // Switch()
+                    
+                    // [44-45] TextureLibrary
+                    ga[44] = B + 0x4cc308;  // sharedLibrary()
+                    ga[45] = B + 0x4cc494;  // TextureForName(str, bool)
+                    
+                    // [46-48] FontLibrary
+                    ga[46] = B + 0x4c33b0;  // sharedLibrary()
+                    ga[47] = B + 0x4c4364;  // DefaultFont()
+                    ga[48] = B + 0x4c44a8;  // SmallDefaultFont()
+                    
+                    g_emulator_64->call(sre_init_gui_addr, {gui_addrs_guest});
+                    std::cout << "[SRE] GUI subsystem initialized (49 functions resolved)"
+                              << std::endl;
+                }
+                
+                // === Native GUI init (GUIRoundedRect, GUITexturedRect, GL) ===
+                uint64_t sre_init_gui_native_addr = g_loader_64->get_symbol_vaddr(
+                    &g_sre_mod, "sre_init_gui_native");
+                if (sre_init_gui_native_addr) {
+                    // SreGuiNativeAddrs: 6 x uint64_t = 48 bytes
+                    uint64_t native_addrs_guest = 0x3001000;
+                    uint64_t* na = (uint64_t*)(g_guest_memory + native_addrs_guest);
+                    uint64_t B = g_main_mod_64.base_addr;
+                    na[0] = B + 0x4a9c2c;  // GUIRoundedRect::Draw
+                    na[1] = B + 0x4a9bdc;  // GUIRoundedRect::SetColor
+                    na[2] = B + 0x4ab308;  // GUITexturedRect::Draw
+                    na[3] = 0;  // glEnable — PLT TBD, scissor optional
+                    na[4] = 0;  // glDisable — PLT TBD, scissor optional
+                    na[5] = 0;  // glScissor — PLT TBD, scissor optional
+                    g_emulator_64->call(sre_init_gui_native_addr, {native_addrs_guest});
+                    std::cout << "[SRE] Native GUI renderer initialized (3 draw + 0 GL)"
+                              << std::endl;
+                }
+
+                
+                // Resolve GUI overlay state addresses
+                static uint64_t gui_overlay_addr = 0;
+                static uint64_t gui_screen_w_addr = 0;
+                static uint64_t gui_screen_h_addr = 0;
+                gui_overlay_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_gui_overlay_enabled");
+                gui_screen_w_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_gui_screen_w");
+                gui_screen_h_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_gui_screen_h");
+
                 
                 // Resolve bg_mode address for F11 toggle
                 bg_mode_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_bg_mode");
@@ -3000,6 +3395,27 @@ void load_and_boot_arm64() {
 
             extern int g_gl_diag_frame;
             g_gl_diag_frame++;
+
+            // Render SRT overlay (inventory editor, etc.) — F11 toggle
+            if (g_display_active && g_srt_overlay.is_visible()) {
+                // Convert sustained mouse_pressed to single-frame click
+                static bool overlay_prev_pressed = false;
+                bool overlay_click = mouse_pressed && !overlay_prev_pressed;
+                overlay_prev_pressed = mouse_pressed;
+                
+                glPushAttrib(GL_ALL_ATTRIB_BITS);
+                glViewport(0, 0, g_draw_w, g_draw_h);
+                glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+                glOrtho(0, g_win_w, 0, g_win_h, -1, 1);
+                glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+                glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
+                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                g_srt_overlay.render(g_gui, g_win_w, g_win_h,
+                                      mouse_x, mouse_y,
+                                      overlay_click, dt_seconds);
+                glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix();
+                glPopAttrib();
+            }
             
             // Present the frame
             if (g_display_active && g_display_ptr) {
@@ -3121,9 +3537,14 @@ void load_and_boot_arm64() {
                                 }
                                 break;
                             }
-                            // F11 — FREE for experimental features
-                            // (was: bg mode cycle / brightness toggle debug)
-                            
+                            // F11 — SRT Overlay (Inventory Editor)
+                            if (event.key.key == SDLK_F11 && !event.key.repeat) {
+                                /* v6: SRT overlay disabled — WIP.
+                                g_srt_overlay.toggle();
+                                std::cout << "[SRT Overlay] " << (g_srt_overlay.is_visible() ? "ON" : "OFF") << std::endl;
+                                */
+                                break;
+                            }
                             // N — Time of Day cycle: Day → Afternoon → Night → Day
                             if (event.key.key == SDLK_N && !event.key.repeat && !g_typing_mode && !g_lua_console_open) {
                                 // 0=Day, 1=Afternoon, 2=Night
@@ -3448,6 +3869,9 @@ void load_and_boot_arm64() {
                                         } break;
                                         default: break;
                                     }
+                                } else if (g_srt_overlay.is_visible()) {
+                                    // Overlay is open — swallow click, don't send to game
+                                    click_swallowed_by_gui = true;
                                 } else {
                                     click_swallowed_by_gui = false;
                                     float x = event.button.x * 960.0f / (float)g_win_w;
@@ -3464,7 +3888,7 @@ void load_and_boot_arm64() {
                                 float gx = event.motion.x * 960.0f / (float)g_win_w;
                                 float gy = 544.0f - (event.motion.y * 544.0f / (float)g_win_h);
                                 g_input_config.editor_mouse_move(gx, gy);
-                            } else if (mouse_pressed && !click_swallowed_by_gui) {
+                            } else if (mouse_pressed && !click_swallowed_by_gui && !g_srt_overlay.is_visible()) {
                                 float x = event.motion.x * 960.0f / (float)g_win_w;
                                 float y = 544.0f - (event.motion.y * 544.0f / (float)g_win_h);
                                 call_touch_64(4, 1, accumulated_time, x, y, last_mouse_x, last_mouse_y, 0);
@@ -3478,7 +3902,7 @@ void load_and_boot_arm64() {
                                 mouse_y = g_win_h - event.button.y;
                                 if (g_input_config.is_editing()) {
                                     g_input_config.editor_mouse_up();
-                                } else if (!click_swallowed_by_gui) {
+                                } else if (!click_swallowed_by_gui && !g_srt_overlay.is_visible()) {
                                     float x = event.button.x * 960.0f / (float)g_win_w;
                                     float y = 544.0f - (event.button.y * 544.0f / (float)g_win_h);
                                     call_touch_64(2, 1, accumulated_time, x, y, last_mouse_x, last_mouse_y, 0);
@@ -3614,6 +4038,37 @@ void load_and_boot_arm64() {
                           << " tex_binds=" << g_frame_stats.texture_binds
                           << std::endl;
                 draw_batcher_print_stats();
+            }
+
+            // Poll lua_resume error counter from SRE
+            if (g_sre_resume_err_count_addr) {
+                int count = *(int32_t*)(g_guest_memory + g_sre_resume_err_count_addr);
+                if (count > g_sre_resume_err_last_seen) {
+                    std::string err_msg = "(unknown)";
+                    if (g_sre_resume_last_err_addr) {
+                        const char* msg = (const char*)(g_guest_memory + g_sre_resume_last_err_addr);
+                        if (msg[0]) err_msg = msg;
+                    }
+                    std::cerr << "[SRE] lua_resume error #" << count
+                              << " (frame " << completed_frames << "): "
+                              << err_msg << std::endl;
+                    g_sre_resume_err_last_seen = count;
+                }
+            }
+
+            // Poll __cxa_throw unrecovered caller from SRE
+            if (g_sre_cxa_unrecovered_addr) {
+                int count = *(int32_t*)(g_guest_memory + g_sre_cxa_unrecovered_addr);
+                if (count > g_sre_cxa_last_seen) {
+                    uint64_t caller = *(uint64_t*)(g_guest_memory + g_sre_cxa_caller_addr);
+                    uint64_t nm_offset = caller > 0x1000000 ? caller - 0x1000000 : caller;
+                    std::cerr << "[SRE] !! __cxa_throw UNRECOVERED #" << count
+                              << " (frame " << completed_frames << ")"
+                              << " caller=0x" << std::hex << caller
+                              << " (nm offset 0x" << nm_offset << ")"
+                              << std::dec << std::endl;
+                    g_sre_cxa_last_seen = count;
+                }
             }
             
             if (TARGET_FRAMES > 0 && completed_frames >= TARGET_FRAMES) running = false;

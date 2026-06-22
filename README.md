@@ -9,8 +9,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20x86__64-purple.svg)](#)
-[![Version](https://img.shields.io/badge/Version-v5.0-00e5ff.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases)
-[![Engine](https://img.shields.io/badge/Engine-SRT%20v5.0-8b3dff.svg)](#-srt-architecture)
+[![Version](https://img.shields.io/badge/Version-v6.0-00e5ff.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases)
+[![Engine](https://img.shields.io/badge/Engine-SRT%20v6.0-8b3dff.svg)](#-srt-architecture)
 
 [Website](https://thecorrectsynovian.github.io/SwordigoDesktop/web/) · [Download](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases) · [Research](https://thecorrectsynovian.github.io/SwordigoDesktop/web/research.html) · [Changelog](https://thecorrectsynovian.github.io/SwordigoDesktop/web/changelog.html)
 
@@ -20,7 +20,7 @@
 
 **Swordigo Desktop** is a native Linux port of the beloved mobile action-adventure platformer by Touch Foo. Rather than running through Android emulation layers, this project uses the **Swordigo Runtime (SRT)** — a layered runtime architecture that treats `libswordigo.so` as a gameplay kernel while progressively replacing subsystems with clean, native reimplementations.
 
-v5.0 introduces **libsre.so** — the Swordigo Runtime Engine — a guest-side ARM64 library that hooks directly into the game binary, replacing entire subsystems (music, HUD, death/respawn, backgrounds) with clean C reimplementations. This isn't patching. It's owning.
+v6.0 brings **libsre.so** to 30+ hooks with a **full GUI stack** — buttons, labels, frames, and sliders rendered natively in C through 8 DrawRect hooks, plus an integrated save editor, asset viewer, and crash interception for Lua and C++ exceptions. This isn't patching. It's owning.
 
 ---
 
@@ -44,7 +44,7 @@ v5.0 introduces **libsre.so** — the Swordigo Runtime Engine — a guest-side A
 │      ARMv7 (VFP) + ARM64 (AArch64)                            │
 ├───────────────────────────────────────────────────────────────┤
 │  🏗️  libsre.so — Swordigo Runtime Engine (Guest ARM64)       │
-│      17 active hooks · Music · HUD · Death · Backgrounds     │
+│      30+ active hooks · GUI · Music · HUD · Death · Saves    │
 │      Replaces subsystems, not patches them                    │
 ├───────────────────────────────────────────────────────────────┤
 │  📜  libswordigo.so — Gameplay Kernel (Original ARM Binary)   │
@@ -61,7 +61,7 @@ v5.0 introduces **libsre.so** — the Swordigo Runtime Engine — a guest-side A
 | **Bridge** | JNI Bridge (200+ functions) | Translates ARM JNI calls to host APIs |
 | **Loader** | ELF Loader (ARM32 + ARM64) | Parses, relocates, loads ARM shared objects |
 | **Emulator** | Unicorn Engine | Executes ARM instructions on x86_64 |
-| **SRE** | libsre.so (17 hooks) | **Replaces** game subsystems with clean C |
+| **SRE** | libsre.so (30+ hooks) | **Replaces** game subsystems with clean C |
 | **Kernel** | libswordigo.so | Original game: physics, AI, Lua, combat |
 
 ### 🏗️ SRE — What It Owns
@@ -76,6 +76,10 @@ v5.0 introduces **libsre.so** — the Swordigo Runtime Engine — a guest-side A
 | 🔴 Damage Flash | **Owned** | Red screen flash on HP decrease |
 | 📊 Player Stats | **Exported** | HP, Mana, Coins, XP, Level, ATK — readable from host |
 | 🧵 String System | **Replaced** | 4 hooks eliminate atomic STXR spin loops |
+| 🖼️ GUI Rendering | **Fully replaced** | 8 DrawRect hooks — buttons, labels, frames, sliders natively in C |
+| 💾 Save Editor | **Integrated** | Built into launcher — edit coins, HP, mana, XP, weapons, keys |
+| 🔍 Asset Viewer | **New tool** | Browse PVR/PNG textures, audio, scenes (`make asset_viewer`) |
+| 🛡️ Crash Safety | **Active** | luaD_throw + ProgramPanic + __cxa_throw interception |
 
 ---
 
@@ -111,6 +115,7 @@ v5.0 introduces **libsre.so** — the Swordigo Runtime Engine — a guest-side A
 | **F6** | Cycle PostFX presets |
 | **F7** | Typing mode |
 | **F10** | Toggle native on-screen controls |
+| **F11** | *Reserved (v7)* |
 | **F12** | Fullscreen toggle |
 
 ### 🚀 SRT Launcher
@@ -121,13 +126,13 @@ v5.0 introduces **libsre.so** — the Swordigo Runtime Engine — a guest-side A
 
 ---
 
-## 📦 Install (v5.0)
+## 📦 Install (v6.0)
 
 ### Pre-built Packages
 | Format | Platform | Command |
 |--------|----------|---------|
-| `.rpm` | Fedora x86_64 | `sudo dnf install swordigo-desktop-5.0.0-1.x86_64.rpm` |
-| `.deb` | Debian/Ubuntu x86_64 | `sudo dpkg -i swordigo-desktop_5.0.0-1_amd64.deb` |
+| `.rpm` | Fedora x86_64 | `sudo dnf install swordigo-desktop-6.0.0-1.x86_64.rpm` |
+| `.deb` | Debian/Ubuntu x86_64 | `sudo dpkg -i swordigo-desktop_6.0.0-1_amd64.deb` |
 
 ### Build from Source
 
@@ -184,8 +189,9 @@ All controls are fully remappable — press **F2** to open the Controls Editor. 
 ### ARM64 (arm64-v8a) — Primary Target
 | Issue | Severity | Details |
 |-------|----------|---------|
-| Wastelands freeze | 🔴 High | Game spinlocks in Wastelands. Use ARM32 for this region. |
+| Bolt/timer misbehavior | 🟡 Medium | Timing misalignment causes certain bosses, bolt-shooting enemies, and bolt traps to fire at abnormal rates. Some sword enemies behave differently from Android. Will be patched. |
 | Heavy function stalls | 🟡 Medium | Some entity functions take 800ms+ in dungeon areas |
+| Text input crash | 🟡 Medium | Typing into certain UI fields can crash — avoid F7 in menus |
 
 ### ARM32 (armeabi-v7a)
 | Issue | Severity | Details |
@@ -194,28 +200,30 @@ All controls are fully remappable — press **F2** to open the Controls Editor. 
 | Boss gates | 🔴 High | Post-boss gates don't trigger |
 | No SRE | 🟡 Medium | libsre.so only supports ARM64 — ARM32 runs without engine hooks |
 
+### ✅ Resolved in v6.0
+| Issue | Was | Fix |
+|-------|-----|-----|
+| **Wastelands spinlock** | 🔴 Game-breaking freeze | ARM64 emulation fix — plays through normally now |
+| **Death freeze** | 🔴 Permanent hang on death | SRE intercepts death handler → instant checkpoint respawn |
+
 ---
 
-## 🆕 What's New in v5.0
+## 🆕 What's New in v6.0
 
-### libsre.so — The Runtime Engine
-- **17 active hooks** replacing entire subsystems in `libswordigo.so`
-- **Full music system** — MusicPlayer replaced with clean OpenAL command interface
-- **Death/respawn** — instant checkpoint respawn, no ads, no process restart
-- **HUD system** — GameSceneView::Update fully reimplemented in C
-- **Smart coin bar** — shop-aware auto-hide with world-change detection
-- **Background rendering** — 3 custom hooks for sky/parallax
+### Full GUI Stack
+- **30+ active hooks** — up from 17 in v5.0
+- **8 DrawRect hooks** replace the game's GUI rendering — buttons, labels, frames, and sliders drawn natively in C
+- **Wastelands freeze fixed** — the 🔴 High severity ARM64 spinlock is resolved
 
-### Runtime Intelligence
-- **Player stats exported** — HP, Mana, Coins, XP, Level, ATK visible in F3 overlay
-- **GameState pointer** — host can read/write game state directly
-- **Version-gated SRE** — only loads for v1.4.12 ARM64, safe for other binaries
+### New Tools
+- **Save Editor** — built into the launcher, edit coins, HP, mana, XP, weapons, and keys
+- **Asset Viewer** — browse PVR/PNG textures, audio files, and scene data (`make asset_viewer`)
 
-### Quality of Life
-- **Music loop watchdog** — detects and restarts looping music that stops
-- **Non-atomic string ops** — eliminates STXR spin loops that cause hangs
-- **Lua error recovery** — setjmp/longjmp safety net for script crashes
-- **Clean mod menu** — only functional tools exposed (Speed, Pause, Camera)
+### Crash Safety
+- **luaD_throw interception** — Lua script errors no longer crash the process
+- **ProgramPanic + __cxa_throw** — C++ exceptions and engine panics caught and handled
+
+> See [v6.0 Release Notes](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/tag/v6.0) for full details.
 
 ---
 

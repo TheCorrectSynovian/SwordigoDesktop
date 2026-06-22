@@ -149,10 +149,71 @@ static void recovery_pop(int depth) {
     g_sre_recovery_depth = depth;
 }
 
+/* ========== luaD_throw hook ==========
+ * Original: luaD_throw at nm offset 0x4eb814
+ * 
+ * This is the ROOT of ALL Lua error handling. Every Lua error goes through
+ * luaD_throw(L, errcode). The original has two paths:
+ * 
+ * Path A (L->errorJmp != NULL):
+ *   errorJmp->status = errcode;
+ *   __cxa_throw(lua_longjmp*, typeinfo, 0);
+ *   // Caught by lua_resume's try/catch in native builds
+ *   // But __cxa_throw crashes in Unicorn (no C++ unwinding)
+ *
+ * Path B (L->errorJmp == NULL):
+ *   L->status = errcode;
+ *   ProgramPanic(L);   // throws __cxa_throw(int) — crashes
+ *   exit(1);           // kills host
+ *
+ * Our replacement: use the SRE recovery stack (setjmp/longjmp) instead
+ * of C++ exceptions. This handles ALL Lua errors safely.
+ */
+void sre_luaD_throw(lua_State* L, int errcode) {
+    /* Check if there's a Lua error handler (errorJmp) */
+    void** ejp = (void**)((char*)L + LUA_ERRORJMP_OFFSET);
+    void* errorJmp = *ejp;
+    
+    if (errorJmp) {
+        /* Path A: errorJmp exists — set status field.
+         * errorJmp is a struct { status at offset +12 (int) }
+         * From disasm: str w20, [x8, #12] where x8 = errorJmp */
+        *(int*)((char*)errorJmp + 12) = errcode;
+    } else {
+        /* Path B: no errorJmp — set L->status directly.
+         * From disasm: strb w20, [x19, #10] where x19 = L */
+        *((char*)L + 10) = (char)errcode;
+    }
+    
+    /* Use SRE recovery stack to longjmp back to the nearest safe point
+     * (sre_lua_resume_safe, sre_ProgramState_Update, etc.) */
+    if (g_sre_recovery_depth > 0) {
+        int target = g_sre_recovery_depth - 1;
+        sre_recovery_entry* entry = &g_sre_recovery_stack[target];
+        
+        /* Restore saved errorJmp for this recovery level */
+        if (entry->lua_state) {
+            void** saved_ejp = (void**)((char*)entry->lua_state + LUA_ERRORJMP_OFFSET);
+            *saved_ejp = entry->saved_errorJmp;
+        }
+        
+        sre_longjmp(entry->buf, 1);
+        /* never reaches here */
+    }
+    
+    /* No recovery point — just return. The calling code (lua_resume,
+     * lua_pcall, etc.) will see the error status and handle it.
+     * This is imperfect but prevents the crash. */
+}
+
 void sre_lua_call_safe(lua_State* L, int nargs, int nresults) {
     if (!g_lua_pcall) {
         return;
     }
+
+    /* Lazy Mini.* injection — injects on first call per lua_State */
+    extern void sre_mini_ensure_injected(lua_State* L);
+    sre_mini_ensure_injected(L);
     
     /* Save stack top for recovery */
     int saved_top = 0;
@@ -205,6 +266,79 @@ void sre_lua_call_safe(lua_State* L, int nargs, int nresults) {
             }
         }
     }
+}
+
+/* ========== sre_lua_resume_safe — PROTECTED lua_resume wrapper ==========
+ *
+ * Unlike sre_lua_call_safe (which replaces lua_call entirely with pcall),
+ * this function wraps the ORIGINAL lua_resume with setjmp recovery.
+ *
+ * The host patches all BL instructions in libswordigo.so that target
+ * lua_resume to instead target this function. The original lua_resume
+ * function bytes are NOT modified — g_lua_resume still works.
+ *
+ * This catches Lua errors from:
+ *   - ProgramState::Update (timer-based coroutine resumption) — THE WASTELANDS FIX
+ *   - ProgramState::ExecuteString (console/debug)
+ *   - coroutine.resume helper (FUN_005fb6b4)
+ *   - Any other engine code that calls lua_resume
+ *
+ * ProgramState::Execute and ::Resume are already hooked with their own
+ * recovery, but those go through g_lua_resume (function pointer), not
+ * BL, so there's no double-wrapping.
+ */
+static int g_lua_resume_safe_errors = 0;
+
+/* Shared error state — host can read these via symbol lookup */
+int g_sre_resume_err_count = 0;
+char g_sre_resume_last_err[256] = {0};
+
+static void capture_lua_error(lua_State* L) {
+    if (!g_lua_tolstring) return;
+    size_t len = 0;
+    const char* err = g_lua_tolstring(L, -1, &len);
+    if (err) {
+        int i;
+        for (i = 0; err[i] && i < 255; i++)
+            g_sre_resume_last_err[i] = err[i];
+        g_sre_resume_last_err[i] = 0;
+    }
+}
+
+int sre_lua_resume_safe(lua_State* L, int narg) {
+    if (!g_lua_resume) {
+        /* Should never happen — lua_resume not resolved */
+        return 2;  /* LUA_ERRRUN */
+    }
+
+    int my_depth = recovery_push(L);
+    if (my_depth < 0) {
+        /* Recovery stack full — call without protection (fallback) */
+        return g_lua_resume(L, narg);
+    }
+
+    if (sre_setjmp(g_sre_recovery_stack[my_depth].buf) != 0) {
+        /* Caught C++ exception via longjmp from sre_cxa_throw!
+         * The coroutine threw a Lua error during resume.
+         * errorJmp was already restored by sre_cxa_throw. */
+        recovery_pop(my_depth);
+        g_lua_resume_safe_errors++;
+        g_sre_resume_err_count++;
+        /* Try to get the error message from the Lua stack */
+        capture_lua_error(L);
+        return 2;  /* LUA_ERRRUN */
+    }
+
+    int result = g_lua_resume(L, narg);
+    recovery_pop(my_depth);
+
+    /* Also capture errors from normal lua_resume return (non-exception path) */
+    if (result >= 2) {
+        g_sre_resume_err_count++;
+        capture_lua_error(L);
+    }
+
+    return result;
 }
 /* ========== Lua Console — in-engine Lua code execution ==========
  * 
@@ -341,6 +475,10 @@ void sre_ProgramState_Execute(void* self, int stackIndex) {
     
     /* Capture the lua_State for the host and console */
     g_sre_last_lua_state = L;
+
+    /* Lazy Mini.* injection — ensure mod API exists before script runs */
+    extern void sre_mini_ensure_injected(lua_State* L);
+    sre_mini_ensure_injected(L);
     
     /* Check for pending console command */
     if (g_lua_console_pending && L) {
@@ -394,6 +532,10 @@ void sre_ProgramState_Execute(void* self, int stackIndex) {
  */
 void sre_ProgramState_Resume(void* self, int stackIndex) {
     lua_State* L = PS_GET(self, PS_LUA_STATE, lua_State*);
+
+    /* Lazy Mini.* injection for coroutine states */
+    extern void sre_mini_ensure_injected(lua_State* L);
+    sre_mini_ensure_injected(L);
     
     /* Clear suspended flag */
     PS_SET(self, PS_IS_SUSPENDED, int, 0);
@@ -492,9 +634,24 @@ void sre_ProgramState_Update(void* self, float deltaTime) {
         }
     }
     
-    /* Call original for the remaining logic (SceneObject iteration etc.)
-     * We've already cleared isSuspended, so the original won't re-run the timer. */
+    /* Call original for the remaining logic (child ProgramState iteration).
+     * We've already cleared isSuspended, so the original won't re-run the
+     * timer/resume. But the child cleanup code (shared_ptr destructors,
+     * list unlink) can throw C++ exceptions, so wrap with recovery. */
     if (g_orig_ProgramState_Update != 0) {
-        g_orig_ProgramState_Update(self, deltaTime);
+        lua_State* L2 = PS_GET(self, PS_LUA_STATE, lua_State*);
+        int orig_depth = recovery_push(L2);
+        if (orig_depth < 0) {
+            /* Stack full — call without protection */
+            g_orig_ProgramState_Update(self, deltaTime);
+        } else if (sre_setjmp(g_sre_recovery_stack[orig_depth].buf) != 0) {
+            /* Caught exception from child iteration/cleanup */
+            recovery_pop(orig_depth);
+            /* Mark this state as completed so it gets cleaned up */
+            PS_SET(self, PS_COMPLETED, char, 1);
+        } else {
+            g_orig_ProgramState_Update(self, deltaTime);
+            recovery_pop(orig_depth);
+        }
     }
 }

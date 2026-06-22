@@ -185,13 +185,25 @@ void sre_WeaponGlowComponent_Draw(void* self, void* ctx, void* matrix_ref, void*
  * Fix: pop the most recent recovery entry from our stack and longjmp to it.
  * Each entry was pushed by sre_lua_call_safe, sre_ProgramState_Execute, etc.
  *
- * CRITICAL: __cxa_throw is [[noreturn]]. If we can't recover, BRK out.
+ * When recovery_depth > 0: longjmp to recovery (Lua error handling).
+ * When recovery_depth == 0: call ORIGINAL __cxa_throw so the engine's
+ * own C++ try/catch blocks can process the exception normally.
+ * This is critical for ProgramState::Update which has try/catch around
+ * its child iteration — without this, Wastelands crashes.
  */
 #include "sre_setjmp.h"
 
 /* Recovery stack — defined in sre_lua.c */
 extern sre_recovery_entry g_sre_recovery_stack[];
 extern int g_sre_recovery_depth;
+
+/* Pointer to original __cxa_throw (set by host via relay stub) */
+typedef void (*pfn_cxa_throw)(void*, void*, void(*)(void*));
+pfn_cxa_throw g_original_cxa_throw = 0;
+
+/* Diagnostic — capture caller address when recovery fails */
+unsigned long long g_sre_cxa_throw_caller = 0;  /* LR of whoever called __cxa_throw */
+int g_sre_cxa_throw_unrecovered = 0;  /* count of unrecovered throws */
 
 void sre_cxa_throw(void* thrown_exception, void* tinfo, void(*dest)(void*)) {
     if (g_sre_recovery_depth > 0) {
@@ -208,9 +220,52 @@ void sre_cxa_throw(void* thrown_exception, void* tinfo, void(*dest)(void*)) {
         sre_longjmp(entry->buf, 1);
         /* never reaches here */
     }
-    /* No recovery point — MUST NOT return!
-     * Trigger immediate CPU exception via BRK. */
-    asm volatile("brk #0xDEAD");
-    for (;;) {} /* unreachable */
+
+    /* No recovery point — capture caller info for diagnostics */
+    unsigned long long lr;
+    asm volatile("mov %0, x30" : "=r"(lr));
+    g_sre_cxa_throw_caller = lr;
+    g_sre_cxa_throw_unrecovered++;
+
+    /* Instead of BRK (which freezes the game permanently), just return.
+     * __cxa_throw is [[noreturn]] but the ARM64 code after the BL has
+     * instructions that continue execution. The calling code (luaD_throw)
+     * will proceed to call ProgramPanic (which we've hooked to be safe)
+     * and then exit(1) (which we've made non-fatal). */
+    return;
 }
 
+/* ========== ProgramPanic hook ==========
+ * Original: Caver::ProgramPanic at nm offset 0x5c0ab4
+ *
+ * This is the lua_atpanic handler registered by ProgramState's constructor.
+ * Called by luaD_throw when L->errorJmp == NULL (no protected call frame).
+ * 
+ * Original code:
+ *   int* ex = __cxa_allocate_exception(4);
+ *   *ex = 0;
+ *   __cxa_throw(ex, &int::typeinfo, 0);
+ *
+ * This throws a C++ int exception → sre_cxa_throw → BRK (crash).
+ *
+ * Our replacement: if recovery stack is available, use sre_cxa_throw
+ * directly (which will longjmp). If not, just return — luaD_throw
+ * will call exit(1), which the host can intercept via JNI bridge.
+ */
+int g_sre_panic_count = 0;  /* diagnostic counter */
+
+int sre_ProgramPanic(void* L) {
+    g_sre_panic_count++;
+    
+    /* If we have a recovery point, trigger it through sre_cxa_throw.
+     * sre_cxa_throw will longjmp to the nearest setjmp point. */
+    if (g_sre_recovery_depth > 0) {
+        /* Trigger recovery — this does NOT return */
+        sre_cxa_throw((void*)0, (void*)0, (void(*)(void*))0);
+        /* unreachable */
+    }
+
+    /* No recovery available. Return 0 — luaD_throw will call exit(1).
+     * This is better than crashing via __cxa_throw → BRK. */
+    return 0;
+}
