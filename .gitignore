@@ -139,3 +139,7 @@ docs/research/vita/*.zip
 generate_poc.py
 # -------- TRASH / ARCHIVED SNAPSHOTS --------
 trash/
+
+# Instance scripts (local only)
+instx.sh
+cache/instx.sh
