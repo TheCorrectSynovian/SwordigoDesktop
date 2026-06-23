@@ -1,4 +1,4 @@
-// Force rebuild: PostFXState struct changed in fbo_scaler.h
+// Swordigo Desktop v6.5 — MegineBraine
 #ifndef _WIN32
 #include <unistd.h>
 #else
