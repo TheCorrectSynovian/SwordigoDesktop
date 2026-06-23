@@ -2,7 +2,7 @@
 set -e
 
 # ============================================================
-# Swordigo Desktop v6.0 — Vanilla Package Builder
+# Swordigo Desktop v6.5 — Vanilla Package Builder
 # ============================================================
 # Builds RPM and/or DEB with ALL runtime files included.
 # No external downloads, no tar archives — everything is
@@ -38,7 +38,7 @@ set -e
 # ============================================================
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="6.0.0"
+VERSION="6.5.0"
 RELEASE="1"
 ARCH="x86_64"
 BUILD_DIR="/tmp/swordigo-packaging"
@@ -53,7 +53,7 @@ SHIP_VERSIONS=("v1.4.6" "v1.4.12")
 FORMAT="${1:-all}"     # rpm | deb | all
 
 echo "============================================"
-echo " Swordigo Desktop v6.0 — Package Builder"
+echo " Swordigo Desktop v6.5 — Package Builder"
 echo "============================================"
 echo "  Format: $FORMAT"
 echo "  Repo:   $ROOT_DIR"
@@ -268,7 +268,7 @@ Icon=swordigo-desktop
 Terminal=false
 Type=Application
 Categories=Game;ActionGame;AdventureGame;
-Comment=Swordigo Desktop v6.0 — Native Linux runtime
+Comment=Swordigo Desktop v6.5 — Native Linux runtime
 Keywords=swordigo;game;rpg;adventure;
 StartupWMClass=Swordigo
 EOF
@@ -363,7 +363,7 @@ build_rpm() {
 Name:           ${PKG_NAME}
 Version:        ${VERSION}
 Release:        ${RELEASE}
-Summary:        Swordigo Desktop v6.0 — Native Linux runtime
+Summary:        Swordigo Desktop v6.5 — Native Linux runtime
 License:        MIT
 Group:          Amusements/Games
 URL:            https://github.com/TheCorrectSynovian/SwordigoDesktop
@@ -371,10 +371,11 @@ AutoReq:        no
 AutoProv:       no
 
 %description
-Swordigo Desktop v6.0 — Native Linux runtime for Swordigo.
-ARM emulation via Unicorn Engine. SDL3, OpenGL, OpenAL.
-30+ SRE hooks replacing GUI, music, HUD, death/respawn.
+Swordigo Desktop v6.5 — Native Linux runtime for Swordigo.
+ARM emulation via Unicorn Engine. SDL3, OpenGL/Vulkan, OpenAL.
+34+ SRE hooks, ImGui launcher, Lua scripting API (Mini/LNI).
 PostFX pipeline, save editor, asset viewer, gamepad support.
+Complete modding API documentation (22 files, 414KB).
 Includes all game assets, engine binaries, and music.
 
 %install
@@ -397,12 +398,15 @@ fi
 
 %changelog
 * $(date +'%a %b %d %Y') QuantumCreeper <quantumcreeper@gmail.com> - ${VERSION}-${RELEASE}
-- v6.0 Release
-- FIXED: Wastelands spinlock (game-breaking freeze)
-- FIXED: Death freeze (instant checkpoint respawn via SRE)
-- SRE: 30+ hooks replacing GUI, music, HUD, death/respawn
-- Full GUI DrawRect stack, smart coin bar, damage flash
-- Save Editor, Asset Viewer, PostFX 6 presets
+- v6.5 Release — Complete Modding API Documentation
+- NEW: modapi/ — 22-file documentation suite (414KB)
+- NEW: Vulkan renderer backend (GLES 1.x emulation)
+- NEW: Graphics API in F3 debug overlay
+- NEW: ImGui launcher with background, icons, mod management
+- NEW: sre_mod.c — mod config shared memory protocol
+- SRE: 34+ hooks, Mini/LNI Lua API, standard library extensions
+- PostFX: 8 presets, 30+ parameters
+- Asset viewer, save editor, gamepad support
 - All assets, engine binaries, and music bundled
 SPEC
 
@@ -442,13 +446,13 @@ Section: games
 Priority: optional
 Architecture: amd64
 Maintainer: QuantumCreeper <quantumcreeper@gmail.com>
-Description: Swordigo Desktop v6.0 — Native Linux runtime
+Description: Swordigo Desktop v6.5 — Native Linux runtime
  Complete Swordigo Desktop with all game assets, engine binaries,
  music, and tools. Installs to ~/.local/share/swordigo-desktop/
  for full user access (Minecraft-style data management).
  .
- v6.0: Wastelands fix, death respawn, 30+ SRE hooks, GUI stack,
- save editor, asset viewer, PostFX, gamepad support.
+ v6.5: Complete modding API docs, Vulkan backend, ImGui launcher,
+ 34+ SRE hooks, Lua scripting, PostFX, save editor, asset viewer.
 Homepage: https://github.com/TheCorrectSynovian/SwordigoDesktop
 CTRL
 
