@@ -260,6 +260,15 @@ All controls are fully remappable — press **F2** to open the Controls Editor. 
 
 ---
 
+## ⚠️ Known Issues
+
+| Issue | Status | Workaround |
+|-------|--------|------------|
+| **Set Name glitch** — Clicking the save slot name field causes visual glitches (text field rendering is broken due to corrupt vtable in emulated binary) | 🔧 Mitigated | Press **Escape** or **Enter** to auto-recover. The game will navigate back to the save selection screen. Default save name ("Player") will be used. |
+| ~~**AI/Bolt behavior**~~ — Enemies and bolt traps behaved erratically | ✅ Fixed | Root cause: redundant `ProgramState::Update` SRE hook caused double-ticking and child list corruption. Disabled the hook; 5 other error protection layers provide equivalent safety. |
+
+---
+
 ## ⚖️ Legal Notice
 
 This project **does not include or distribute** any original game assets, binaries, music, or copyrighted content from Swordigo or Touch Foo. Users must provide their own `libswordigo.so` and `assets/` directory extracted from a legally obtained copy of the game.

@@ -236,9 +236,10 @@ void sre_lua_call_safe(lua_State* L, int nargs, int nresults) {
         recovery_pop(my_depth);
         g_lua_call_safe_errors++;
         
-        /* Restore Lua stack to pre-call state */
-        if (g_lua_settop && saved_top > 0) {
-            g_lua_settop(L, saved_top - (nargs + 1));
+        /* Restore Lua stack to pre-call state (BUG 3 FIX: guard against underflow) */
+        int new_top = saved_top - (nargs + 1);
+        if (g_lua_settop && new_top >= 0) {
+            g_lua_settop(L, new_top);
         }
         
         /* Push nils for expected return values */
@@ -368,7 +369,7 @@ lua_State* g_sre_last_lua_state = 0;
  * Flow: pcall(loadstring, code) → pcall(result_func)
  */
 static void sre_run_console(lua_State* L) {
-    if (!g_lua_getfield || !g_lua_pcall || !g_lua_pushstring) {
+    if (!g_lua_getfield || !g_lua_pcall || !g_lua_pushstring || !g_lua_tolstring) {
         const char* msg = "ERR: Lua API not resolved";
         int i;
         for (i = 0; msg[i] && i < CONSOLE_BUF_SIZE - 1; i++)
@@ -588,22 +589,28 @@ void sre_ProgramState_Update(void* self, float deltaTime) {
     char condition1 = PS_GET(self, PS_CONDITION1, char);
     char paused = PS_GET(self, PS_PAUSED, char);
     
-    /* If neither condition is true, skip the rest (optimization) */
-    if (!condition1 && !paused) return;
+    /* Fast path: if no timer/coroutine work needed, skip the expensive
+     * SRE logic but STILL call the original for child iteration.
+     * Previously this returned early, which starved children of updates
+     * and broke effects (portals, rifts, particles). */
+    if (!condition1 && !paused) goto call_original;
     
-    /* Get the scene object for speed multiplier */
-    void* thisObject = PS_GET(self, PS_SCENE_OBJECT, void*);
-    float speedScaling = PS_GET(self, PS_SPEED_SCALING, float);
     int isSuspended = PS_GET(self, PS_IS_SUSPENDED, int);
     
-    float scaledDelta = deltaTime;
-    if (thisObject != 0 && g_getSpeedMultiplier != 0) {
-        float mult = g_getSpeedMultiplier(thisObject);
-        scaledDelta = mult * deltaTime;
-    }
-    float finalMultiplier = scaledDelta * speedScaling;
-    
     if (isSuspended == 1) {
+        /* Only compute speed multiplier when we actually need it for the
+         * timer countdown. This avoids an expensive guest function call
+         * (g_getSpeedMultiplier) for every ProgramState node in the tree. */
+        void* thisObject = PS_GET(self, PS_SCENE_OBJECT, void*);
+        float speedScaling = PS_GET(self, PS_SPEED_SCALING, float);
+        
+        float scaledDelta = deltaTime;
+        if (thisObject != 0 && g_getSpeedMultiplier != 0) {
+            float mult = g_getSpeedMultiplier(thisObject);
+            scaledDelta = mult * deltaTime;
+        }
+        float finalMultiplier = scaledDelta * speedScaling;
+        
         /* Count down the sleep timer */
         float currentTimer = PS_GET(self, PS_SLEEP_TIME, float);
         float loweredTimer = currentTimer - finalMultiplier;
@@ -634,10 +641,17 @@ void sre_ProgramState_Update(void* self, float deltaTime) {
         }
     }
     
-    /* Call original for the remaining logic (child ProgramState iteration).
+call_original:
+    /* Call original for child ProgramState iteration + cleanup.
      * We've already cleared isSuspended, so the original won't re-run the
-     * timer/resume. But the child cleanup code (shared_ptr destructors,
-     * list unlink) can throw C++ exceptions, so wrap with recovery. */
+     * timer/resume for THIS state. Each child will hit the SRE hook via
+     * the trampoline, so they're properly handled too.
+     *
+     * This MUST run unconditionally — child states drive effects (portals,
+     * rifts, particles). Removing this breaks all visual effects.
+     *
+     * The child cleanup code (shared_ptr destructors, list unlink) can
+     * throw C++ exceptions, so wrap with recovery. */
     if (g_orig_ProgramState_Update != 0) {
         lua_State* L2 = PS_GET(self, PS_LUA_STATE, lua_State*);
         int orig_depth = recovery_push(L2);

@@ -38,6 +38,8 @@ if [ $NO_BUILD -eq 0 ]; then
     else
         echo "=== Building everything ==="
         make -j$(nproc)
+        echo "=== Building asset_viewer ==="
+        make asset_viewer
     fi
 fi
 

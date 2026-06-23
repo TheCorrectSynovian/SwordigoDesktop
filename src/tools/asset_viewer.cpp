@@ -1,1827 +1,1269 @@
-/* asset_viewer.cpp — Standalone asset viewer for Swordigo Desktop
+/* asset_viewer.cpp — Professional ImGui-based asset viewer for Swordigo Desktop
  *
- * A self-contained tool that lets you browse and preview game assets:
- *   - PVR textures (ETC1, decoded via pvr_loader)
- *   - PNG textures (via SDL3_image)
- *   - Audio files (WAV/OGG, metadata display)
- *   - Scene/model files (.pod, .scene, metadata display)
+ * Features:
+ *   - File browser with search, type filtering, icons
+ *   - 3D POD model viewport with orbit camera, wireframe, texturing
+ *   - PVR/PNG texture preview with zoom/pan and checkerboard background
+ *   - Audio WAV playback with waveform visualization
+ *   - Scene file inspection with object tree and component details
+ *   - Properties panel with per-type metadata
+ *   - Keyboard shortcuts: W(wireframe), T(textured), R(reset camera), Esc(quit)
  *
- * Build:
- *   make asset_viewer
- *
- * Usage:
- *   ./asset_viewer [optional_start_directory]
+ * Build:  make asset_viewer
+ * Usage:  ./asset_viewer [optional_start_directory]
  */
 
 #include <SDL3/SDL.h>
 #include <SDL3_image/SDL_image.h>
-#include <GL/gl.h>
 
-// pvr_loader.h uses gl_inc.h which needs GL/gl.h — already included above
+#define GL_GLEXT_PROTOTYPES 1
+#include <GL/gl.h>
+#include <GL/glext.h>
+
+#include "imgui.h"
+#include "backends/imgui_impl_sdl3.h"
+#include "backends/imgui_impl_opengl3.h"
+
 #include "platform/pvr_loader.h"
+#include "tools/pod_loader.h"
+#include "tools/av_renderer.h"
+#include "tools/av_audio.h"
+#include "tools/scene_loader.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <string>
 #include <vector>
 #include <algorithm>
 #include <filesystem>
-#include <iostream>
-#include <cmath>
-#include <fstream>
 
 namespace fs = std::filesystem;
 
 // ============================================================================
-// Configuration
+// Constants
 // ============================================================================
 
-static const int WIN_W = 1200;
-static const int WIN_H = 800;
-static const char* WIN_TITLE = "Swordigo Asset Viewer";
-
-// Layout constants
-static const float LEFT_PANEL_W  = 340.0f;
-static const float TOP_BAR_H     = 36.0f;
-static const float FILTER_BAR_H  = 32.0f;
-static const float INFO_BAR_H    = 80.0f;
-static const float FILE_ROW_H    = 22.0f;
-static const float SCROLLBAR_W   = 12.0f;
-static const float TEXT_SCALE     = 1.5f;
-static const float SMALL_SCALE   = 1.2f;
-
-// Colors (dark premium theme)
-static const uint8_t BG_R = 20, BG_G = 20, BG_B = 28;
-static const uint8_t PANEL_R = 28, PANEL_G = 28, PANEL_B = 38;
-static const uint8_t BAR_R = 32, BAR_G = 32, BAR_B = 44;
-static const uint8_t HOVER_R = 50, HOVER_G = 50, HOVER_B = 70;
-static const uint8_t SEL_R = 70, SEL_G = 100, SEL_B = 180;
-static const uint8_t TEXT_R = 210, TEXT_G = 210, TEXT_B = 220;
-static const uint8_t DIM_R = 120, DIM_G = 120, DIM_B = 140;
-static const uint8_t ACCENT_R = 100, ACCENT_G = 160, ACCENT_B = 255;
-static const uint8_t DIR_R = 255, DIR_G = 200, DIR_B = 80;
-static const uint8_t BORDER_R = 55, BORDER_G = 55, BORDER_B = 70;
-
-// Default asset directories
-static const char* DEFAULT_DIRS[] = {
-    "~/.local/share/swordigo-desktop/assets/resources/",
-    "~/.local/share/swordigo-desktop/rl_assets/resources/",
-};
+static const int   WIN_W             = 1400;
+static const int   WIN_H             = 900;
+static const char* WIN_TITLE         = "Swordigo Asset Viewer";
+static const float LEFT_PANEL_W      = 280.0f;
+static const float RIGHT_PANEL_W     = 300.0f;
+static const float STATUS_BAR_H      = 24.0f;
+static const char* GLSL_VERSION      = "#version 330";
 
 // ============================================================================
-// 8x8 Bitmap Font (copied from gui.cpp — ASCII 32..127)
+// File entry & type classification
 // ============================================================================
 
-static const uint8_t font_8x8[96][8] = {
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // space
-    {0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x00}, // !
-    {0x6c, 0x6c, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00}, // "
-    {0x36, 0x36, 0x7f, 0x36, 0x7f, 0x36, 0x36, 0x00}, // #
-    {0x0c, 0x3f, 0x0c, 0x0e, 0x3c, 0x0c, 0x3e, 0x0c}, // $
-    {0x00, 0x66, 0x66, 0x30, 0x18, 0x0c, 0x66, 0x66}, // %
-    {0x3c, 0x66, 0x3c, 0x38, 0x67, 0x66, 0x3f, 0x00}, // &
-    {0x06, 0x0c, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00}, // '
-    {0x0c, 0x18, 0x30, 0x30, 0x30, 0x30, 0x18, 0x0c}, // (
-    {0x30, 0x18, 0x0c, 0x0c, 0x0c, 0x0c, 0x18, 0x30}, // )
-    {0x00, 0x66, 0x3c, 0xff, 0x3c, 0x66, 0x00, 0x00}, // *
-    {0x00, 0x18, 0x18, 0x7e, 0x18, 0x18, 0x00, 0x00}, // +
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x30}, // ,
-    {0x00, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00}, // -
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00}, // .
-    {0x00, 0x03, 0x06, 0x0c, 0x18, 0x30, 0x60, 0x00}, // /
-    {0x3e, 0x63, 0x67, 0x6f, 0x7b, 0x63, 0x3e, 0x00}, // 0
-    {0x0c, 0x1c, 0x0c, 0x0c, 0x0c, 0x0c, 0x3e, 0x00}, // 1
-    {0x3e, 0x63, 0x06, 0x1c, 0x30, 0x60, 0x7f, 0x00}, // 2
-    {0x7f, 0x06, 0x0c, 0x1c, 0x06, 0x63, 0x3e, 0x00}, // 3
-    {0x06, 0x0f, 0x1b, 0x33, 0x7f, 0x03, 0x03, 0x00}, // 4
-    {0x7f, 0x60, 0x7e, 0x03, 0x03, 0x63, 0x3e, 0x00}, // 5
-    {0x1c, 0x30, 0x60, 0x7e, 0x63, 0x63, 0x3e, 0x00}, // 6
-    {0x7f, 0x03, 0x06, 0x0c, 0x18, 0x30, 0x30, 0x00}, // 7
-    {0x3e, 0x63, 0x63, 0x3e, 0x63, 0x63, 0x3e, 0x00}, // 8
-    {0x3e, 0x63, 0x63, 0x7f, 0x03, 0x06, 0x3c, 0x00}, // 9
-    {0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00}, // :
-    {0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x30, 0x00}, // ;
-    {0x06, 0x0c, 0x18, 0x30, 0x18, 0x0c, 0x06, 0x00}, // <
-    {0x00, 0x00, 0x7e, 0x00, 0x7e, 0x00, 0x00, 0x00}, // =
-    {0x60, 0x30, 0x18, 0x0c, 0x18, 0x30, 0x60, 0x00}, // >
-    {0x3e, 0x63, 0x06, 0x0c, 0x18, 0x00, 0x18, 0x00}, // ?
-    {0x3e, 0x63, 0x6f, 0x6b, 0x6b, 0x60, 0x3e, 0x00}, // @
-    {0x18, 0x3c, 0x66, 0x66, 0x7e, 0x66, 0x66, 0x00}, // A
-    {0x7c, 0x66, 0x66, 0x7c, 0x66, 0x66, 0x7c, 0x00}, // B
-    {0x3e, 0x63, 0x60, 0x60, 0x60, 0x63, 0x3e, 0x00}, // C
-    {0x78, 0x6c, 0x66, 0x66, 0x66, 0x6c, 0x78, 0x00}, // D
-    {0x7e, 0x60, 0x60, 0x7c, 0x60, 0x60, 0x7e, 0x00}, // E
-    {0x7e, 0x60, 0x60, 0x7c, 0x60, 0x60, 0x60, 0x00}, // F
-    {0x3e, 0x63, 0x60, 0x6e, 0x63, 0x63, 0x3e, 0x00}, // G
-    {0x66, 0x66, 0x66, 0x7e, 0x66, 0x66, 0x66, 0x00}, // H
-    {0x3e, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x3e, 0x00}, // I
-    {0x1f, 0x06, 0x06, 0x06, 0x06, 0x66, 0x3c, 0x00}, // J
-    {0x66, 0x6c, 0x78, 0x70, 0x78, 0x6c, 0x66, 0x00}, // K
-    {0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x7f, 0x00}, // L
-    {0x63, 0x77, 0x7f, 0x6b, 0x63, 0x63, 0x63, 0x00}, // M
-    {0x63, 0x63, 0x67, 0x6f, 0x7b, 0x73, 0x63, 0x00}, // N
-    {0x3e, 0x63, 0x63, 0x63, 0x63, 0x63, 0x3e, 0x00}, // O
-    {0x7c, 0x66, 0x66, 0x7c, 0x60, 0x60, 0x60, 0x00}, // P
-    {0x3e, 0x63, 0x63, 0x63, 0x6b, 0x66, 0x3d, 0x00}, // Q
-    {0x7c, 0x66, 0x66, 0x7c, 0x78, 0x6c, 0x66, 0x00}, // R
-    {0x3e, 0x63, 0x38, 0x0e, 0x07, 0x63, 0x3e, 0x00}, // S
-    {0x7f, 0x1c, 0x1c, 0x1c, 0x1c, 0x1c, 0x1c, 0x00}, // T
-    {0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3c, 0x00}, // U
-    {0x66, 0x66, 0x66, 0x66, 0x66, 0x3c, 0x18, 0x00}, // V
-    {0x63, 0x63, 0x63, 0x6b, 0x7f, 0x77, 0x63, 0x00}, // W
-    {0x63, 0x63, 0x36, 0x1c, 0x36, 0x63, 0x63, 0x00}, // X
-    {0x66, 0x66, 0x66, 0x3c, 0x18, 0x18, 0x18, 0x00}, // Y
-    {0x7f, 0x06, 0x0c, 0x18, 0x30, 0x60, 0x7f, 0x00}, // Z
-    {0x3c, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3c, 0x00}, // [
-    {0x00, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x03, 0x00}, // backslash
-    {0x3c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x3c, 0x00}, // ]
-    {0x08, 0x1c, 0x36, 0x63, 0x00, 0x00, 0x00, 0x00}, // ^
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff}, // _
-    {0x18, 0x18, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00}, // `
-    {0x00, 0x00, 0x3c, 0x06, 0x3e, 0x66, 0x3b, 0x00}, // a
-    {0x60, 0x60, 0x7c, 0x66, 0x66, 0x66, 0x7c, 0x00}, // b
-    {0x00, 0x00, 0x3c, 0x60, 0x60, 0x62, 0x3c, 0x00}, // c
-    {0x06, 0x06, 0x3e, 0x66, 0x66, 0x66, 0x3e, 0x00}, // d
-    {0x00, 0x00, 0x3c, 0x66, 0x7e, 0x60, 0x3c, 0x00}, // e
-    {0x0e, 0x18, 0x3e, 0x18, 0x18, 0x18, 0x18, 0x00}, // f
-    {0x00, 0x00, 0x3e, 0x66, 0x66, 0x3e, 0x06, 0x3c}, // g
-    {0x60, 0x60, 0x7c, 0x66, 0x66, 0x66, 0x66, 0x00}, // h
-    {0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x3c, 0x00}, // i
-    {0x06, 0x00, 0x0e, 0x06, 0x06, 0x06, 0x06, 0x3c}, // j
-    {0x60, 0x60, 0x66, 0x6c, 0x78, 0x6c, 0x66, 0x00}, // k
-    {0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00}, // l
-    {0x00, 0x00, 0x66, 0x7f, 0x6b, 0x6b, 0x63, 0x00}, // m
-    {0x00, 0x00, 0x7c, 0x66, 0x66, 0x66, 0x66, 0x00}, // n
-    {0x00, 0x00, 0x3c, 0x66, 0x66, 0x66, 0x3c, 0x00}, // o
-    {0x00, 0x00, 0x7c, 0x66, 0x66, 0x7c, 0x60, 0x60}, // p
-    {0x00, 0x00, 0x3e, 0x66, 0x66, 0x3e, 0x06, 0x06}, // q
-    {0x00, 0x00, 0x7c, 0x66, 0x60, 0x60, 0x60, 0x00}, // r
-    {0x00, 0x00, 0x3e, 0x60, 0x3c, 0x06, 0x7c, 0x00}, // s
-    {0x18, 0x18, 0x7e, 0x18, 0x18, 0x18, 0x0d, 0x06}, // t
-    {0x00, 0x00, 0x66, 0x66, 0x66, 0x66, 0x3b, 0x00}, // u
-    {0x00, 0x00, 0x66, 0x66, 0x66, 0x3c, 0x18, 0x00}, // v
-    {0x00, 0x00, 0x63, 0x6b, 0x6b, 0x7f, 0x36, 0x00}, // w
-    {0x00, 0x00, 0x66, 0x3c, 0x18, 0x3c, 0x66, 0x00}, // x
-    {0x00, 0x00, 0x66, 0x66, 0x66, 0x3e, 0x06, 0x3c}, // y
-    {0x00, 0x00, 0x7e, 0x0c, 0x18, 0x30, 0x7e, 0x00}, // z
-    {0x0c, 0x18, 0x18, 0x30, 0x18, 0x18, 0x0c, 0x00}, // {
-    {0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00}, // |
-    {0x30, 0x18, 0x18, 0x0c, 0x18, 0x18, 0x30, 0x00}, // }
-    {0x3b, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // ~
-    {0x1c, 0x36, 0x36, 0x1c, 0x00, 0x00, 0x00, 0x00}  // bullet
-};
-
-// ============================================================================
-// Drawing primitives (adapted from gui.cpp — standalone, no class)
-// ============================================================================
-
-// NOTE: The coordinate system is top-left origin (Y increases downward),
-// set up via glOrtho(0, W, H, 0, -1, 1). This differs from gui.cpp which
-// uses bottom-left origin, so draw_char renders top-down.
-
-static void draw_rect(float x, float y, float w, float h,
-                       uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
-    glColor4ub(r, g, b, a);
-    glBegin(GL_QUADS);
-    glVertex2f(x, y);
-    glVertex2f(x + w, y);
-    glVertex2f(x + w, y + h);
-    glVertex2f(x, y + h);
-    glEnd();
-}
-
-static void draw_border(float x, float y, float w, float h,
-                          uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
-    glColor4ub(r, g, b, a);
-    glLineWidth(1.0f);
-    glBegin(GL_LINE_LOOP);
-    glVertex2f(x, y);
-    glVertex2f(x + w, y);
-    glVertex2f(x + w, y + h);
-    glVertex2f(x, y + h);
-    glEnd();
-}
-
-static void draw_char(char c, float x, float y, float scale,
-                       uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
-    int idx = (uint8_t)c - 32;
-    if (idx < 0 || idx >= 96) return;
-    const uint8_t* glyph = font_8x8[idx];
-
-    glColor4ub(r, g, b, a);
-    glBegin(GL_QUADS);
-    for (int row = 0; row < 8; ++row) {
-        uint8_t row_data = glyph[row];
-        for (int col = 0; col < 8; ++col) {
-            if (row_data & (1 << (7 - col))) {
-                // Top-left origin: row 0 is top of glyph
-                float px = x + col * scale;
-                float py = y + row * scale;
-                glVertex2f(px, py);
-                glVertex2f(px + scale, py);
-                glVertex2f(px + scale, py + scale);
-                glVertex2f(px, py + scale);
-            }
-        }
-    }
-    glEnd();
-}
-
-static void draw_string(const char* str, float x, float y, float scale,
-                          uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
-    float cur_x = x;
-    while (*str) {
-        if (*str == '\n') {
-            y += 10.0f * scale;
-            cur_x = x;
-            str++;
-            continue;
-        }
-        draw_char(*str, cur_x, y, scale, r, g, b, a);
-        cur_x += 8.0f * scale;
-        str++;
-    }
-}
-
-static void draw_string(const std::string& str, float x, float y, float scale,
-                          uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
-    draw_string(str.c_str(), x, y, scale, r, g, b, a);
-}
-
-static float text_width(const char* str, float scale) {
-    float max_w = 0, cur_w = 0;
-    while (*str) {
-        if (*str == '\n') { max_w = std::max(max_w, cur_w); cur_w = 0; }
-        else cur_w += 8.0f * scale;
-        str++;
-    }
-    return std::max(max_w, cur_w);
-}
-
-static float text_width(const std::string& s, float scale) {
-    return text_width(s.c_str(), scale);
-}
-
-// Draw a textured quad (for texture preview)
-static void draw_textured_quad(GLuint tex, float x, float y, float w, float h) {
-    glEnable(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glColor4ub(255, 255, 255, 255);
-    glBegin(GL_QUADS);
-    glTexCoord2f(0, 0); glVertex2f(x, y);
-    glTexCoord2f(1, 0); glVertex2f(x + w, y);
-    glTexCoord2f(1, 1); glVertex2f(x + w, y + h);
-    glTexCoord2f(0, 1); glVertex2f(x, y + h);
-    glEnd();
-    glDisable(GL_TEXTURE_2D);
-}
-
-// ============================================================================
-// File type helpers
-// ============================================================================
-
-enum FileType {
-    FT_UNKNOWN,
-    FT_DIRECTORY,
-    FT_TEXTURE_PVR,
-    FT_TEXTURE_PNG,
-    FT_TEXTURE_JPG,
-    FT_MODEL_POD,
-    FT_SCENE,
-    FT_AUDIO_WAV,
-    FT_AUDIO_OGG,
-    FT_LUA,
-    FT_XML,
-    FT_OTHER,
-};
-
-enum FilterMode {
-    FILTER_ALL,
-    FILTER_TEXTURES,
-    FILTER_MODELS,
-    FILTER_SCENES,
-    FILTER_AUDIO,
-    FILTER_COUNT,
-};
-
-static const char* filter_names[FILTER_COUNT] = {
-    "All", "Textures", "Models", "Scenes", "Audio"
-};
-
-static FileType classify_file(const std::string& name, bool is_dir) {
-    if (is_dir) return FT_DIRECTORY;
-
-    // Get extension (lowercased)
-    auto dot = name.rfind('.');
-    if (dot == std::string::npos) return FT_OTHER;
-    std::string ext = name.substr(dot);
-    for (auto& c : ext) c = tolower(c);
-
-    if (ext == ".pvr")   return FT_TEXTURE_PVR;
-    if (ext == ".png")   return FT_TEXTURE_PNG;
-    if (ext == ".jpg" || ext == ".jpeg") return FT_TEXTURE_JPG;
-    if (ext == ".pod")   return FT_MODEL_POD;
-    if (ext == ".scene") return FT_SCENE;
-    if (ext == ".wav")   return FT_AUDIO_WAV;
-    if (ext == ".ogg")   return FT_AUDIO_OGG;
-    if (ext == ".lua")   return FT_LUA;
-    if (ext == ".xml")   return FT_XML;
-    return FT_OTHER;
-}
-
-static bool passes_filter(FileType ft, FilterMode filter) {
-    if (filter == FILTER_ALL) return true;
-    if (ft == FT_DIRECTORY) return true; // always show directories
-    switch (filter) {
-        case FILTER_TEXTURES: return (ft == FT_TEXTURE_PVR || ft == FT_TEXTURE_PNG || ft == FT_TEXTURE_JPG);
-        case FILTER_MODELS:   return (ft == FT_MODEL_POD);
-        case FILTER_SCENES:   return (ft == FT_SCENE);
-        case FILTER_AUDIO:    return (ft == FT_AUDIO_WAV || ft == FT_AUDIO_OGG);
-        default: return true;
-    }
-}
-
-static const char* filetype_label(FileType ft) {
-    switch (ft) {
-        case FT_DIRECTORY:   return "DIR";
-        case FT_TEXTURE_PVR: return "PVR";
-        case FT_TEXTURE_PNG: return "PNG";
-        case FT_TEXTURE_JPG: return "JPG";
-        case FT_MODEL_POD:   return "POD";
-        case FT_SCENE:       return "SCENE";
-        case FT_AUDIO_WAV:   return "WAV";
-        case FT_AUDIO_OGG:   return "OGG";
-        case FT_LUA:         return "LUA";
-        case FT_XML:         return "XML";
-        default:             return "FILE";
-    }
-}
-
-static void filetype_color(FileType ft, uint8_t& r, uint8_t& g, uint8_t& b) {
-    switch (ft) {
-        case FT_DIRECTORY:   r = DIR_R; g = DIR_G; b = DIR_B; break;
-        case FT_TEXTURE_PVR: r = 100; g = 200; b = 100; break;
-        case FT_TEXTURE_PNG: r = 100; g = 220; b = 150; break;
-        case FT_TEXTURE_JPG: r = 100; g = 200; b = 180; break;
-        case FT_MODEL_POD:   r = 200; g = 130; b = 255; break;
-        case FT_SCENE:       r = 255; g = 150; b = 100; break;
-        case FT_AUDIO_WAV:
-        case FT_AUDIO_OGG:   r = 100; g = 180; b = 255; break;
-        case FT_LUA:         r = 180; g = 180; b = 255; break;
-        case FT_XML:         r = 180; g = 200; b = 180; break;
-        default:             r = DIM_R; g = DIM_G; b = DIM_B; break;
-    }
-}
-
-// ============================================================================
-// File entry
-// ============================================================================
+enum FileType { FTYPE_OTHER = 0, FTYPE_TEXTURE = 1, FTYPE_MODEL = 2, FTYPE_SCENE = 3, FTYPE_AUDIO = 4 };
+enum PreviewType { PREVIEW_NONE = 0, PREVIEW_TEXTURE, PREVIEW_MODEL, PREVIEW_SCENE, PREVIEW_AUDIO };
 
 struct FileEntry {
     std::string name;
     std::string full_path;
-    FileType    type;
-    uintmax_t   size;
     bool        is_dir;
+    size_t      size;
+    int         type; // FileType
 };
 
-// ============================================================================
-// Application State
-// ============================================================================
+static int classify_file(const std::string& name) {
+    // Get extension, lowercase
+    auto dot = name.rfind('.');
+    if (dot == std::string::npos) return FTYPE_OTHER;
+    std::string ext = name.substr(dot);
+    for (auto& c : ext) c = (char)tolower((unsigned char)c);
 
-// ============================================================================
-// POD 3D Model Structures
-// ============================================================================
-
-struct PODMesh {
-    std::vector<float> positions;   // x,y,z triples
-    std::vector<float> normals;     // x,y,z triples
-    std::vector<float> uvs;         // u,v pairs (texture coordinates)
-    std::vector<uint16_t> indices;  // triangle indices (uint16)
-    int num_vertices = 0;
-    int num_faces = 0;
-    // Bounding box
-    float min_x = 1e9f, min_y = 1e9f, min_z = 1e9f;
-    float max_x = -1e9f, max_y = -1e9f, max_z = -1e9f;
-};
-
-struct PODModel {
-    std::vector<PODMesh> meshes;
-    std::string version;
-    int num_frames = 0;
-    // Overall bounding box
-    float min_x = 1e9f, min_y = 1e9f, min_z = 1e9f;
-    float max_x = -1e9f, max_y = -1e9f, max_z = -1e9f;
-    float center_x = 0, center_y = 0, center_z = 0;
-    float radius = 1.0f;
-    int total_vertices = 0;
-    int total_faces = 0;
-};
-
-// Minimal POD Parser (PowerVR PVRTools SDK chunk-based format)
-// POD files use tag-length-data: uint32 tag, uint32 length, [data]
-// Container blocks: length=0, closed by (tag | 0x80000000)
-//
-// PVRTools SDK tag IDs:
-//   File:  1000=Version, 1001=Scene(ctr)
-//   Scene: 2004=NumMesh, 2009=NumFrame, 2012=Mesh(ctr)
-//   Mesh:  3000=NumVtx, 3001=NumFaces, 3003=Faces(ctr),
-//          3006=InterleavedData, 3050=Vertices(ctr), 3051=Normals(ctr)
-//   Data:  4000=Type, 4001=N, 4002=Stride, 4003=Data
-
-static bool pod_read_u32(const uint8_t*& p, const uint8_t* end, uint32_t& out) {
-    if (p + 4 > end) return false;
-    memcpy(&out, p, 4); p += 4;
-    return true;
-}
-
-static PODModel pod_parse(const uint8_t* data, size_t size) {
-    PODModel model;
-    const uint8_t* p = data;
-    const uint8_t* end = data + size;
-
-    PODMesh* cur_mesh = nullptr;
-    enum { CTX_NONE, CTX_FACES, CTX_VERTS, CTX_NORMS } data_ctx = CTX_NONE;
-    int vd_type = 0, vd_n = 3, vd_stride = 0;
-    
-    std::vector<uint8_t> interleaved_buf;
-    bool has_interleaved = false;
-    int il_pos_off = -1, il_norm_off = -1;
-    int il_pos_stride = 0, il_norm_stride = 0;
-
-    while (p + 8 <= end) {
-        uint32_t tag, length;
-        if (!pod_read_u32(p, end, tag)) break;
-        if (!pod_read_u32(p, end, length)) break;
-        const uint8_t* cd = p;
-        if (cd + length > end) length = (uint32_t)(end - cd);
-
-        // End-tag (bit 31 set)
-        if (tag & 0x80000000u) {
-            uint32_t base = tag & 0x7FFFFFFF;
-            if (base == 2012 && cur_mesh) { // end mesh
-                std::cout << "[POD-END] nv=" << cur_mesh->num_vertices << " nf=" << cur_mesh->num_faces
-                          << " il=" << has_interleaved << " buf=" << interleaved_buf.size()
-                          << " pos_off=" << il_pos_off << " pos_stride=" << il_pos_stride
-                          << " norm_off=" << il_norm_off << std::endl;
-                if (has_interleaved && !interleaved_buf.empty()) {
-                    int nv = cur_mesh->num_vertices;
-                    // If stride is 0, compute from buffer: stride = buf_size / nv
-                    int stride = il_pos_stride;
-                    if (stride <= 0 && nv > 0)
-                        stride = (int)(interleaved_buf.size() / nv);
-                    int nstride = il_norm_stride;
-                    if (nstride <= 0 && nv > 0)
-                        nstride = stride; // normals use same stride in interleaved
-                    
-                    if (il_pos_off >= 0 && stride > 0 && nv > 0) {
-                        cur_mesh->positions.resize(nv * 3);
-                        for (int i = 0; i < nv; i++) {
-                            int o = i * stride + il_pos_off;
-                            if (o + 12 > (int)interleaved_buf.size()) break;
-                            float x, y, z;
-                            memcpy(&x, &interleaved_buf[o], 4);
-                            memcpy(&y, &interleaved_buf[o+4], 4);
-                            memcpy(&z, &interleaved_buf[o+8], 4);
-                            cur_mesh->positions[i*3]=x; cur_mesh->positions[i*3+1]=y; cur_mesh->positions[i*3+2]=z;
-                            if(x<cur_mesh->min_x) cur_mesh->min_x=x; if(y<cur_mesh->min_y) cur_mesh->min_y=y; if(z<cur_mesh->min_z) cur_mesh->min_z=z;
-                            if(x>cur_mesh->max_x) cur_mesh->max_x=x; if(y>cur_mesh->max_y) cur_mesh->max_y=y; if(z>cur_mesh->max_z) cur_mesh->max_z=z;
-                        }
-                    }
-                    if (il_norm_off >= 0 && nstride > 0 && nv > 0) {
-                        cur_mesh->normals.resize(nv * 3);
-                        for (int i = 0; i < nv; i++) {
-                            int o = i * nstride + il_norm_off;
-                            if (o + 12 > (int)interleaved_buf.size()) break;
-                            memcpy(&cur_mesh->normals[i*3], &interleaved_buf[o], 12);
-                        }
-                    }
-                    // Extract UVs: at offset 24 (pos=12 + norm=12) with float2 = 8 bytes
-                    int uv_off = 24; // after float3 pos + float3 norm
-                    if (stride >= 32 && nv > 0) { // stride must fit at least pos+norm+uv
-                        cur_mesh->uvs.resize(nv * 2);
-                        for (int i = 0; i < nv; i++) {
-                            int o = i * stride + uv_off;
-                            if (o + 8 > (int)interleaved_buf.size()) break;
-                            float u, v;
-                            memcpy(&u, &interleaved_buf[o], 4);
-                            memcpy(&v, &interleaved_buf[o+4], 4);
-                            cur_mesh->uvs[i*2] = u;
-                            cur_mesh->uvs[i*2+1] = v;
-                        }
-                    }
-                }
-                cur_mesh = nullptr; data_ctx = CTX_NONE; has_interleaved = false;
-                interleaved_buf.clear(); il_pos_off = il_norm_off = -1;
-            }
-            if (base == 6007 || base == 6008 || base == 6009 || base == 6012)
-                data_ctx = CTX_NONE;
-            p = cd + length;
-            continue;
-        }
-
-        switch (tag) {
-        case 1000: // Version
-            if (length > 0 && length < 128) model.version.assign((const char*)cd, length);
-            break;
-        case 2004: // NumMesh
-            if (length >= 4) { uint32_t n; memcpy(&n, cd, 4); model.meshes.reserve(n); }
-            break;
-        case 2009: // NumFrame
-            if (length >= 4) memcpy(&model.num_frames, cd, 4);
-            break;
-        case 2012: // Mesh container start
-            model.meshes.emplace_back();
-            cur_mesh = &model.meshes.back();
-            data_ctx = CTX_NONE; has_interleaved = false;
-            interleaved_buf.clear(); il_pos_off = il_norm_off = -1;
-            il_pos_stride = il_norm_stride = 0;
-            break;
-
-        // Mesh-level tags (6000-series)
-        case 6000: // NumVertices
-            if (cur_mesh && length >= 4) { uint32_t v; memcpy(&v, cd, 4); cur_mesh->num_vertices = (int)v; }
-            break;
-        case 6001: // NumFaces
-            if (cur_mesh && length >= 4) { uint32_t v; memcpy(&v, cd, 4); cur_mesh->num_faces = (int)v; }
-            break;
-        case 6006: // Interleaved data (standard tag)
-        case 6014: // Interleaved data (Swordigo's SDK version)
-            if (cur_mesh && length > 0) {
-                interleaved_buf.assign(cd, cd + length);
-                has_interleaved = true;
-                std::cout << "[POD-IL] tag=" << tag << " buf=" << length << " bytes" << std::endl;
-            }
-            break;
-        // CPODData container tags (length=0)
-        // CPODData container tags (confirmed from hex dump)
-        case 6007: data_ctx = CTX_FACES; vd_type=0; vd_n=3; vd_stride=0; break;
-        case 6008: data_ctx = CTX_VERTS; vd_type=0; vd_n=3; vd_stride=0; break;
-        case 6009: data_ctx = CTX_NORMS; vd_type=0; vd_n=3; vd_stride=0; break;
-        
-        // Data descriptor tags (9000-series)
-        case 9000: if (length >= 4) { uint32_t v; memcpy(&v, cd, 4); vd_type=(int)v; } break;
-        case 9001: if (length >= 4) { uint32_t v; memcpy(&v, cd, 4); vd_n=(int)v; } break;
-        case 9002: if (length >= 4) { uint32_t v; memcpy(&v, cd, 4); vd_stride=(int)v; } break;
-        case 9003: // Data payload or interleaved offset
-            if (!cur_mesh || length == 0) break;
-            // Interleaved: offset only (4 bytes) for non-face data
-            if (has_interleaved && data_ctx != CTX_FACES && length == 4) {
-                uint32_t off; memcpy(&off, cd, 4);
-                if (data_ctx == CTX_VERTS) {
-                    il_pos_off = (int)off; il_pos_stride = vd_stride;
-                    std::cout << "[POD-VTX] pos_off=" << off << " stride=" << vd_stride << " type=" << vd_type << " n=" << vd_n << std::endl;
-                }
-                else if (data_ctx == CTX_NORMS) {
-                    il_norm_off = (int)off; il_norm_stride = vd_stride;
-                    std::cout << "[POD-NRM] norm_off=" << off << " stride=" << vd_stride << std::endl;
-                }
-                break;
-            }
-            // Non-interleaved vertex positions
-            if (data_ctx == CTX_VERTS && vd_type == 0 && vd_n >= 3) {
-                int stride = vd_stride > 0 ? vd_stride : (int)(vd_n * 4);
-                int cnt = cur_mesh->num_vertices > 0 ? cur_mesh->num_vertices : (int)(length / stride);
-                cur_mesh->positions.resize(cnt * 3);
-                for (int i = 0; i < cnt && (i*stride+12) <= (int)length; i++) {
-                    float x,y,z;
-                    memcpy(&x, cd+i*stride, 4); memcpy(&y, cd+i*stride+4, 4); memcpy(&z, cd+i*stride+8, 4);
-                    cur_mesh->positions[i*3]=x; cur_mesh->positions[i*3+1]=y; cur_mesh->positions[i*3+2]=z;
-                    if(x<cur_mesh->min_x) cur_mesh->min_x=x; if(y<cur_mesh->min_y) cur_mesh->min_y=y; if(z<cur_mesh->min_z) cur_mesh->min_z=z;
-                    if(x>cur_mesh->max_x) cur_mesh->max_x=x; if(y>cur_mesh->max_y) cur_mesh->max_y=y; if(z>cur_mesh->max_z) cur_mesh->max_z=z;
-                }
-            }
-            // Non-interleaved normals
-            else if (data_ctx == CTX_NORMS && vd_type == 0 && vd_n >= 3) {
-                int stride = vd_stride > 0 ? vd_stride : (int)(vd_n * 4);
-                int cnt = cur_mesh->num_vertices > 0 ? cur_mesh->num_vertices : (int)(length / stride);
-                cur_mesh->normals.resize(cnt * 3);
-                for (int i = 0; i < cnt && (i*stride+12) <= (int)length; i++)
-                    memcpy(&cur_mesh->normals[i*3], cd+i*stride, 12);
-            }
-            // Face indices (inside CTX_FACES container)
-            else if (data_ctx == CTX_FACES && length > 4) {
-                std::cout << "[POD-IDX] ctx=FACES type=" << vd_type << " len=" << length << " nf=" << cur_mesh->num_faces << std::endl;
-                int cnt = cur_mesh->num_faces * 3;
-                if (cnt > 0 && cnt * 2 <= (int)length) {
-                    cur_mesh->indices.resize(cnt);
-                    for (int i = 0; i < cnt && (i*2+2) <= (int)length; i++) {
-                        uint16_t idx; memcpy(&idx, cd+i*2, 2);
-                        cur_mesh->indices[i] = idx;
-                    }
-                } else if (cnt > 0 && cnt * 4 <= (int)length) {
-                    cur_mesh->indices.resize(cnt);
-                    for (int i = 0; i < cnt && (i*4+4) <= (int)length; i++) {
-                        uint32_t idx; memcpy(&idx, cd+i*4, 4);
-                        cur_mesh->indices[i] = (uint16_t)idx;
-                    }
-                }
-            }
-            // Flat face data (CTX_NONE = before any container, large payload = raw indices)
-            else if (data_ctx == CTX_NONE && cur_mesh->indices.empty() && length > 4) {
-                int cnt = cur_mesh->num_faces * 3;
-                std::cout << "[POD-IDX] ctx=FLAT type=" << vd_type << " len=" << length << " nf=" << cur_mesh->num_faces << " cnt=" << cnt << std::endl;
-                if (cnt > 0 && cnt * 2 <= (int)length) {
-                    cur_mesh->indices.resize(cnt);
-                    for (int i = 0; i < cnt && (i*2+2) <= (int)length; i++) {
-                        uint16_t idx; memcpy(&idx, cd+i*2, 2);
-                        cur_mesh->indices[i] = idx;
-                    }
-                } else if (cnt > 0 && cnt * 4 <= (int)length) {
-                    cur_mesh->indices.resize(cnt);
-                    for (int i = 0; i < cnt && (i*4+4) <= (int)length; i++) {
-                        uint32_t idx; memcpy(&idx, cd+i*4, 4);
-                        cur_mesh->indices[i] = (uint16_t)idx;
-                    }
-                }
-            }
-            break;
-        default:
-            if (cur_mesh)
-                std::cout << "[POD-DBG] mesh tag=" << tag << " (0x" << std::hex << tag << std::dec << ") len=" << length << (length==0?" [CTR]":"") << std::endl;
-            break;
-        }
-        p = cd + length;
+    if (ext == ".pvr" || ext == ".png" || ext == ".jpg" || ext == ".jpeg") return FTYPE_TEXTURE;
+    // Also handle .tex.png pattern
+    if (name.size() > 8) {
+        std::string low = name;
+        for (auto& c : low) c = (char)tolower((unsigned char)c);
+        if (low.find(".tex.png") != std::string::npos) return FTYPE_TEXTURE;
     }
-
-    // Compute bounding box
-    for (auto& mesh : model.meshes) {
-        if (mesh.positions.empty()) continue;
-        if (mesh.min_x < model.min_x) model.min_x = mesh.min_x;
-        if (mesh.min_y < model.min_y) model.min_y = mesh.min_y;
-        if (mesh.min_z < model.min_z) model.min_z = mesh.min_z;
-        if (mesh.max_x > model.max_x) model.max_x = mesh.max_x;
-        if (mesh.max_y > model.max_y) model.max_y = mesh.max_y;
-        if (mesh.max_z > model.max_z) model.max_z = mesh.max_z;
-        model.total_vertices += (int)(mesh.positions.size() / 3);
-        model.total_faces += (int)(mesh.indices.size() / 3);
-    }
-    model.center_x = (model.min_x + model.max_x) * 0.5f;
-    model.center_y = (model.min_y + model.max_y) * 0.5f;
-    model.center_z = (model.min_z + model.max_z) * 0.5f;
-    float dx = model.max_x - model.min_x;
-    float dy = model.max_y - model.min_y;
-    float dz = model.max_z - model.min_z;
-    model.radius = sqrtf(dx*dx + dy*dy + dz*dz) * 0.5f;
-    if (model.radius < 0.001f) model.radius = 1.0f;
-    return model;
-}
-
-static PODModel load_pod_file(const std::string& path) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f.is_open()) return PODModel{};
-    size_t sz = f.tellg();
-    f.seekg(0);
-    std::vector<uint8_t> data(sz);
-    f.read((char*)data.data(), sz);
-    f.close();
-    return pod_parse(data.data(), data.size());
+    if (ext == ".pod") return FTYPE_MODEL;
+    if (ext == ".scene") return FTYPE_SCENE;
+    if (ext == ".wav" || ext == ".ogg" || ext == ".mp3") return FTYPE_AUDIO;
+    return FTYPE_OTHER;
 }
 
 // ============================================================================
-// Application State
+// Viewer state
 // ============================================================================
 
-struct AppState {
-    // Window
-    SDL_Window*   window   = nullptr;
-    SDL_GLContext  gl_ctx   = nullptr;
-    int win_w = WIN_W, win_h = WIN_H;
-    bool running = true;
+struct ViewerState {
+    // File browser
+    std::string            current_dir;
+    std::vector<FileEntry> files;
+    std::vector<FileEntry> filtered_files; // after search + type filter
+    int                    selected_idx = -1;
+    char                   search_buf[256] = {};
+    int                    type_filter = 0; // 0=all, 1-4=specific
 
-    // Current directory
-    std::string current_dir;
-    std::vector<FileEntry> entries;
-    std::vector<FileEntry> filtered_entries;
-    FilterMode filter = FILTER_ALL;
+    // Preview
+    PreviewType preview_type = PREVIEW_NONE;
+    std::string status_msg;
 
-    // Selection
-    int selected_index = -1;
-    int hover_index    = -1;
-
-    // Scroll state (file list)
-    float scroll_y     = 0.0f;
-    float max_scroll_y = 0.0f;
-    bool  scrollbar_dragging = false;
-    float scrollbar_drag_offset = 0.0f;
-
-    // Preview texture
+    // Texture preview
     GLuint preview_tex = 0;
-    int    preview_w   = 0;
-    int    preview_h   = 0;
-    std::string preview_name;
-    std::string preview_info; // multi-line info string
+    int    tex_w = 0, tex_h = 0;
+    float  tex_zoom = 1.0f;
+    float  tex_pan_x = 0.0f, tex_pan_y = 0.0f;
+    bool   tex_dragging = false;
+    std::string tex_format_str;
 
-    // 3D Model preview
-    PODModel model;
-    bool model_loaded = false;
-    float cam_yaw   = 30.0f;   // degrees
-    float cam_pitch = 20.0f;   // degrees  
-    float cam_dist  = 3.0f;    // distance multiplier (of model radius)
-    bool  cam_dragging = false;
-    int   cam_drag_x = 0, cam_drag_y = 0;
-    float cam_drag_yaw = 0, cam_drag_pitch = 0;
-    bool  wireframe_mode = false;
-    GLuint model_tex = 0;   // texture applied to 3D model
-    bool   tex_mode = false; // T key: show texture on model
+    // Model preview
+    av::PODModel             model;
+    std::vector<av::GPUMesh> gpu_meshes;
+    av::Camera               camera;
+    GLuint                   fbo = 0, fbo_tex = 0;
+    int                      fbo_w = 0, fbo_h = 0;
+    bool                     show_wireframe = false;
+    bool                     show_textured  = true;
+    GLuint                   model_texture  = 0;
+    int                      highlighted_mesh = -1;
 
-    // Texture preview zoom/pan
-    float tex_zoom = 1.0f;
-    float tex_pan_x = 0.0f, tex_pan_y = 0.0f;
-    bool  tex_dragging = false;
-    int   tex_drag_x = 0, tex_drag_y = 0;
-    float tex_drag_pan_x = 0.0f, tex_drag_pan_y = 0.0f;
+    // Scene preview
+    av::SceneData scene;
+    int           selected_object = -1;
 
-    // Mouse
-    int mouse_x = 0, mouse_y = 0;
-    bool mouse_down = false;
-    bool mouse_clicked = false; // single-frame click
-    bool right_mouse_down = false;
+    // Checkerboard texture (for transparency)
+    GLuint checker_tex = 0;
+
+    // Selected file info
+    std::string sel_name;
+    std::string sel_path;
+    size_t      sel_size = 0;
 };
 
-static AppState app;
+static ViewerState g_state;
 
 // ============================================================================
-// Expand ~ in paths
+// Helpers
 // ============================================================================
 
-static std::string expand_home(const std::string& path) {
-    if (!path.empty() && path[0] == '~') {
+static std::string expand_home(const std::string& p) {
+    if (!p.empty() && p[0] == '~') {
         const char* home = getenv("HOME");
-        if (home) return std::string(home) + path.substr(1);
+        if (home) return std::string(home) + p.substr(1);
     }
-    return path;
+    return p;
 }
 
-// ============================================================================
-// Format file size
-// ============================================================================
-
-static std::string format_size(uintmax_t bytes) {
-    char buf[64];
-    if (bytes < 1024)
-        snprintf(buf, sizeof(buf), "%ju B", bytes);
-    else if (bytes < 1024 * 1024)
-        snprintf(buf, sizeof(buf), "%.1f KB", bytes / 1024.0);
-    else if (bytes < 1024ULL * 1024 * 1024)
-        snprintf(buf, sizeof(buf), "%.1f MB", bytes / (1024.0 * 1024.0));
-    else
-        snprintf(buf, sizeof(buf), "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
+static std::string format_size(size_t bytes) {
+    if (bytes < 1024) return std::to_string(bytes) + " B";
+    if (bytes < 1024 * 1024) {
+        char buf[64]; snprintf(buf, sizeof(buf), "%.1f KB", bytes / 1024.0);
+        return buf;
+    }
+    char buf[64]; snprintf(buf, sizeof(buf), "%.1f MB", bytes / (1024.0 * 1024.0));
     return buf;
 }
 
-// ============================================================================
-// Load directory listing
-// ============================================================================
+static std::string format_time(float seconds) {
+    int m = (int)(seconds / 60.0f);
+    int s = (int)seconds % 60;
+    char buf[32]; snprintf(buf, sizeof(buf), "%d:%02d", m, s);
+    return buf;
+}
 
-static void load_directory(const std::string& path) {
-    app.entries.clear();
-    app.selected_index = -1;
-    app.hover_index = -1;
-    app.scroll_y = 0.0f;
-
-    std::string dir = expand_home(path);
-
-    // Normalize path
-    std::error_code ec;
-    auto canonical = fs::canonical(dir, ec);
-    if (ec) {
-        std::cerr << "[AV] Cannot access: " << dir << " (" << ec.message() << ")" << std::endl;
-        app.current_dir = dir;
-        return;
+static const char* filetype_label(int ft) {
+    switch (ft) {
+        case FTYPE_TEXTURE: return "Texture";
+        case FTYPE_MODEL:   return "POD Model";
+        case FTYPE_SCENE:   return "Scene";
+        case FTYPE_AUDIO:   return "Audio";
+        default:            return "File";
     }
-    app.current_dir = canonical.string();
+}
 
-    // Add parent directory entry (unless at root)
-    if (app.current_dir != "/") {
-        FileEntry parent;
-        parent.name = "..";
-        parent.full_path = fs::path(app.current_dir).parent_path().string();
-        parent.type = FT_DIRECTORY;
-        parent.size = 0;
-        parent.is_dir = true;
-        app.entries.push_back(parent);
-    }
+// ============================================================================
+// Create checkerboard texture for alpha backgrounds
+// ============================================================================
 
-    // Scan directory
-    try {
-        std::vector<FileEntry> dirs, files;
-        for (auto& entry : fs::directory_iterator(app.current_dir, fs::directory_options::skip_permission_denied)) {
-            FileEntry fe;
-            fe.name = entry.path().filename().string();
-            fe.full_path = entry.path().string();
-            fe.is_dir = entry.is_directory();
-            fe.type = classify_file(fe.name, fe.is_dir);
-            fe.size = fe.is_dir ? 0 : entry.file_size(ec);
-
-            if (fe.is_dir)
-                dirs.push_back(fe);
-            else
-                files.push_back(fe);
+static GLuint create_checkerboard() {
+    const int sz = 64;
+    const int cell = 8;
+    unsigned char pixels[sz * sz * 4];
+    for (int y = 0; y < sz; y++) {
+        for (int x = 0; x < sz; x++) {
+            bool light = ((x / cell) + (y / cell)) % 2 == 0;
+            unsigned char v = light ? 200 : 150;
+            int i = (y * sz + x) * 4;
+            pixels[i] = pixels[i+1] = pixels[i+2] = v;
+            pixels[i+3] = 255;
         }
-        // Sort directories and files alphabetically (case-insensitive)
-        auto icmp = [](const FileEntry& a, const FileEntry& b) {
-            std::string la = a.name, lb = b.name;
-            for (auto& c : la) c = tolower(c);
-            for (auto& c : lb) c = tolower(c);
-            return la < lb;
-        };
-        std::sort(dirs.begin(), dirs.end(), icmp);
-        std::sort(files.begin(), files.end(), icmp);
-        app.entries.insert(app.entries.end(), dirs.begin(), dirs.end());
-        app.entries.insert(app.entries.end(), files.begin(), files.end());
-    } catch (const std::exception& e) {
-        std::cerr << "[AV] Directory scan error: " << e.what() << std::endl;
     }
-
-    // Apply filter
-    app.filtered_entries.clear();
-    for (auto& e : app.entries) {
-        if (passes_filter(e.type, app.filter))
-            app.filtered_entries.push_back(e);
-    }
-
-    std::cout << "[AV] Loaded: " << app.current_dir
-              << " (" << app.filtered_entries.size() << " items)" << std::endl;
-}
-
-static void apply_filter() {
-    app.filtered_entries.clear();
-    for (auto& e : app.entries) {
-        if (passes_filter(e.type, app.filter))
-            app.filtered_entries.push_back(e);
-    }
-    app.selected_index = -1;
-    app.hover_index = -1;
-    app.scroll_y = 0.0f;
-}
-
-// ============================================================================
-// Clear preview
-// ============================================================================
-
-static void clear_preview() {
-    if (app.preview_tex) {
-        glDeleteTextures(1, &app.preview_tex);
-        app.preview_tex = 0;
-    }
-    if (app.model_tex) {
-        glDeleteTextures(1, &app.model_tex);
-        app.model_tex = 0;
-    }
-    app.preview_w = 0;
-    app.preview_h = 0;
-    app.preview_name.clear();
-    app.preview_info.clear();
-    app.model = PODModel{};
-    app.model_loaded = false;
-    app.tex_mode = false;
-    app.tex_zoom = 1.0f;
-    app.tex_pan_x = app.tex_pan_y = 0.0f;
-}
-
-// ============================================================================
-// Load PNG texture via SDL3_image
-// ============================================================================
-
-static GLuint load_png_texture(const char* path, int* out_w, int* out_h) {
-    SDL_Surface* surf = IMG_Load(path);
-    if (!surf) {
-        std::cerr << "[AV] IMG_Load failed: " << path << " — " << SDL_GetError() << std::endl;
-        return 0;
-    }
-
-    // Convert to RGBA32 if needed
-    SDL_Surface* rgba = SDL_ConvertSurface(surf, SDL_PIXELFORMAT_RGBA32);
-    SDL_DestroySurface(surf);
-    if (!rgba) {
-        std::cerr << "[AV] Surface convert failed" << std::endl;
-        return 0;
-    }
-
-    GLuint tex = 0;
+    GLuint tex;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
-
-    SDL_LockSurface(rgba);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba->w, rgba->h, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, rgba->pixels);
-    SDL_UnlockSurface(rgba);
-
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    if (out_w) *out_w = rgba->w;
-    if (out_h) *out_h = rgba->h;
-
-    std::cout << "[AV] Loaded PNG: " << rgba->w << "x" << rgba->h << std::endl;
-
-    SDL_DestroySurface(rgba);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, sz, sz, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     return tex;
 }
 
 // ============================================================================
-// Preview a file
+// Directory listing
 // ============================================================================
 
-static void preview_file(const FileEntry& fe) {
-    clear_preview();
-    app.preview_name = fe.name;
+static void refresh_directory(ViewerState& st) {
+    st.files.clear();
+    st.filtered_files.clear();
+    st.selected_idx = -1;
 
-    char info[512];
-    snprintf(info, sizeof(info), "File: %s\nSize: %s\nType: %s",
-             fe.name.c_str(), format_size(fe.size).c_str(), filetype_label(fe.type));
+    std::error_code ec;
+    if (!fs::is_directory(st.current_dir, ec)) return;
 
-    if (fe.type == FT_TEXTURE_PVR) {
-        int w = 0, h = 0;
-        GLuint tex = pvr_load_texture(fe.full_path.c_str(), &w, &h);
-        if (tex) {
-            app.preview_tex = tex;
-            app.preview_w = w;
-            app.preview_h = h;
-            snprintf(info, sizeof(info), "File: %s\nSize: %s\nType: PVR (ETC1)\nDimensions: %dx%d",
-                     fe.name.c_str(), format_size(fe.size).c_str(), w, h);
-        } else {
-            snprintf(info, sizeof(info), "File: %s\nSize: %s\nType: PVR\nError: Failed to decode",
-                     fe.name.c_str(), format_size(fe.size).c_str());
-        }
-    }
-    else if (fe.type == FT_TEXTURE_PNG || fe.type == FT_TEXTURE_JPG) {
-        int w = 0, h = 0;
-        GLuint tex = load_png_texture(fe.full_path.c_str(), &w, &h);
-        if (tex) {
-            app.preview_tex = tex;
-            app.preview_w = w;
-            app.preview_h = h;
-            snprintf(info, sizeof(info), "File: %s\nSize: %s\nType: %s\nDimensions: %dx%d",
-                     fe.name.c_str(), format_size(fe.size).c_str(),
-                     fe.type == FT_TEXTURE_PNG ? "PNG" : "JPEG", w, h);
-        }
-    }
-    else if (fe.type == FT_AUDIO_WAV || fe.type == FT_AUDIO_OGG) {
-        snprintf(info, sizeof(info), "File: %s\nSize: %s\nType: %s Audio\n(Preview not implemented)",
-                 fe.name.c_str(), format_size(fe.size).c_str(),
-                 fe.type == FT_AUDIO_WAV ? "WAV" : "OGG Vorbis");
-    }
-    else if (fe.type == FT_MODEL_POD) {
-        app.model = load_pod_file(fe.full_path);
-        if (!app.model.meshes.empty()) {
-            app.model_loaded = true;
-            app.cam_yaw = 30.0f;
-            app.cam_pitch = 20.0f;
-            app.cam_dist = 3.0f;
-            snprintf(info, sizeof(info),
-                     "File: %s\nSize: %s\nType: POD 3D Model\n"
-                     "Meshes: %zu  Verts: %d  Tris: %d\n"
-                     "Version: %s  Frames: %d",
-                     fe.name.c_str(), format_size(fe.size).c_str(),
-                     app.model.meshes.size(), app.model.total_vertices,
-                     app.model.total_faces, app.model.version.c_str(),
-                     app.model.num_frames);
-            std::cout << "[AV] POD: " << app.model.meshes.size() << " meshes, "
-                      << app.model.total_vertices << " verts, "
-                      << app.model.total_faces << " tris" << std::endl;
-            // Auto-load matching PVR texture (same basename)
-            std::string base = fs::path(fe.full_path).stem().string();
-            std::string pvr_path = fs::path(fe.full_path).parent_path().string() + "/" + base + ".pvr";
-            int tw = 0, th = 0;
-            GLuint mtex = pvr_load_texture(pvr_path.c_str(), &tw, &th);
-            if (mtex) {
-                app.model_tex = mtex;
-                app.tex_mode = true;
-                std::cout << "[AV] Loaded texture: " << base << ".pvr (" << tw << "x" << th << ")" << std::endl;
-            }
-        } else {
-            snprintf(info, sizeof(info),
-                     "File: %s\nSize: %s\nType: POD 3D Model\nError: No mesh data found",
-                     fe.name.c_str(), format_size(fe.size).c_str());
-        }
-    }
-    else if (fe.type == FT_SCENE) {
-        snprintf(info, sizeof(info), "File: %s\nSize: %s\nType: Scene Definition\n(Scene preview not implemented)",
-                 fe.name.c_str(), format_size(fe.size).c_str());
+    // ".." entry
+    fs::path parent = fs::path(st.current_dir).parent_path();
+    if (!parent.empty() && parent != st.current_dir) {
+        FileEntry up;
+        up.name = "..";
+        up.full_path = parent.string();
+        up.is_dir = true;
+        up.size = 0;
+        up.type = FTYPE_OTHER;
+        st.files.push_back(up);
     }
 
-    app.preview_info = info;
+    for (auto& entry : fs::directory_iterator(st.current_dir, ec)) {
+        FileEntry fe;
+        fe.name = entry.path().filename().string();
+        fe.full_path = entry.path().string();
+        fe.is_dir = entry.is_directory(ec);
+        fe.size = fe.is_dir ? 0 : (size_t)entry.file_size(ec);
+        fe.type = fe.is_dir ? FTYPE_OTHER : classify_file(fe.name);
+        st.files.push_back(fe);
+    }
+
+    // Sort: directories first (except ".."), then alphabetical case-insensitive
+    std::sort(st.files.begin(), st.files.end(), [](const FileEntry& a, const FileEntry& b) {
+        if (a.name == "..") return true;
+        if (b.name == "..") return false;
+        if (a.is_dir != b.is_dir) return a.is_dir;
+        // Case-insensitive compare
+        std::string la = a.name, lb = b.name;
+        for (auto& c : la) c = (char)tolower((unsigned char)c);
+        for (auto& c : lb) c = (char)tolower((unsigned char)c);
+        return la < lb;
+    });
 }
 
-// ============================================================================
-// Handle file selection (click)
-// ============================================================================
+static void apply_filters(ViewerState& st) {
+    st.filtered_files.clear();
+    std::string search_lower(st.search_buf);
+    for (auto& c : search_lower) c = (char)tolower((unsigned char)c);
 
-static void on_file_selected(int index) {
-    if (index < 0 || index >= (int)app.filtered_entries.size()) return;
-    const FileEntry& fe = app.filtered_entries[index];
+    for (auto& f : st.files) {
+        // Type filter
+        if (st.type_filter != 0 && !f.is_dir && f.type != st.type_filter) continue;
 
-    if (fe.is_dir) {
-        // Navigate into directory
-        load_directory(fe.full_path);
-        clear_preview();
-    } else {
-        app.selected_index = index;
-        preview_file(fe);
+        // Search filter
+        if (!search_lower.empty()) {
+            std::string name_lower = f.name;
+            for (auto& c : name_lower) c = (char)tolower((unsigned char)c);
+            if (name_lower.find(search_lower) == std::string::npos) continue;
+        }
+        st.filtered_files.push_back(f);
     }
 }
 
 // ============================================================================
-// Render: Top bar (current path)
+// Resource cleanup
 // ============================================================================
 
-static void render_top_bar() {
-    float w = (float)app.win_w;
-    draw_rect(0, 0, w, TOP_BAR_H, BAR_R, BAR_G, BAR_B);
+static void free_preview_resources(ViewerState& st) {
+    // Free GPU meshes
+    for (auto& m : st.gpu_meshes) av::free_mesh(m);
+    st.gpu_meshes.clear();
+    st.model = av::PODModel{};
 
-    // Path breadcrumb
-    std::string display_path = app.current_dir;
-    // Truncate if too long
-    float max_path_w = w - 20.0f;
-    float pw = text_width(display_path, SMALL_SCALE);
-    if (pw > max_path_w) {
-        // Show ".../<tail>"
-        while (display_path.length() > 3 && text_width("..." + display_path, SMALL_SCALE) > max_path_w) {
-            auto slash = display_path.find('/', 1);
-            if (slash == std::string::npos) break;
-            display_path = display_path.substr(slash);
-        }
-        display_path = "..." + display_path;
-    }
+    // Free preview texture
+    if (st.preview_tex) { glDeleteTextures(1, &st.preview_tex); st.preview_tex = 0; }
+    st.tex_w = st.tex_h = 0;
+    st.tex_zoom = 1.0f;
+    st.tex_pan_x = st.tex_pan_y = 0.0f;
+    st.tex_format_str.clear();
 
-    draw_string(display_path, 10.0f, 10.0f, SMALL_SCALE, ACCENT_R, ACCENT_G, ACCENT_B);
+    // Free model texture
+    if (st.model_texture) { glDeleteTextures(1, &st.model_texture); st.model_texture = 0; }
 
-    // Bottom border
-    draw_rect(0, TOP_BAR_H - 1, w, 1, BORDER_R, BORDER_G, BORDER_B);
+    // Stop audio
+    av::audio_stop();
+
+    // Clear scene
+    st.scene = av::SceneData{};
+    st.selected_object = -1;
+    st.highlighted_mesh = -1;
+
+    st.preview_type = PREVIEW_NONE;
+    st.status_msg.clear();
 }
 
 // ============================================================================
-// Render: Filter bar
+// File selection / loading
 // ============================================================================
 
-static void render_filter_bar() {
-    float y = TOP_BAR_H;
-    float w = LEFT_PANEL_W;
-    draw_rect(0, y, w, FILTER_BAR_H, PANEL_R, PANEL_G, PANEL_B);
+static void try_load_matching_texture(ViewerState& st, const std::string& pod_path) {
+    // Given "somedir/model.POD", try "somedir/model_2x.pvr"
+    fs::path p(pod_path);
+    std::string stem = p.stem().string();
+    fs::path dir = p.parent_path();
 
-    float btn_x = 6.0f;
-    float btn_y = y + 5.0f;
-    float btn_h = FILTER_BAR_H - 10.0f;
+    // Try _2x.pvr first, then .pvr, then _2x.png, then .png
+    const char* suffixes[] = {"_2x.pvr", ".pvr", "_2x.png", ".png"};
+    for (auto& suf : suffixes) {
+        fs::path candidate = dir / (stem + suf);
+        if (fs::exists(candidate)) {
+            std::string cpath = candidate.string();
+            std::string ext = candidate.extension().string();
+            for (auto& c : ext) c = (char)tolower((unsigned char)c);
 
-    for (int i = 0; i < FILTER_COUNT; i++) {
-        float btn_w = text_width(filter_names[i], SMALL_SCALE) + 16.0f;
-
-        // Hover check
-        bool hovered = (app.mouse_x >= (int)btn_x && app.mouse_x < (int)(btn_x + btn_w) &&
-                        app.mouse_y >= (int)btn_y && app.mouse_y < (int)(btn_y + btn_h));
-
-        if (app.filter == (FilterMode)i) {
-            draw_rect(btn_x, btn_y, btn_w, btn_h, SEL_R, SEL_G, SEL_B);
-        } else if (hovered) {
-            draw_rect(btn_x, btn_y, btn_w, btn_h, HOVER_R, HOVER_G, HOVER_B);
-        }
-
-        draw_string(filter_names[i], btn_x + 8.0f, btn_y + 4.0f, SMALL_SCALE,
-                     TEXT_R, TEXT_G, TEXT_B);
-
-        // Click handling
-        if (hovered && app.mouse_clicked) {
-            app.filter = (FilterMode)i;
-            apply_filter();
-        }
-
-        btn_x += btn_w + 4.0f;
-    }
-
-    // Bottom border
-    draw_rect(0, y + FILTER_BAR_H - 1, w, 1, BORDER_R, BORDER_G, BORDER_B);
-}
-
-// ============================================================================
-// Render: File list (left panel)
-// ============================================================================
-
-static void render_file_list() {
-    float panel_x = 0;
-    float panel_y = TOP_BAR_H + FILTER_BAR_H;
-    float panel_w = LEFT_PANEL_W;
-    float panel_h = (float)app.win_h - panel_y;
-
-    // Background
-    draw_rect(panel_x, panel_y, panel_w, panel_h, PANEL_R, PANEL_G, PANEL_B);
-
-    // Calculate scroll limits
-    float total_h = app.filtered_entries.size() * FILE_ROW_H;
-    app.max_scroll_y = std::max(0.0f, total_h - panel_h);
-    app.scroll_y = std::clamp(app.scroll_y, 0.0f, app.max_scroll_y);
-
-    // Set scissor for file list area
-    // Note: glScissor uses bottom-left origin, so we flip Y
-    int sc_y = app.win_h - (int)(panel_y + panel_h);
-    glEnable(GL_SCISSOR_TEST);
-    glScissor((int)panel_x, sc_y, (int)panel_w, (int)panel_h);
-
-    // Update hover
-    app.hover_index = -1;
-
-    for (int i = 0; i < (int)app.filtered_entries.size(); i++) {
-        float row_y = panel_y + i * FILE_ROW_H - app.scroll_y;
-
-        // Skip if off-screen
-        if (row_y + FILE_ROW_H < panel_y || row_y > panel_y + panel_h)
-            continue;
-
-        const FileEntry& fe = app.filtered_entries[i];
-
-        // Hover detection
-        bool hovered = (app.mouse_x >= (int)panel_x &&
-                        app.mouse_x < (int)(panel_x + panel_w - SCROLLBAR_W) &&
-                        app.mouse_y >= (int)row_y && app.mouse_y < (int)(row_y + FILE_ROW_H) &&
-                        app.mouse_y >= (int)panel_y && app.mouse_y < (int)(panel_y + panel_h));
-
-        if (hovered) app.hover_index = i;
-
-        // Selection / hover highlight
-        if (i == app.selected_index) {
-            draw_rect(panel_x, row_y, panel_w - SCROLLBAR_W, FILE_ROW_H, SEL_R, SEL_G, SEL_B, 180);
-        } else if (hovered) {
-            draw_rect(panel_x, row_y, panel_w - SCROLLBAR_W, FILE_ROW_H, HOVER_R, HOVER_G, HOVER_B, 120);
-        }
-
-        // Type tag color
-        uint8_t tr, tg, tb;
-        filetype_color(fe.type, tr, tg, tb);
-
-        // Type tag
-        char tag[8];
-        snprintf(tag, sizeof(tag), "%-5s", filetype_label(fe.type));
-        draw_string(tag, panel_x + 6.0f, row_y + 4.0f, SMALL_SCALE, tr, tg, tb);
-
-        // Filename
-        float name_x = panel_x + 58.0f;
-        float max_name_w = panel_w - 70.0f - SCROLLBAR_W;
-        std::string display_name = fe.name;
-        // Truncate if too long
-        while (text_width(display_name, SMALL_SCALE) > max_name_w && display_name.length() > 3) {
-            display_name = display_name.substr(0, display_name.length() - 4) + "...";
-        }
-
-        if (fe.is_dir) {
-            draw_string(display_name, name_x, row_y + 4.0f, SMALL_SCALE, DIR_R, DIR_G, DIR_B);
-        } else {
-            draw_string(display_name, name_x, row_y + 4.0f, SMALL_SCALE, TEXT_R, TEXT_G, TEXT_B);
-        }
-
-        // Click handling
-        if (hovered && app.mouse_clicked) {
-            on_file_selected(i);
-        }
-    }
-
-    glDisable(GL_SCISSOR_TEST);
-
-    // Scrollbar
-    if (app.max_scroll_y > 0) {
-        float sb_x = panel_x + panel_w - SCROLLBAR_W;
-        float sb_track_h = panel_h;
-        float sb_thumb_h = std::max(20.0f, (panel_h / total_h) * sb_track_h);
-        float sb_thumb_y = panel_y + (app.scroll_y / app.max_scroll_y) * (sb_track_h - sb_thumb_h);
-
-        // Track
-        draw_rect(sb_x, panel_y, SCROLLBAR_W, sb_track_h, 22, 22, 30);
-        // Thumb
-        bool sb_hovered = (app.mouse_x >= (int)sb_x && app.mouse_x < (int)(sb_x + SCROLLBAR_W) &&
-                           app.mouse_y >= (int)sb_thumb_y && app.mouse_y < (int)(sb_thumb_y + sb_thumb_h));
-        if (app.scrollbar_dragging || sb_hovered)
-            draw_rect(sb_x + 2, sb_thumb_y, SCROLLBAR_W - 4, sb_thumb_h, 80, 80, 100);
-        else
-            draw_rect(sb_x + 2, sb_thumb_y, SCROLLBAR_W - 4, sb_thumb_h, 55, 55, 70);
-
-        // Scrollbar drag logic
-        if (sb_hovered && app.mouse_clicked) {
-            app.scrollbar_dragging = true;
-            app.scrollbar_drag_offset = app.mouse_y - sb_thumb_y;
-        }
-        if (app.scrollbar_dragging) {
-            if (app.mouse_down) {
-                float new_thumb_y = app.mouse_y - app.scrollbar_drag_offset;
-                float ratio = (new_thumb_y - panel_y) / (sb_track_h - sb_thumb_h);
-                app.scroll_y = std::clamp(ratio * app.max_scroll_y, 0.0f, app.max_scroll_y);
+            if (ext == ".pvr") {
+                st.model_texture = pvr_load_texture(cpath.c_str(), nullptr, nullptr);
             } else {
-                app.scrollbar_dragging = false;
+                // Use SDL_image for PNG
+                SDL_Surface* surf = IMG_Load(cpath.c_str());
+                if (surf) {
+                    // Convert to RGBA32
+                    SDL_Surface* conv = SDL_ConvertSurface(surf, SDL_PIXELFORMAT_RGBA32);
+                    SDL_DestroySurface(surf);
+                    if (conv) {
+                        GLuint tex;
+                        glGenTextures(1, &tex);
+                        glBindTexture(GL_TEXTURE_2D, tex);
+                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, conv->w, conv->h, 0,
+                                     GL_RGBA, GL_UNSIGNED_BYTE, conv->pixels);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                        st.model_texture = tex;
+                        SDL_DestroySurface(conv);
+                    }
+                }
             }
+            if (st.model_texture) return;
         }
     }
-
-    // Right border of left panel
-    draw_rect(panel_w - 1, TOP_BAR_H, 1, (float)app.win_h - TOP_BAR_H, BORDER_R, BORDER_G, BORDER_B);
 }
 
-// ============================================================================
-// Render: Preview panel (right side)
-// ============================================================================
+static void select_file(ViewerState& st, const FileEntry& fe) {
+    if (fe.is_dir) {
+        st.current_dir = fe.full_path;
+        refresh_directory(st);
+        apply_filters(st);
+        return;
+    }
 
-// Helper: render 3D model with orbit camera
-static void render_3d_model(float vp_x, float vp_y, float vp_w, float vp_h) {
-    // Save GL state
-    glPushAttrib(GL_ALL_ATTRIB_BITS);
-    
-    // Set viewport for the 3D region (GL viewport uses bottom-left origin)
-    int gl_vp_y = app.win_h - (int)(vp_y + vp_h);
-    glViewport((int)vp_x, gl_vp_y, (int)vp_w, (int)vp_h);
-    
-    glEnable(GL_DEPTH_TEST);
-    glClear(GL_DEPTH_BUFFER_BIT);
-    glDisable(GL_TEXTURE_2D);
-    
-    // Perspective projection
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
-    float aspect = vp_w / vp_h;
-    float fov = 45.0f;
-    float near_p = app.model.radius * 0.01f;
-    float far_p = app.model.radius * 20.0f;
-    float top = near_p * tanf(fov * 0.5f * 3.14159f / 180.0f);
-    float right = top * aspect;
-    glFrustum(-right, right, -top, top, near_p, far_p);
-    
-    // Camera transform (orbit)
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();
-    
-    float dist = app.model.radius * app.cam_dist;
-    float pitch_rad = app.cam_pitch * 3.14159f / 180.0f;
-    float yaw_rad = app.cam_yaw * 3.14159f / 180.0f;
-    float eye_x = app.model.center_x + dist * cosf(pitch_rad) * sinf(yaw_rad);
-    float eye_y = app.model.center_y + dist * sinf(pitch_rad);
-    float eye_z = app.model.center_z + dist * cosf(pitch_rad) * cosf(yaw_rad);
-    
-    // gluLookAt equivalent via manual matrix
-    float fx = app.model.center_x - eye_x;
-    float fy = app.model.center_y - eye_y;
-    float fz = app.model.center_z - eye_z;
-    float flen = sqrtf(fx*fx + fy*fy + fz*fz);
-    if (flen > 0) { fx /= flen; fy /= flen; fz /= flen; }
-    // Up = (0,1,0)
-    float sx = fy * 0.0f - fz * 1.0f; // wait, up=(0,1,0): s = f x up
-    // Actually: s = f × up
-    float ux = 0.0f, uy = 1.0f, uz = 0.0f;
-    sx = fy * uz - fz * uy;
-    float sy = fz * ux - fx * uz;
-    float sz = fx * uy - fy * ux;
-    float slen = sqrtf(sx*sx + sy*sy + sz*sz);
-    if (slen > 0) { sx /= slen; sy /= slen; sz /= slen; }
-    // u = s × f
-    ux = sy * fz - sz * fy;
-    uy = sz * fx - sx * fz;
-    uz = sx * fy - sy * fx;
-    
-    float m[16] = {
-        sx, ux, -fx, 0,
-        sy, uy, -fy, 0,
-        sz, uz, -fz, 0,
-        -(sx*eye_x + sy*eye_y + sz*eye_z),
-        -(ux*eye_x + uy*eye_y + uz*eye_z),
-        -(-fx*eye_x + -fy*eye_y + -fz*eye_z),
-        1
-    };
-    glLoadMatrixf(m);
-    
-    // Enable lighting for solid mode
-    if (!app.wireframe_mode) {
-        glEnable(GL_LIGHTING);
-        glEnable(GL_LIGHT0);
-        float light_pos[] = { eye_x, eye_y + app.model.radius, eye_z, 1.0f };
-        float light_diff[] = { 0.85f, 0.85f, 0.95f, 1.0f };
-        float light_amb[] = { 0.2f, 0.2f, 0.25f, 1.0f };
-        glLightfv(GL_LIGHT0, GL_POSITION, light_pos);
-        glLightfv(GL_LIGHT0, GL_DIFFUSE, light_diff);
-        glLightfv(GL_LIGHT0, GL_AMBIENT, light_amb);
-        glEnable(GL_COLOR_MATERIAL);
-        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
-    }
-    // Bind model texture if available
-    bool use_tex = app.tex_mode && app.model_tex && !app.wireframe_mode;
-    if (use_tex) {
-        glEnable(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, app.model_tex);
-        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-        glColor3f(1.0f, 1.0f, 1.0f); // white base color for modulate
-    }
-    
-    // Draw each mesh
-    for (size_t mi = 0; mi < app.model.meshes.size(); mi++) {
-        const auto& mesh = app.model.meshes[mi];
-        if (mesh.positions.empty()) continue;
-        
-        if (!use_tex) {
-            // Color per mesh (cycle through a palette)
-            uint8_t colors[][3] = {
-                {120, 180, 255}, {255, 160, 100}, {100, 220, 140},
-                {220, 130, 255}, {255, 220, 80},  {100, 220, 220},
-                {255, 130, 130}, {180, 180, 220}
-            };
-            auto& c = colors[mi % 8];
-            glColor3ub(c[0], c[1], c[2]);
-        }
-        
-        if (app.wireframe_mode) {
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-            glLineWidth(1.0f);
+    free_preview_resources(st);
+    st.sel_name = fe.name;
+    st.sel_path = fe.full_path;
+    st.sel_size = fe.size;
+
+    switch (fe.type) {
+    case FTYPE_TEXTURE: {
+        st.preview_type = PREVIEW_TEXTURE;
+        std::string ext = fs::path(fe.name).extension().string();
+        for (auto& c : ext) c = (char)tolower((unsigned char)c);
+
+        if (ext == ".pvr") {
+            st.preview_tex = pvr_load_texture(fe.full_path.c_str(), &st.tex_w, &st.tex_h);
+            st.tex_format_str = "ETC1 (PVR)";
         } else {
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        }
-        
-        glEnableClientState(GL_VERTEX_ARRAY);
-        glVertexPointer(3, GL_FLOAT, 0, mesh.positions.data());
-        if (!mesh.normals.empty() && !app.wireframe_mode) {
-            glEnableClientState(GL_NORMAL_ARRAY);
-            glNormalPointer(GL_FLOAT, 0, mesh.normals.data());
-        }
-        if (use_tex && !mesh.uvs.empty()) {
-            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-            glTexCoordPointer(2, GL_FLOAT, 0, mesh.uvs.data());
-        }
-        
-        if (!mesh.indices.empty()) {
-            glDrawElements(GL_TRIANGLES, (GLsizei)mesh.indices.size(),
-                           GL_UNSIGNED_SHORT, mesh.indices.data());
-        } else if (mesh.positions.size() >= 9) {
-            glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(mesh.positions.size() / 3));
-        }
-        
-        glDisableClientState(GL_VERTEX_ARRAY);
-        glDisableClientState(GL_NORMAL_ARRAY);
-        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-    }
-    
-    if (use_tex) {
-        glDisable(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, 0);
-    }
-    
-    // Draw grid on XZ plane
-    glDisable(GL_LIGHTING);
-    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-    float grid_size = app.model.radius * 2.0f;
-    float grid_step = grid_size / 10.0f;
-    glColor4ub(80, 80, 100, 100);
-    glLineWidth(1.0f);
-    glBegin(GL_LINES);
-    for (int i = -10; i <= 10; i++) {
-        float v = app.model.center_x + i * grid_step;
-        float z0 = app.model.center_z - grid_size;
-        float z1 = app.model.center_z + grid_size;
-        glVertex3f(v, app.model.min_y, z0);
-        glVertex3f(v, app.model.min_y, z1);
-        float x0 = app.model.center_x - grid_size;
-        float x1 = app.model.center_x + grid_size;
-        glVertex3f(x0, app.model.min_y, v - app.model.center_x + app.model.center_z);
-        glVertex3f(x1, app.model.min_y, v - app.model.center_x + app.model.center_z);
-    }
-    glEnd();
-    
-    // Restore
-    glMatrixMode(GL_MODELVIEW);
-    glPopMatrix();
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glPopAttrib();
-}
-
-static void render_preview_panel() {
-    float panel_x = LEFT_PANEL_W;
-    float panel_y = TOP_BAR_H;
-    float panel_w = (float)app.win_w - LEFT_PANEL_W;
-    float panel_h = (float)app.win_h - TOP_BAR_H - INFO_BAR_H;
-
-    // Background
-    draw_rect(panel_x, panel_y, panel_w, panel_h, BG_R, BG_G, BG_B);
-
-    if (app.model_loaded) {
-        // 3D model preview
-        render_3d_model(panel_x, panel_y, panel_w, panel_h);
-        
-        // After 3D, restore 2D projection for overlay text
-        glViewport(0, 0, app.win_w, app.win_h);
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        glOrtho(0, app.win_w, app.win_h, 0, -1, 1);
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_LIGHTING);
-        
-        // Controls hint
-        float hint_w = app.model_tex ? 420.0f : 320.0f;
-        draw_rect(panel_x + 8, panel_y + 4, hint_w, 22, 0, 0, 0, 160);
-        draw_string(app.model_tex ? "Drag:Orbit  Wheel:Zoom  W:Wire  T:Texture" : "Drag:Orbit  Wheel:Zoom  W:Wireframe",
-                     panel_x + 14, panel_y + 8, SMALL_SCALE, 160, 200, 255, 220);
-        
-        // Mode indicator
-        if (app.wireframe_mode) {
-            draw_rect(panel_x + panel_w - 110, panel_y + 4, 100, 22, 0, 0, 0, 160);
-            draw_string("WIREFRAME", panel_x + panel_w - 100, panel_y + 8,
-                         SMALL_SCALE, 100, 255, 160);
-        } else if (app.tex_mode && app.model_tex) {
-            draw_rect(panel_x + panel_w - 110, panel_y + 4, 100, 22, 0, 0, 0, 160);
-            draw_string("TEXTURED", panel_x + panel_w - 100, panel_y + 8,
-                         SMALL_SCALE, 255, 200, 80);
-        }
-    }
-    else if (app.preview_tex) {
-        // Fit texture to panel with zoom/pan
-        float pad = 20.0f;
-        float avail_w = panel_w - pad * 2;
-        float avail_h = panel_h - pad * 2;
-
-        float base_scale_w = avail_w / app.preview_w;
-        float base_scale_h = avail_h / app.preview_h;
-        float base_scale = std::min(base_scale_w, base_scale_h);
-        if (base_scale > 1.0f) base_scale = 1.0f;
-        
-        float scale = base_scale * app.tex_zoom;
-
-        float draw_w = app.preview_w * scale;
-        float draw_h = app.preview_h * scale;
-        float draw_x = panel_x + (panel_w - draw_w) / 2.0f + app.tex_pan_x;
-        float draw_y = panel_y + (panel_h - draw_h) / 2.0f + app.tex_pan_y;
-
-        // Checkerboard background for transparency
-        float check_size = 16.0f;
-        glEnable(GL_SCISSOR_TEST);
-        int sc_y = app.win_h - (int)(draw_y + draw_h);
-        glScissor((int)draw_x, sc_y, (int)draw_w, (int)draw_h);
-        for (float cy = draw_y; cy < draw_y + draw_h; cy += check_size) {
-            for (float cx = draw_x; cx < draw_x + draw_w; cx += check_size) {
-                int ix = (int)((cx - draw_x) / check_size);
-                int iy = (int)((cy - draw_y) / check_size);
-                uint8_t v = ((ix + iy) % 2 == 0) ? 40 : 50;
-                float cw = std::min(check_size, draw_x + draw_w - cx);
-                float ch = std::min(check_size, draw_y + draw_h - cy);
-                draw_rect(cx, cy, cw, ch, v, v, v);
+            SDL_Surface* surf = IMG_Load(fe.full_path.c_str());
+            if (surf) {
+                SDL_Surface* conv = SDL_ConvertSurface(surf, SDL_PIXELFORMAT_RGBA32);
+                SDL_DestroySurface(surf);
+                if (conv) {
+                    GLuint tex;
+                    glGenTextures(1, &tex);
+                    glBindTexture(GL_TEXTURE_2D, tex);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, conv->w, conv->h, 0,
+                                 GL_RGBA, GL_UNSIGNED_BYTE, conv->pixels);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    st.preview_tex = tex;
+                    st.tex_w = conv->w;
+                    st.tex_h = conv->h;
+                    st.tex_format_str = "RGBA8 (" + std::string(ext.c_str() + 1) + ")";
+                    SDL_DestroySurface(conv);
+                }
             }
         }
-        glDisable(GL_SCISSOR_TEST);
+        if (st.preview_tex)
+            st.status_msg = "Loaded " + fe.name + " — " + std::to_string(st.tex_w) + "x" + std::to_string(st.tex_h);
+        else
+            st.status_msg = "Failed to load " + fe.name;
+    } break;
 
-        // Draw the texture
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        draw_textured_quad(app.preview_tex, draw_x, draw_y, draw_w, draw_h);
+    case FTYPE_MODEL: {
+        st.preview_type = PREVIEW_MODEL;
+        st.model = av::pod_load(fe.full_path);
 
-        // Border around image
-        draw_border(draw_x, draw_y, draw_w, draw_h, BORDER_R, BORDER_G, BORDER_B);
-        
-        // Zoom controls hint
-        char zoom_buf[64];
-        snprintf(zoom_buf, sizeof(zoom_buf), "Wheel:Zoom(%.0f%%)  Drag:Pan  R:Reset", app.tex_zoom * 100.0f);
-        draw_rect(panel_x + 8, panel_y + 4, 340, 22, 0, 0, 0, 160);
-        draw_string(zoom_buf, panel_x + 14, panel_y + 8, SMALL_SCALE, 160, 200, 255, 220);
-    }
-    else if (!app.preview_name.empty()) {
-        // No texture preview, show centered message
-        const char* msg = "No preview available";
-        float tw = text_width(msg, TEXT_SCALE);
-        float tx = panel_x + (panel_w - tw) / 2.0f;
-        float ty = panel_y + panel_h / 2.0f - 6.0f;
-        draw_string(msg, tx, ty, TEXT_SCALE, DIM_R, DIM_G, DIM_B);
-    }
-    else {
-        // Nothing selected
-        const char* msg = "Select a file to preview";
-        float tw = text_width(msg, TEXT_SCALE);
-        float tx = panel_x + (panel_w - tw) / 2.0f;
-        float ty = panel_y + panel_h / 2.0f - 6.0f;
-        draw_string(msg, tx, ty, TEXT_SCALE, DIM_R, DIM_G, DIM_B, 150);
+        if (st.model.meshes.empty()) {
+            st.status_msg = "Failed to load " + fe.name;
+            st.preview_type = PREVIEW_NONE;
+            break;
+        }
+
+        // Upload each mesh to the GPU
+        for (auto& mesh : st.model.meshes) {
+            const float*    pos = mesh.positions.empty()  ? nullptr : mesh.positions.data();
+            const float*    nrm = mesh.normals.empty()    ? nullptr : mesh.normals.data();
+            const float*    uv  = mesh.uvs.empty()        ? nullptr : mesh.uvs.data();
+            const uint16_t* idx = mesh.indices.empty()    ? nullptr : mesh.indices.data();
+            av::GPUMesh gm = av::upload_mesh(pos, nrm, uv, mesh.num_vertices,
+                                              idx, (int)mesh.indices.size());
+            st.gpu_meshes.push_back(gm);
+        }
+
+        // Set camera to frame the model
+        st.camera = av::Camera{};
+        st.camera.target[0] = st.model.center_x;
+        st.camera.target[1] = st.model.center_y;
+        st.camera.target[2] = st.model.center_z;
+        st.camera.distance  = st.model.radius * 2.5f;
+        if (st.camera.distance < 1.0f) st.camera.distance = 3.0f;
+
+        // Try auto-loading a matching texture
+        try_load_matching_texture(st, fe.full_path);
+
+        // Bind texture to each GPU mesh
+        if (st.model_texture) {
+            for (auto& gm : st.gpu_meshes) gm.texture_id = st.model_texture;
+        }
+
+        char buf[256];
+        snprintf(buf, sizeof(buf), "Loaded %s — %d mesh(es), %d verts, %d faces",
+                 fe.name.c_str(), (int)st.model.meshes.size(),
+                 st.model.total_vertices, st.model.total_faces);
+        st.status_msg = buf;
+    } break;
+
+    case FTYPE_SCENE: {
+        st.preview_type = PREVIEW_SCENE;
+        st.scene = av::scene_load(fe.full_path);
+        if (st.scene.objects.empty()) {
+            st.status_msg = "Failed to parse " + fe.name;
+        } else {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "Loaded %s — %d objects",
+                     fe.name.c_str(), (int)st.scene.objects.size());
+            st.status_msg = buf;
+        }
+    } break;
+
+    case FTYPE_AUDIO: {
+        st.preview_type = PREVIEW_AUDIO;
+        if (av::audio_load(fe.full_path)) {
+            auto& as = av::audio_get_state();
+            char buf[256];
+            snprintf(buf, sizeof(buf), "Loaded %s — %s, %d Hz, %d-bit",
+                     fe.name.c_str(), format_time(as.duration).c_str(),
+                     as.sample_rate, as.bits_per_sample);
+            st.status_msg = buf;
+        } else {
+            st.status_msg = "Failed to load " + fe.name;
+            st.preview_type = PREVIEW_NONE;
+        }
+    } break;
+
+    default:
+        st.preview_type = PREVIEW_NONE;
+        st.status_msg = fe.name + " — no preview available";
+        break;
     }
 }
 
 // ============================================================================
-// Render: Info bar (bottom right)
+// UI: File browser panel (left)
 // ============================================================================
 
-static void render_info_bar() {
-    float bar_x = LEFT_PANEL_W;
-    float bar_y = (float)app.win_h - INFO_BAR_H;
-    float bar_w = (float)app.win_w - LEFT_PANEL_W;
+static void draw_file_browser(ViewerState& st) {
+    ImGui::BeginChild("FileBrowser", ImVec2(LEFT_PANEL_W, 0), ImGuiChildFlags_Borders);
 
-    // Background
-    draw_rect(bar_x, bar_y, bar_w, INFO_BAR_H, BAR_R, BAR_G, BAR_B);
-    // Top border
-    draw_rect(bar_x, bar_y, bar_w, 1, BORDER_R, BORDER_G, BORDER_B);
+    // Search bar
+    ImGui::PushItemWidth(-1);
+    bool search_changed = ImGui::InputTextWithHint("##search", "Search files...",
+                                                    st.search_buf, sizeof(st.search_buf));
+    ImGui::PopItemWidth();
 
-    if (!app.preview_info.empty()) {
-        draw_string(app.preview_info, bar_x + 14.0f, bar_y + 10.0f, SMALL_SCALE,
-                     TEXT_R, TEXT_G, TEXT_B);
+    // Filter buttons
+    ImGui::Spacing();
+    const char* labels[] = {"All", "Tex", "Model", "Scene", "Audio"};
+    for (int i = 0; i < 5; i++) {
+        if (i > 0) ImGui::SameLine();
+        bool active = (st.type_filter == i);
+        if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.35f, 0.45f, 0.70f, 1.0f));
+        if (ImGui::SmallButton(labels[i])) {
+            st.type_filter = i;
+            search_changed = true;
+        }
+        if (active) ImGui::PopStyleColor();
+    }
+    ImGui::Separator();
+
+    if (search_changed) apply_filters(st);
+
+    // File list
+    ImGui::BeginChild("FileList", ImVec2(0, 0));
+    for (int i = 0; i < (int)st.filtered_files.size(); i++) {
+        auto& f = st.filtered_files[i];
+
+        // Icon/color based on type
+        ImVec4 color(0.90f, 0.90f, 0.94f, 1.0f); // default text
+        const char* icon = "   ";
+        if (f.is_dir)                { icon = "\xF0\x9F\x93\x81 "; color = ImVec4(1.0f, 0.85f, 0.35f, 1.0f); } // 📁
+        else if (f.type == FTYPE_TEXTURE) { icon = "\xF0\x9F\x8E\xA8 "; color = ImVec4(0.45f, 0.85f, 0.45f, 1.0f); } // 🎨
+        else if (f.type == FTYPE_MODEL)   { icon = "\xF0\x9F\x94\xB7 "; color = ImVec4(0.45f, 0.65f, 1.0f, 1.0f); }  // 🔷
+        else if (f.type == FTYPE_SCENE)   { icon = "\xF0\x9F\x8F\x97 "; color = ImVec4(0.75f, 0.55f, 1.0f, 1.0f); }  // 🏗
+        else if (f.type == FTYPE_AUDIO)   { icon = "\xF0\x9F\x8E\xB5 "; color = ImVec4(1.0f, 0.65f, 0.30f, 1.0f); }  // 🎵
+
+        ImGui::PushStyleColor(ImGuiCol_Text, color);
+        char label[512];
+        snprintf(label, sizeof(label), "%s%s##%d", icon, f.name.c_str(), i);
+        bool selected = (i == st.selected_idx);
+        if (ImGui::Selectable(label, selected, ImGuiSelectableFlags_AllowDoubleClick)) {
+            st.selected_idx = i;
+            if (ImGui::IsMouseDoubleClicked(0) || f.is_dir) {
+                select_file(st, f);
+            } else {
+                // Single click: load file preview
+                select_file(st, f);
+            }
+        }
+        ImGui::PopStyleColor();
+    }
+    ImGui::EndChild();
+
+    ImGui::EndChild();
+}
+
+// ============================================================================
+// UI: Center panel — 3D model viewport
+// ============================================================================
+
+static void draw_model_viewport(ViewerState& st) {
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    int w = (int)avail.x;
+    int h = (int)avail.y;
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+
+    // Create or resize FBO
+    if (!st.fbo) {
+        st.fbo = av::create_fbo(w, h, &st.fbo_tex);
+        st.fbo_w = w; st.fbo_h = h;
+    } else if (w != st.fbo_w || h != st.fbo_h) {
+        av::resize_fbo(st.fbo, w, h, &st.fbo_tex);
+        st.fbo_w = w; st.fbo_h = h;
+    }
+
+    // Render the scene into FBO
+    av::begin_3d(st.fbo, w, h, st.camera);
+    av::render_grid(20.0f, st.model.min_y);
+
+    float identity[16];
+    av::mat4_identity(identity);
+    float white[4] = {1, 1, 1, 1};
+    float highlight[4] = {0.4f, 0.7f, 1.0f, 1.0f};
+
+    // Bind model texture if textured mode
+    for (int i = 0; i < (int)st.gpu_meshes.size(); i++) {
+        auto& gm = st.gpu_meshes[i];
+        if (st.show_textured && st.model_texture) {
+            gm.texture_id = st.model_texture;
+        } else {
+            gm.texture_id = 0;
+        }
+
+        float* col = (i == st.highlighted_mesh) ? highlight : white;
+        av::render_mesh(gm, identity, col, false);
+
+        if (st.show_wireframe) {
+            float wire_col[4] = {0.2f, 0.8f, 1.0f, 0.5f};
+            av::render_mesh(gm, identity, wire_col, true);
+        }
+    }
+    av::end_3d();
+
+    // Display FBO as ImGui image
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImGui::Image((ImTextureID)(intptr_t)st.fbo_tex, ImVec2((float)w, (float)h),
+                 ImVec2(0, 1), ImVec2(1, 0)); // flip Y for OpenGL
+
+    // Mouse interaction on viewport
+    if (ImGui::IsItemHovered()) {
+        ImGuiIO& io = ImGui::GetIO();
+
+        // Scroll to zoom
+        if (io.MouseWheel != 0.0f) {
+            st.camera.distance *= (1.0f - io.MouseWheel * 0.1f);
+            if (st.camera.distance < 0.1f) st.camera.distance = 0.1f;
+            if (st.camera.distance > 500.0f) st.camera.distance = 500.0f;
+        }
+
+        // Left drag: orbit
+        if (ImGui::IsMouseDragging(0)) {
+            ImVec2 delta = io.MouseDelta;
+            st.camera.yaw   += delta.x * 0.5f;
+            st.camera.pitch += delta.y * 0.5f;
+            if (st.camera.pitch >  89.0f) st.camera.pitch =  89.0f;
+            if (st.camera.pitch < -89.0f) st.camera.pitch = -89.0f;
+        }
+
+        // Right drag: pan
+        if (ImGui::IsMouseDragging(1)) {
+            ImVec2 delta = io.MouseDelta;
+            float scale = st.camera.distance * 0.003f;
+            // Pan in camera-local XY plane
+            float yaw_rad = st.camera.yaw * 3.14159f / 180.0f;
+            st.camera.target[0] -= (cosf(yaw_rad) * delta.x + sinf(yaw_rad) * 0) * scale;
+            st.camera.target[2] -= (-sinf(yaw_rad) * delta.x + cosf(yaw_rad) * 0) * scale;
+            st.camera.target[1] += delta.y * scale;
+        }
+    }
+}
+
+// ============================================================================
+// UI: Center panel — Texture preview
+// ============================================================================
+
+static void draw_texture_preview(ViewerState& st) {
+    if (!st.preview_tex) {
+        ImGui::TextDisabled("Failed to load texture.");
+        return;
+    }
+
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    ImVec2 img_size((float)st.tex_w * st.tex_zoom, (float)st.tex_h * st.tex_zoom);
+
+    // Center the image
+    float off_x = (avail.x - img_size.x) * 0.5f + st.tex_pan_x;
+    float off_y = (avail.y - img_size.y) * 0.5f + st.tex_pan_y;
+
+    // Draw checkerboard background behind the image area
+    ImVec2 cursor = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Checkerboard behind texture
+    ImVec2 img_min(cursor.x + off_x, cursor.y + off_y);
+    ImVec2 img_max(img_min.x + img_size.x, img_min.y + img_size.y);
+    if (st.checker_tex) {
+        float uv_scale_x = img_size.x / 32.0f;
+        float uv_scale_y = img_size.y / 32.0f;
+        dl->AddImage((ImTextureID)(intptr_t)st.checker_tex,
+                     img_min, img_max, ImVec2(0, 0), ImVec2(uv_scale_x, uv_scale_y));
+    }
+
+    // Draw the actual texture
+    dl->AddImage((ImTextureID)(intptr_t)st.preview_tex, img_min, img_max);
+
+    // Invisible button to capture mouse events
+    ImGui::InvisibleButton("##tex_area", avail);
+    if (ImGui::IsItemHovered()) {
+        ImGuiIO& io = ImGui::GetIO();
+        // Scroll to zoom
+        if (io.MouseWheel != 0.0f) {
+            float old_zoom = st.tex_zoom;
+            st.tex_zoom *= (1.0f + io.MouseWheel * 0.1f);
+            if (st.tex_zoom < 0.1f) st.tex_zoom = 0.1f;
+            if (st.tex_zoom > 32.0f) st.tex_zoom = 32.0f;
+
+            // Zoom towards mouse position
+            float mx = io.MousePos.x - cursor.x - avail.x * 0.5f;
+            float my = io.MousePos.y - cursor.y - avail.y * 0.5f;
+            float factor = st.tex_zoom / old_zoom;
+            st.tex_pan_x = mx - factor * (mx - st.tex_pan_x);
+            st.tex_pan_y = my - factor * (my - st.tex_pan_y);
+        }
+        // Drag to pan
+        if (ImGui::IsMouseDragging(0)) {
+            st.tex_pan_x += io.MouseDelta.x;
+            st.tex_pan_y += io.MouseDelta.y;
+        }
+    }
+}
+
+// ============================================================================
+// UI: Center panel — Scene inspector
+// ============================================================================
+
+static void draw_scene_inspector(ViewerState& st) {
+    if (st.scene.objects.empty()) {
+        ImGui::TextDisabled("No objects in scene.");
+        return;
+    }
+
+    ImGui::Text("Scene: %s — %d objects", st.scene.filename.c_str(), (int)st.scene.objects.size());
+    ImGui::Separator();
+
+    ImGui::BeginChild("SceneTree", ImVec2(0, 0));
+    for (int i = 0; i < (int)st.scene.objects.size(); i++) {
+        auto& obj = st.scene.objects[i];
+        bool is_selected = (i == st.selected_object);
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow;
+        if (is_selected) flags |= ImGuiTreeNodeFlags_Selected;
+        if (obj.components.empty()) flags |= ImGuiTreeNodeFlags_Leaf;
+
+        bool open = ImGui::TreeNodeEx((void*)(intptr_t)i, flags, "%s", obj.name.c_str());
+        if (ImGui::IsItemClicked()) st.selected_object = i;
+
+        if (open) {
+            // Transform
+            ImGui::TextDisabled("Position: (%.2f, %.2f, %.2f)", obj.pos_x, obj.pos_y, obj.pos_z);
+            ImGui::TextDisabled("Rotation: (%.2f, %.2f, %.2f)", obj.rot_x, obj.rot_y, obj.rot_z);
+            ImGui::TextDisabled("Scale:    (%.2f, %.2f, %.2f)", obj.scale_x, obj.scale_y, obj.scale_z);
+
+            // Components
+            for (auto& comp : obj.components) {
+                ImGui::BulletText("%s (id=%d)", comp.type_name.c_str(), comp.type_id);
+            }
+
+            // Mesh/texture references
+            if (!obj.mesh_name.empty())
+                ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Mesh: %s", obj.mesh_name.c_str());
+            if (!obj.texture_name.empty())
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "Texture: %s", obj.texture_name.c_str());
+
+            ImGui::TreePop();
+        }
+    }
+    ImGui::EndChild();
+}
+
+// ============================================================================
+// UI: Center panel — Audio player
+// ============================================================================
+
+static void draw_audio_player(ViewerState& st) {
+    auto& as = av::audio_get_state();
+    if (!as.loaded) {
+        ImGui::TextDisabled("No audio loaded.");
+        return;
+    }
+
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+
+    // Waveform display — takes most of the space
+    float waveform_h = avail.y - 90.0f;
+    if (waveform_h < 50.0f) waveform_h = 50.0f;
+
+    if (!as.waveform.empty()) {
+        // Draw waveform with playback position indicator
+        ImVec2 wf_pos = ImGui::GetCursorScreenPos();
+
+        ImGui::PlotLines("##waveform", as.waveform.data(), (int)as.waveform.size(),
+                         0, nullptr, -1.0f, 1.0f, ImVec2(avail.x, waveform_h));
+
+        // Playback position line
+        if (as.duration > 0.0f) {
+            float progress = as.position / as.duration;
+            float line_x = wf_pos.x + progress * avail.x;
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddLine(ImVec2(line_x, wf_pos.y),
+                        ImVec2(line_x, wf_pos.y + waveform_h),
+                        IM_COL32(255, 100, 50, 255), 2.0f);
+        }
     } else {
-        // Show item count
-        char buf[128];
-        snprintf(buf, sizeof(buf), "%zu items", app.filtered_entries.size());
-        draw_string(buf, bar_x + 14.0f, bar_y + 10.0f, SMALL_SCALE, DIM_R, DIM_G, DIM_B);
+        ImGui::TextDisabled("No waveform data available.");
+        ImGui::Dummy(ImVec2(0, waveform_h));
+    }
+
+    ImGui::Spacing();
+
+    // Controls row
+    float button_w = 32.0f;
+
+    // Play/Pause
+    if (as.playing && !as.paused) {
+        if (ImGui::Button("\xE2\x8F\xB8", ImVec2(button_w, 0)))  // ⏸
+            av::audio_pause();
+    } else {
+        if (ImGui::Button("\xE2\x96\xB6", ImVec2(button_w, 0)))  // ▶
+            av::audio_play();
+    }
+    ImGui::SameLine();
+
+    // Stop
+    if (ImGui::Button("\xE2\x8F\xB9", ImVec2(button_w, 0)))  // ⏹
+        av::audio_stop();
+    ImGui::SameLine();
+
+    // Time display
+    ImGui::Text("%s / %s", format_time(as.position).c_str(), format_time(as.duration).c_str());
+    ImGui::SameLine();
+
+    // Seek slider
+    float seek_w = avail.x - 350.0f;
+    if (seek_w < 100.0f) seek_w = 100.0f;
+    ImGui::PushItemWidth(seek_w);
+    float pos = as.position;
+    if (ImGui::SliderFloat("##seek", &pos, 0.0f, as.duration, "%.1fs")) {
+        av::audio_seek(pos);
+    }
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+
+    // Volume slider
+    ImGui::PushItemWidth(100.0f);
+    float vol = as.volume;
+    if (ImGui::SliderFloat("##vol", &vol, 0.0f, 1.0f, "Vol:%.0f%%")) {
+        av::audio_set_volume(vol);
+    }
+    ImGui::PopItemWidth();
+}
+
+// ============================================================================
+// UI: Center panel dispatcher
+// ============================================================================
+
+static void draw_center_panel(ViewerState& st) {
+    switch (st.preview_type) {
+        case PREVIEW_MODEL:   draw_model_viewport(st);  break;
+        case PREVIEW_TEXTURE: draw_texture_preview(st);  break;
+        case PREVIEW_SCENE:   draw_scene_inspector(st);  break;
+        case PREVIEW_AUDIO:   draw_audio_player(st);     break;
+        default: {
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            ImVec2 text_size = ImGui::CalcTextSize("No file selected");
+            ImGui::SetCursorPos(ImVec2(
+                ImGui::GetCursorPosX() + (avail.x - text_size.x) * 0.5f,
+                ImGui::GetCursorPosY() + (avail.y - text_size.y) * 0.5f));
+            ImGui::TextDisabled("No file selected");
+        } break;
     }
 }
 
 // ============================================================================
-// Render frame
+// UI: Properties panel (right)
 // ============================================================================
 
-static void render_frame() {
-    glViewport(0, 0, app.win_w, app.win_h);
-    glClearColor(BG_R / 255.0f, BG_G / 255.0f, BG_B / 255.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+static void draw_properties_panel(ViewerState& st) {
+    ImGui::BeginChild("Properties", ImVec2(RIGHT_PANEL_W, 0), ImGuiChildFlags_Borders);
 
-    // Set up 2D projection (top-left origin)
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glOrtho(0, app.win_w, app.win_h, 0, -1, 1);
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
+    ImGui::TextColored(ImVec4(0.45f, 0.65f, 1.0f, 1.0f), "Properties");
+    ImGui::Separator();
 
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_LIGHTING);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (st.preview_type == PREVIEW_NONE && st.sel_name.empty()) {
+        ImGui::TextDisabled("Select a file to view properties.");
+        ImGui::EndChild();
+        return;
+    }
 
-    render_top_bar();
-    render_filter_bar();
-    render_file_list();
-    render_preview_panel();
-    render_info_bar();
+    // Common info
+    ImGui::Text("Name: %s", st.sel_name.c_str());
+    ImGui::Text("Size: %s", format_size(st.sel_size).c_str());
+    ImGui::Text("Type: %s", filetype_label(
+        st.preview_type == PREVIEW_TEXTURE ? FTYPE_TEXTURE :
+        st.preview_type == PREVIEW_MODEL   ? FTYPE_MODEL   :
+        st.preview_type == PREVIEW_SCENE   ? FTYPE_SCENE   :
+        st.preview_type == PREVIEW_AUDIO   ? FTYPE_AUDIO   : FTYPE_OTHER));
+    ImGui::TextWrapped("Path: %s", st.sel_path.c_str());
+    ImGui::Separator();
+
+    switch (st.preview_type) {
+    case PREVIEW_MODEL: {
+        ImGui::Text("Version: %s", st.model.version.c_str());
+        ImGui::Text("Meshes:   %d", (int)st.model.meshes.size());
+        ImGui::Text("Vertices: %d", st.model.total_vertices);
+        ImGui::Text("Faces:    %d", st.model.total_faces);
+        ImGui::Text("Frames:   %d", st.model.num_frames);
+        ImGui::Separator();
+
+        // Bounding box
+        if (ImGui::TreeNode("Bounding Box")) {
+            ImGui::Text("Min: (%.3f, %.3f, %.3f)", st.model.min_x, st.model.min_y, st.model.min_z);
+            ImGui::Text("Max: (%.3f, %.3f, %.3f)", st.model.max_x, st.model.max_y, st.model.max_z);
+            ImGui::Text("Center: (%.3f, %.3f, %.3f)", st.model.center_x, st.model.center_y, st.model.center_z);
+            ImGui::Text("Radius: %.3f", st.model.radius);
+            ImGui::TreePop();
+        }
+        ImGui::Separator();
+
+        // Mesh list
+        if (ImGui::TreeNode("Meshes")) {
+            for (int i = 0; i < (int)st.model.meshes.size(); i++) {
+                auto& m = st.model.meshes[i];
+                char lbl[64];
+                snprintf(lbl, sizeof(lbl), "Mesh %d (%d verts)##m%d", i, m.num_vertices, i);
+                if (ImGui::Selectable(lbl, i == st.highlighted_mesh)) {
+                    st.highlighted_mesh = (st.highlighted_mesh == i) ? -1 : i;
+                }
+            }
+            ImGui::TreePop();
+        }
+        ImGui::Separator();
+
+        // Render controls
+        ImGui::TextColored(ImVec4(0.45f, 0.65f, 1.0f, 1.0f), "Render Controls");
+        ImGui::Checkbox("Textured", &st.show_textured);
+        ImGui::Checkbox("Wireframe", &st.show_wireframe);
+        ImGui::Text("Texture: %s", st.model_texture ? "Loaded" : "None");
+    } break;
+
+    case PREVIEW_TEXTURE: {
+        ImGui::Text("Width:  %d px", st.tex_w);
+        ImGui::Text("Height: %d px", st.tex_h);
+        ImGui::Text("Format: %s", st.tex_format_str.c_str());
+        ImGui::Text("Zoom:   %.0f%%", st.tex_zoom * 100.0f);
+        ImGui::Separator();
+        if (ImGui::Button("Reset Zoom")) {
+            st.tex_zoom = 1.0f;
+            st.tex_pan_x = st.tex_pan_y = 0.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Fit")) {
+            // Auto-fit zoom will be computed next frame based on avail size
+            st.tex_zoom = 1.0f;
+            st.tex_pan_x = st.tex_pan_y = 0.0f;
+        }
+    } break;
+
+    case PREVIEW_SCENE: {
+        ImGui::Text("Objects: %d", (int)st.scene.objects.size());
+        ImGui::Separator();
+        if (st.selected_object >= 0 && st.selected_object < (int)st.scene.objects.size()) {
+            auto& obj = st.scene.objects[st.selected_object];
+            ImGui::TextColored(ImVec4(0.45f, 0.65f, 1.0f, 1.0f), "Selected Object");
+            ImGui::Text("Name: %s", obj.name.c_str());
+            ImGui::Text("Components: %d", (int)obj.components.size());
+            ImGui::Separator();
+            ImGui::Text("Position: (%.2f, %.2f, %.2f)", obj.pos_x, obj.pos_y, obj.pos_z);
+            ImGui::Text("Rotation: (%.2f, %.2f, %.2f)", obj.rot_x, obj.rot_y, obj.rot_z);
+            ImGui::Text("Scale:    (%.2f, %.2f, %.2f)", obj.scale_x, obj.scale_y, obj.scale_z);
+            if (!obj.mesh_name.empty())
+                ImGui::Text("Mesh: %s", obj.mesh_name.c_str());
+            if (!obj.texture_name.empty())
+                ImGui::Text("Texture: %s", obj.texture_name.c_str());
+        }
+    } break;
+
+    case PREVIEW_AUDIO: {
+        auto& as = av::audio_get_state();
+        ImGui::Text("Sample Rate: %d Hz", as.sample_rate);
+        ImGui::Text("Channels:    %d", as.channels);
+        ImGui::Text("Bit Depth:   %d", as.bits_per_sample);
+        ImGui::Text("Duration:    %s", format_time(as.duration).c_str());
+        ImGui::Text("Status:      %s",
+                     as.playing ? (as.paused ? "Paused" : "Playing") : "Stopped");
+    } break;
+
+    default:
+        break;
+    }
+
+    ImGui::EndChild();
 }
 
 // ============================================================================
-// Event handling
+// UI: Status bar (bottom)
 // ============================================================================
 
-static void handle_events() {
-    app.mouse_clicked = false;
-    SDL_Event ev;
+static void draw_status_bar(ViewerState& st) {
+    ImGui::Separator();
+    ImGui::BeginChild("StatusBar", ImVec2(0, STATUS_BAR_H));
 
-    while (SDL_PollEvent(&ev)) {
-        switch (ev.type) {
-            case SDL_EVENT_QUIT:
-                app.running = false;
-                break;
+    // Left: directory
+    ImGui::TextDisabled("%s", st.current_dir.c_str());
 
-            case SDL_EVENT_WINDOW_RESIZED:
-                app.win_w = ev.window.data1;
-                app.win_h = ev.window.data2;
-                break;
+    // Center: status
+    if (!st.status_msg.empty()) {
+        float text_w = ImGui::CalcTextSize(st.status_msg.c_str()).x;
+        float avail = ImGui::GetContentRegionAvail().x;
+        ImGui::SameLine(avail * 0.3f);
+        ImGui::Text("%s", st.status_msg.c_str());
+    }
 
-            case SDL_EVENT_MOUSE_MOTION:
-                app.mouse_x = (int)ev.motion.x;
-                app.mouse_y = (int)ev.motion.y;
-                // Orbit camera drag
-                if (app.cam_dragging && app.model_loaded) {
-                    float dx = (float)(app.mouse_x - app.cam_drag_x);
-                    float dy = (float)(app.mouse_y - app.cam_drag_y);
-                    app.cam_yaw = app.cam_drag_yaw + dx * 0.5f;
-                    app.cam_pitch = std::clamp(app.cam_drag_pitch - dy * 0.5f, -89.0f, 89.0f);
-                }
-                // Texture pan drag
-                if (app.tex_dragging && app.preview_tex) {
-                    app.tex_pan_x = app.tex_drag_pan_x + (float)(app.mouse_x - app.tex_drag_x);
-                    app.tex_pan_y = app.tex_drag_pan_y + (float)(app.mouse_y - app.tex_drag_y);
-                }
-                break;
+    // Right: shortcuts
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 200.0f + ImGui::GetCursorPosX());
+    ImGui::TextDisabled("[W]ire [T]ex [R]eset [Esc]Quit");
 
-            case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                if (ev.button.button == SDL_BUTTON_LEFT) {
-                    app.mouse_down = true;
-                    app.mouse_x = (int)ev.button.x;
-                    app.mouse_y = (int)ev.button.y;
-                    // Start orbit drag if clicking on the 3D preview area
-                    if (app.model_loaded && app.mouse_x > (int)LEFT_PANEL_W
-                        && app.mouse_y > (int)TOP_BAR_H
-                        && app.mouse_y < app.win_h - (int)INFO_BAR_H) {
-                        app.cam_dragging = true;
-                        app.cam_drag_x = app.mouse_x;
-                        app.cam_drag_y = app.mouse_y;
-                        app.cam_drag_yaw = app.cam_yaw;
-                        app.cam_drag_pitch = app.cam_pitch;
-                    }
-                    // PVR texture drag-pan
-                    else if (app.preview_tex && !app.model_loaded) {
-                        app.tex_dragging = true;
-                        app.tex_drag_x = app.mouse_x;
-                        app.tex_drag_y = app.mouse_y;
-                        app.tex_drag_pan_x = app.tex_pan_x;
-                        app.tex_drag_pan_y = app.tex_pan_y;
-                    } else {
-                        app.mouse_clicked = true;
-                    }
-                }
-                break;
+    ImGui::EndChild();
+}
 
-            case SDL_EVENT_MOUSE_BUTTON_UP:
-                if (ev.button.button == SDL_BUTTON_LEFT) {
-                    app.mouse_down = false;
-                    app.cam_dragging = false;
-                    app.tex_dragging = false;
-                    app.scrollbar_dragging = false;
-                }
-                break;
+// ============================================================================
+// Apply ImGui theme
+// ============================================================================
 
-            case SDL_EVENT_MOUSE_WHEEL:
-            {
-                // Zoom 3D preview if mouse is over right panel
-                if (app.model_loaded && app.mouse_x > (int)LEFT_PANEL_W) {
-                    app.cam_dist -= ev.wheel.y * 0.3f;
-                    app.cam_dist = std::clamp(app.cam_dist, 0.5f, 20.0f);
-                }
-                // Zoom PVR texture preview
-                else if (app.preview_tex && !app.model_loaded && app.mouse_x > (int)LEFT_PANEL_W) {
-                    app.tex_zoom *= (ev.wheel.y > 0) ? 1.15f : (1.0f / 1.15f);
-                    app.tex_zoom = std::clamp(app.tex_zoom, 0.25f, 16.0f);
-                }
-                // Scroll file list if mouse is over left panel
-                else if (app.mouse_x < (int)LEFT_PANEL_W) {
-                    float panel_y = TOP_BAR_H + FILTER_BAR_H;
-                    if (app.mouse_y > (int)panel_y) {
-                        app.scroll_y -= ev.wheel.y * FILE_ROW_H * 3.0f;
-                        app.scroll_y = std::clamp(app.scroll_y, 0.0f, app.max_scroll_y);
-                    }
-                }
-                break;
-            }
+static void apply_theme() {
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding   = 0;
+    style.FrameRounding    = 4;
+    style.ScrollbarRounding = 6;
+    style.GrabRounding     = 3;
+    style.WindowBorderSize = 0;
+    style.FrameBorderSize  = 0;
+    style.ItemSpacing      = ImVec2(8, 6);
+    style.FramePadding     = ImVec2(8, 4);
 
-            case SDL_EVENT_KEY_DOWN:
-                switch (ev.key.key) {
-                    case SDLK_ESCAPE:
-                        app.running = false;
-                        break;
-                    case SDLK_BACKSPACE:
-                        // Go up one directory
-                        if (app.current_dir != "/") {
-                            std::string parent = fs::path(app.current_dir).parent_path().string();
-                            load_directory(parent);
-                            clear_preview();
-                        }
-                        break;
-                    case SDLK_W:
-                        // Toggle wireframe mode
-                        if (app.model_loaded) {
-                            app.wireframe_mode = !app.wireframe_mode;
-                        }
-                        break;
-                    case SDLK_T:
-                        // Toggle texture on 3D model
-                        if (app.model_loaded && app.model_tex) {
-                            app.tex_mode = !app.tex_mode;
-                        }
-                        break;
-                    case SDLK_R:
-                        // Reset texture zoom/pan
-                        app.tex_zoom = 1.0f;
-                        app.tex_pan_x = app.tex_pan_y = 0.0f;
-                        break;
-                    case SDLK_UP:
-                        if (app.selected_index > 0) {
-                            app.selected_index--;
-                            // Auto-scroll
-                            float row_y = TOP_BAR_H + FILTER_BAR_H + app.selected_index * FILE_ROW_H - app.scroll_y;
-                            if (row_y < TOP_BAR_H + FILTER_BAR_H)
-                                app.scroll_y -= FILE_ROW_H;
-                        }
-                        break;
-                    case SDLK_DOWN:
-                        if (app.selected_index < (int)app.filtered_entries.size() - 1) {
-                            app.selected_index++;
-                            float row_y = TOP_BAR_H + FILTER_BAR_H + app.selected_index * FILE_ROW_H - app.scroll_y;
-                            float panel_bottom = (float)app.win_h;
-                            if (row_y + FILE_ROW_H > panel_bottom)
-                                app.scroll_y += FILE_ROW_H;
-                        }
-                        break;
-                    case SDLK_RETURN:
-                        on_file_selected(app.selected_index);
-                        break;
-                    case SDLK_HOME:
-                        app.scroll_y = 0;
-                        break;
-                    case SDLK_END:
-                        app.scroll_y = app.max_scroll_y;
-                        break;
-                    case SDLK_F1: app.filter = FILTER_ALL;      apply_filter(); break;
-                    case SDLK_F2: app.filter = FILTER_TEXTURES; apply_filter(); break;
-                    case SDLK_F3: app.filter = FILTER_MODELS;   apply_filter(); break;
-                    case SDLK_F4: app.filter = FILTER_SCENES;   apply_filter(); break;
-                    case SDLK_F5: app.filter = FILTER_AUDIO;    apply_filter(); break;
-                    default: break;
-                }
-                break;
+    ImVec4* c = style.Colors;
+    c[ImGuiCol_WindowBg]        = ImVec4(0.10f, 0.10f, 0.14f, 1.0f);
+    c[ImGuiCol_ChildBg]         = ImVec4(0.12f, 0.12f, 0.16f, 1.0f);
+    c[ImGuiCol_PopupBg]         = ImVec4(0.14f, 0.14f, 0.19f, 0.95f);
+    c[ImGuiCol_FrameBg]         = ImVec4(0.16f, 0.16f, 0.22f, 1.0f);
+    c[ImGuiCol_FrameBgHovered]  = ImVec4(0.22f, 0.22f, 0.30f, 1.0f);
+    c[ImGuiCol_FrameBgActive]   = ImVec4(0.28f, 0.28f, 0.38f, 1.0f);
+    c[ImGuiCol_TitleBg]         = ImVec4(0.08f, 0.08f, 0.11f, 1.0f);
+    c[ImGuiCol_TitleBgActive]   = ImVec4(0.12f, 0.12f, 0.17f, 1.0f);
+    c[ImGuiCol_Header]          = ImVec4(0.20f, 0.22f, 0.32f, 1.0f);
+    c[ImGuiCol_HeaderHovered]   = ImVec4(0.28f, 0.30f, 0.42f, 1.0f);
+    c[ImGuiCol_HeaderActive]    = ImVec4(0.34f, 0.36f, 0.48f, 1.0f);
+    c[ImGuiCol_Button]          = ImVec4(0.24f, 0.28f, 0.40f, 1.0f);
+    c[ImGuiCol_ButtonHovered]   = ImVec4(0.32f, 0.38f, 0.55f, 1.0f);
+    c[ImGuiCol_ButtonActive]    = ImVec4(0.40f, 0.45f, 0.62f, 1.0f);
+    c[ImGuiCol_Tab]             = ImVec4(0.16f, 0.16f, 0.22f, 1.0f);
+    c[ImGuiCol_TabHovered]      = ImVec4(0.28f, 0.30f, 0.42f, 1.0f);
+    c[ImGuiCol_TabActive]       = ImVec4(0.22f, 0.24f, 0.35f, 1.0f);
+    c[ImGuiCol_Separator]       = ImVec4(0.22f, 0.22f, 0.30f, 1.0f);
+    c[ImGuiCol_ScrollbarBg]     = ImVec4(0.10f, 0.10f, 0.14f, 1.0f);
+    c[ImGuiCol_ScrollbarGrab]   = ImVec4(0.30f, 0.30f, 0.40f, 1.0f);
+    c[ImGuiCol_CheckMark]       = ImVec4(0.45f, 0.65f, 1.0f, 1.0f);
+    c[ImGuiCol_SliderGrab]      = ImVec4(0.45f, 0.55f, 0.80f, 1.0f);
+    c[ImGuiCol_Text]            = ImVec4(0.90f, 0.90f, 0.94f, 1.0f);
+    c[ImGuiCol_TextDisabled]    = ImVec4(0.50f, 0.50f, 0.58f, 1.0f);
+}
 
-            default:
-                break;
+// ============================================================================
+// Keyboard shortcut handling (called when ImGui doesn't want keyboard)
+// ============================================================================
+
+static bool handle_shortcuts(ViewerState& st) {
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.WantCaptureKeyboard) return false;
+
+    // Escape: quit
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) return true;
+
+    // W: toggle wireframe
+    if (ImGui::IsKeyPressed(ImGuiKey_W)) st.show_wireframe = !st.show_wireframe;
+
+    // T: toggle textured
+    if (ImGui::IsKeyPressed(ImGuiKey_T)) st.show_textured = !st.show_textured;
+
+    // R: reset camera
+    if (ImGui::IsKeyPressed(ImGuiKey_R)) {
+        st.camera = av::Camera{};
+        if (st.preview_type == PREVIEW_MODEL) {
+            st.camera.target[0] = st.model.center_x;
+            st.camera.target[1] = st.model.center_y;
+            st.camera.target[2] = st.model.center_z;
+            st.camera.distance  = st.model.radius * 2.5f;
+            if (st.camera.distance < 1.0f) st.camera.distance = 3.0f;
         }
     }
+
+    // F1-F5: filter types
+    if (ImGui::IsKeyPressed(ImGuiKey_F1)) { st.type_filter = 0; apply_filters(st); }
+    if (ImGui::IsKeyPressed(ImGuiKey_F2)) { st.type_filter = 1; apply_filters(st); }
+    if (ImGui::IsKeyPressed(ImGuiKey_F3)) { st.type_filter = 2; apply_filters(st); }
+    if (ImGui::IsKeyPressed(ImGuiKey_F4)) { st.type_filter = 3; apply_filters(st); }
+    if (ImGui::IsKeyPressed(ImGuiKey_F5)) { st.type_filter = 4; apply_filters(st); }
+
+    // Up/Down: navigate file list
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) {
+        if (st.selected_idx > 0) {
+            st.selected_idx--;
+            select_file(st, st.filtered_files[st.selected_idx]);
+        }
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) {
+        if (st.selected_idx < (int)st.filtered_files.size() - 1) {
+            st.selected_idx++;
+            select_file(st, st.filtered_files[st.selected_idx]);
+        }
+    }
+
+    // Enter: open directory
+    if (ImGui::IsKeyPressed(ImGuiKey_Enter)) {
+        if (st.selected_idx >= 0 && st.selected_idx < (int)st.filtered_files.size()) {
+            auto& f = st.filtered_files[st.selected_idx];
+            if (f.is_dir) select_file(st, f);
+        }
+    }
+
+    // Backspace: go up
+    if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
+        fs::path parent = fs::path(st.current_dir).parent_path();
+        if (!parent.empty() && parent != st.current_dir) {
+            st.current_dir = parent.string();
+            refresh_directory(st);
+            apply_filters(st);
+        }
+    }
+
+    return false;
 }
 
 // ============================================================================
-// Find a valid starting directory
-// ============================================================================
-
-static std::string find_start_dir(const char* arg) {
-    // 1. Command-line argument
-    if (arg) {
-        std::string expanded = expand_home(arg);
-        if (fs::is_directory(expanded)) return expanded;
-    }
-
-    // 2. Default asset directories
-    for (auto& d : DEFAULT_DIRS) {
-        std::string expanded = expand_home(d);
-        if (fs::is_directory(expanded)) return expanded;
-    }
-
-    // 3. Home directory
-    const char* home = getenv("HOME");
-    if (home && fs::is_directory(home)) return home;
-
-    // 4. Current directory
-    return ".";
-}
-
-// ============================================================================
-// main
+// Main
 // ============================================================================
 
 int main(int argc, char* argv[]) {
-    std::cout << "=== Swordigo Asset Viewer ===" << std::endl;
-
-    // Initialize SDL3
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        std::cerr << "SDL_Init failed: " << SDL_GetError() << std::endl;
+    // ── SDL init ────────────────────────────────────────────────────────
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
 
-    // Request OpenGL context
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+    // OpenGL 3.3 core
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 
-    app.window = SDL_CreateWindow(WIN_TITLE, WIN_W, WIN_H,
-                                  SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
-    if (!app.window) {
-        std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << std::endl;
+    SDL_Window* window = SDL_CreateWindow(WIN_TITLE, WIN_W, WIN_H,
+                                          SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    if (!window) {
+        fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         SDL_Quit();
         return 1;
     }
 
-    app.gl_ctx = SDL_GL_CreateContext(app.window);
-    if (!app.gl_ctx) {
-        std::cerr << "SDL_GL_CreateContext failed: " << SDL_GetError() << std::endl;
-        SDL_DestroyWindow(app.window);
+    SDL_GLContext gl_ctx = SDL_GL_CreateContext(window);
+    if (!gl_ctx) {
+        fprintf(stderr, "SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+        SDL_DestroyWindow(window);
         SDL_Quit();
         return 1;
     }
-
+    SDL_GL_MakeCurrent(window, gl_ctx);
     SDL_GL_SetSwapInterval(1); // VSync
 
-    // Set window icon (same as launcher)
-    {
-        const char* icon_paths[] = {
-            "src/assets/launcer_icon.png",
-            "src/assets/icon_gnome.png",
-            "/usr/share/icons/hicolor/128x128/apps/swordigo-desktop.png",
-            "/usr/share/pixmaps/swordigo-desktop.png",
-            nullptr
-        };
-        SDL_Surface* icon = nullptr;
-        for (int i = 0; icon_paths[i]; i++) {
-            icon = IMG_Load(icon_paths[i]);
-            if (icon) break;
-        }
-        if (icon) {
-            SDL_SetWindowIcon(app.window, icon);
-            SDL_DestroySurface(icon);
-        }
+    // ── ImGui init ──────────────────────────────────────────────────────
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+    apply_theme();
+
+    ImGui_ImplSDL3_InitForOpenGL(window, gl_ctx);
+    ImGui_ImplOpenGL3_Init(GLSL_VERSION);
+
+    // ── Subsystem init ──────────────────────────────────────────────────
+    if (!av::renderer_init()) {
+        fprintf(stderr, "Failed to initialize renderer.\n");
+    }
+    if (!av::audio_init()) {
+        fprintf(stderr, "Failed to initialize audio.\n");
     }
 
-    std::cout << "[AV] OpenGL: " << glGetString(GL_VERSION) << std::endl;
-    std::cout << "[AV] Renderer: " << glGetString(GL_RENDERER) << std::endl;
+    // Checkerboard texture for alpha backgrounds
+    g_state.checker_tex = create_checkerboard();
 
-    // Find and load starting directory
-    std::string start_dir = find_start_dir(argc > 1 ? argv[1] : nullptr);
-    std::cout << "[AV] Starting in: " << start_dir << std::endl;
-    load_directory(start_dir);
-
-    // Main loop
-    while (app.running) {
-        handle_events();
-        render_frame();
-        SDL_GL_SwapWindow(app.window);
-        SDL_Delay(16); // ~60fps cap
+    // ── Default directory ───────────────────────────────────────────────
+    if (argc > 1) {
+        g_state.current_dir = expand_home(argv[1]);
+    } else {
+        g_state.current_dir = expand_home("~/.local/share/swordigo-desktop/assets/resources/");
+    }
+    // Fallback: if the directory doesn't exist, use home
+    if (!fs::is_directory(g_state.current_dir)) {
+        const char* home = getenv("HOME");
+        g_state.current_dir = home ? home : "/";
     }
 
-    // Cleanup
-    clear_preview();
-    SDL_GL_DestroyContext(app.gl_ctx);
-    SDL_DestroyWindow(app.window);
+    refresh_directory(g_state);
+    apply_filters(g_state);
+    g_state.status_msg = "Ready — browse files on the left";
+
+    // ── Main loop ───────────────────────────────────────────────────────
+    bool running = true;
+    while (running) {
+        // Poll events
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            ImGui_ImplSDL3_ProcessEvent(&event);
+            if (event.type == SDL_EVENT_QUIT) running = false;
+            if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) running = false;
+        }
+
+        // Update audio
+        av::audio_update();
+
+        // Start ImGui frame
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplSDL3_NewFrame();
+        ImGui::NewFrame();
+
+        // Keyboard shortcuts
+        if (handle_shortcuts(g_state)) running = false;
+
+        // ── Fullscreen window ───────────────────────────────────────────
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(vp->WorkPos);
+        ImGui::SetNextWindowSize(vp->WorkSize);
+
+        ImGuiWindowFlags wflags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                                  ImGuiWindowFlags_NoResize   | ImGuiWindowFlags_NoMove |
+                                  ImGuiWindowFlags_NoBringToFrontOnFocus |
+                                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+
+        ImGui::Begin("##MainWindow", nullptr, wflags);
+
+        float total_h = ImGui::GetContentRegionAvail().y;
+        float content_h = total_h - STATUS_BAR_H;
+
+        // ── Top content area (3 columns) ────────────────────────────────
+        ImGui::BeginChild("ContentArea", ImVec2(0, content_h));
+
+        // Left panel: file browser
+        draw_file_browser(g_state);
+
+        ImGui::SameLine();
+
+        // Center panel: preview
+        float center_w = ImGui::GetContentRegionAvail().x - RIGHT_PANEL_W;
+        if (center_w < 100.0f) center_w = 100.0f;
+        ImGui::BeginChild("CenterPanel", ImVec2(center_w, 0));
+        draw_center_panel(g_state);
+        ImGui::EndChild();
+
+        ImGui::SameLine();
+
+        // Right panel: properties
+        draw_properties_panel(g_state);
+
+        ImGui::EndChild();
+
+        // ── Status bar ──────────────────────────────────────────────────
+        draw_status_bar(g_state);
+
+        ImGui::End();
+
+        // ── Render ──────────────────────────────────────────────────────
+        ImGui::Render();
+        int fb_w, fb_h;
+        SDL_GetWindowSizeInPixels(window, &fb_w, &fb_h);
+        glViewport(0, 0, fb_w, fb_h);
+        glClearColor(0.08f, 0.08f, 0.11f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        SDL_GL_SwapWindow(window);
+    }
+
+    // ── Cleanup ─────────────────────────────────────────────────────────
+    free_preview_resources(g_state);
+
+    if (g_state.fbo) av::delete_fbo(g_state.fbo, g_state.fbo_tex);
+    if (g_state.checker_tex) glDeleteTextures(1, &g_state.checker_tex);
+
+    av::audio_shutdown();
+    av::renderer_shutdown();
+
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
+    ImGui::DestroyContext();
+
+    SDL_GL_DestroyContext(gl_ctx);
+    SDL_DestroyWindow(window);
     SDL_Quit();
 
-    std::cout << "[AV] Goodbye!" << std::endl;
     return 0;
 }

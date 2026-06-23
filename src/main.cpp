@@ -39,7 +39,7 @@ namespace fs = std::filesystem;
 #include "platform/fbo_scaler.h"
 #include "platform/io_thread.h"
 #include "platform/binary_selector.h"
-#include "platform/launcher.h"
+#include "platform/launcher_ui.h"
 #include "platform/srt_overlay.h"
 
 extern bool g_display_active;
@@ -163,6 +163,14 @@ static uint64_t sre_player_level_addr = 0;       // int — experience level
 static uint64_t sre_player_atk_level_addr = 0;   // int — attack attribute
 static uint64_t sre_gui_scene_active_addr = 0;  // int — 1 when scene is active
 static uint64_t sre_gamestate_ptr_addr = 0;      // uint64_t — guest ptr to GameState
+static uint64_t sre_menu_active_addr = 0;        // int — bitfield, nonzero = menu open
+static uint64_t sre_text_input_active_addr = 0;  // int — nonzero = SRE text input active
+static uint64_t sre_hardmode_addr = 0;            // int — nonzero = hard mode (no frame cap, double-tick)
+
+// PostFX auto-disable state — tracks what the user chose so we can restore
+static bool postfx_suppressed_by_menu = false;
+static PostFXPreset postfx_user_preset = PostFXPreset::OFF;
+static bool postfx_user_enabled = false;
 
 // SRE Music Host API — declared in jni_bridge_arm64.cpp
 extern bool sre_music_host_load(const std::string& name);
@@ -176,17 +184,18 @@ extern float sre_music_host_get_volume();
 extern bool sre_music_host_is_playing();
 
 // FWKeyboard API — resolved from game binary symbols
-static uint32_t g_fw_sharedKeyboard = 0;   // Caver::FWKeyboard::sharedKeyboard()
-static uint32_t g_fw_sendKeyDown = 0;       // Caver::FWKeyboard::SendKeyDownEvent(uint, uint, double)
-static uint32_t g_fw_sendKeyUp = 0;         // Caver::FWKeyboard::SendKeyUpEvent(uint, uint, double)
-static uint32_t g_fw_sendKeyChar = 0;       // Caver::FWKeyboard::SendKeyCharEvent(uint, double)
-static uint32_t g_fw_handleMenuBtn = 0;     // Java_com_touchfoo_swordigo_Native_handleMenuButtonPress
+// Using uint64_t to support both ARM32 and ARM64 address spaces
+static uint64_t g_fw_sharedKeyboard = 0;   // Caver::FWKeyboard::sharedKeyboard()
+static uint64_t g_fw_sendKeyDown = 0;       // Caver::FWKeyboard::SendKeyDownEvent(uint, uint, double)
+static uint64_t g_fw_sendKeyUp = 0;         // Caver::FWKeyboard::SendKeyUpEvent(uint, uint, double)
+static uint64_t g_fw_sendKeyChar = 0;       // Caver::FWKeyboard::SendKeyCharEvent(uint, double)
+static uint64_t g_fw_handleMenuBtn = 0;     // Java_com_touchfoo_swordigo_Native_handleMenuButtonPress
 static bool g_typing_mode = false;          // F6 toggle: keyboard sends FWKeyboard events
 
 // Text input system — game calls startTextInput/stopTextInput via JNI,
 // we route SDL text events back to the game via textInputTextDidChange/textInputDidFinish
-static uint32_t g_fw_textInputDidChange = 0; // Java_com_touchfoo_swordigo_Native_textInputTextDidChange
-static uint32_t g_fw_textInputDidFinish = 0; // Java_com_touchfoo_swordigo_Native_textInputDidFinish
+static uint64_t g_fw_textInputDidChange = 0; // Java_com_touchfoo_swordigo_Native_textInputTextDidChange
+static uint64_t g_fw_textInputDidFinish = 0; // Java_com_touchfoo_swordigo_Native_textInputDidFinish
 extern bool g_text_input_active;             // Defined in jni_bridge.cpp
 extern std::string g_text_input_buffer;      // Defined in jni_bridge.cpp
 static bool g_text_input_was_active = false;  // Previous frame state for edge detection
@@ -319,6 +328,7 @@ static uint32_t write_guest_jstring(uint8_t* memory, const std::string& text) {
 }
 
 // Call textInputTextDidChange(JNIEnv* env, jclass cls, jstring text)
+// Hooked by SRE — our reimplementation bypasses the corrupt vtable.
 static void call_text_input_did_change(uint32_t env_ptr, const std::string& text) {
     if (!g_fw_textInputDidChange) return;
     uint8_t* memory = g_emulator->get_memory_base();
@@ -327,6 +337,7 @@ static void call_text_input_did_change(uint32_t env_ptr, const std::string& text
 }
 
 // Call textInputDidFinish(JNIEnv* env, jclass cls)
+// Hooked by SRE — clears editing state and delegate pointer directly.
 static void call_text_input_did_finish(uint32_t env_ptr) {
     if (!g_fw_textInputDidFinish) return;
     g_emulator->call(g_fw_textInputDidFinish, {env_ptr, 0});
@@ -603,12 +614,14 @@ void load_and_boot() {
     // Allocate some strings in guest memory for paths
     uint32_t path_ptr = 0x20000;
     uint32_t files_dir = path_ptr;
-    strcpy((char*)(g_guest_memory + files_dir), g_save_dir.c_str());
-    path_ptr += 100;
+    strncpy((char*)(g_guest_memory + files_dir), g_save_dir.c_str(), 255);
+    ((char*)(g_guest_memory + files_dir))[255] = '\0';
+    path_ptr += 256;
     
     uint32_t cache_dir = path_ptr;
-    strcpy((char*)(g_guest_memory + cache_dir), g_cache_dir.c_str());
-    path_ptr += 100;
+    strncpy((char*)(g_guest_memory + cache_dir), g_cache_dir.c_str(), 255);
+    ((char*)(g_guest_memory + cache_dir))[255] = '\0';
+    path_ptr += 256;
 
     if (setFilesDir) {
         std::cout << "[Boot] Calling setFilesDir" << std::endl;
@@ -894,6 +907,10 @@ void load_and_boot() {
                     // Allocate byte array in guest memory: [length(4)] [data(N)]
                     static uint32_t save_buf_addr = 0x40000000; // high address for save buffer
                     uint32_t array_len = g_snapshot_data.size();
+                    if (save_buf_addr + 4 + array_len > 0xE0000000ULL) {
+                        std::cerr << "[SAVE] Save data too large (" << array_len << " bytes), skipping" << std::endl;
+                        continue;
+                    }
                     *(uint32_t*)(g_guest_memory + save_buf_addr) = array_len;
                     memcpy(g_guest_memory + save_buf_addr + 4, g_snapshot_data.data(), array_len);
                     std::cout << "[Callback] snapshotLoaded with " << array_len << " bytes of save data" << std::endl;
@@ -1015,7 +1032,7 @@ void load_and_boot() {
                 glColor4ub(0, 0, 0, 180);
                 glBegin(GL_QUADS);
                 glVertex2f(10, g_win_h - 10); glVertex2f(420, g_win_h - 10);
-                glVertex2f(420, g_win_h - 275); glVertex2f(10, g_win_h - 275);
+                glVertex2f(420, g_win_h - 290); glVertex2f(10, g_win_h - 290);
                 glEnd();
                 // FPS text using simple pixel rendering
                 char dbg[256];
@@ -1074,6 +1091,11 @@ void load_and_boot() {
                 } else {
                     g_gui.draw_string("PostFX: Off", 20, g_win_h - 255, 1.2f, 120, 120, 120, 200);
                 }
+
+                // Graphics API
+                const char* api_str = (g_graphics_api == GraphicsAPI::VULKAN) ? "Vulkan" : "OpenGL";
+                snprintf(dbg, sizeof(dbg), "Graphics API: %s", api_str);
+                g_gui.draw_string(dbg, 20, g_win_h - 272, 1.2f, 100, 220, 255, 255);
 
                 glPopMatrix();
                 glMatrixMode(GL_PROJECTION);
@@ -1393,6 +1415,10 @@ void load_and_boot() {
                                     (static_cast<int>(g_postfx_preset) + 1) % static_cast<int>(PostFXPreset::COUNT)
                                 );
                                 postfx_apply_preset(g_postfx, g_postfx_preset);
+                                // Update saved user state for menu auto-restore
+                                postfx_user_preset = g_postfx_preset;
+                                postfx_user_enabled = g_postfx.enabled;
+                                postfx_suppressed_by_menu = false;
                                 std::cout << "[PostFX] Preset: " << g_postfx.preset_name << std::endl;
                                 break;
                             }
@@ -2002,6 +2028,52 @@ void load_and_boot_arm64() {
                               << ", 0x14880)" << std::dec << std::endl;
                     g_emulator_64->call(sre_init_addr, {load_addr, 0x14880});
                     std::cout << "[SRE] sre_init completed" << std::endl;
+
+                    // DEBUG: Dump ITextInputDelegate vtable to verify fix
+                    {
+                        uint8_t* mem = g_emulator_64->get_memory_base();
+                        uint64_t vtable_addr = load_addr + 0x7e1688;
+                        uint64_t entry0 = *(uint64_t*)(mem + vtable_addr);
+                        uint64_t entry1 = *(uint64_t*)(mem + vtable_addr + 8);
+                        std::cout << "[DEBUG] ITextInputDelegate vtable at 0x" << std::hex << vtable_addr
+                                  << ": [0]=0x" << entry0 << " [1]=0x" << entry1 
+                                  << std::dec << std::endl;
+                    }
+
+                    // ========= Safety RET-page for wild vtable jumps =========
+                    // Some vtable entries in GUITextFieldImpl (and possibly other
+                    // classes) have unrelocated/corrupt pointers. Instead of
+                    // chasing each individual entry, we fill the target page with
+                    // ARM64 RET instructions. Any wild vtable dispatch to this
+                    // address just returns cleanly to the caller.
+                    //
+                    // Known crash targets:
+                    //   0x2d6ce4c — GUITextFieldImpl vtable dispatch during drawApplication
+                    {
+                        uint64_t crash_page = 0x2d6c000;  // 0x2d6ce4c aligned to 4KB
+                        uint32_t ret_insn = 0xD65F03C0;   // ARM64 RET
+                        
+                        // Try uc_mem_map first (page might not be mapped yet)
+                        uc_engine* uc = (uc_engine*)g_emulator_64->get_uc_handle();
+                        uc_err map_err = uc_mem_map(uc, crash_page, 0x1000, UC_PROT_ALL);
+                        if (map_err == UC_ERR_OK) {
+                            for (uint64_t off = 0; off < 0x1000; off += 4) {
+                                uc_mem_write(uc, crash_page + off, &ret_insn, 4);
+                            }
+                            std::cout << "[Safety] Mapped + filled RET-page at 0x" 
+                                      << std::hex << crash_page << std::dec << std::endl;
+                        } else {
+                            // Page already mapped (entire space is pre-mapped by uc_mem_map_ptr)
+                            // Write directly to the host memory buffer
+                            uint8_t* mem = g_emulator_64->get_memory_base();
+                            for (uint64_t off = 0; off < 0x1000; off += 4) {
+                                *(uint32_t*)(mem + crash_page + off) = ret_insn;
+                            }
+                            std::cout << "[Safety] Wrote RET-page at 0x" << std::hex 
+                                      << crash_page << " (page was pre-mapped)" 
+                                      << std::dec << std::endl;
+                        }
+                    }
                 }
 
                 // ========= Phase 1: Resolve Lua API symbols from libswordigo.so =========
@@ -2474,7 +2546,7 @@ void load_and_boot_arm64() {
                     &g_sre_mod, "sre_init_gui");
                 if (sre_init_gui_addr) {
                     // SreGuiAddrs struct: 49 × uint64_t = 392 bytes
-                    uint64_t gui_addrs_guest = 0x48200;
+                    uint64_t gui_addrs_guest = 0x48400;  // after lua_ext_addrs (0x48200 + 152 = 0x48298)
                     uint64_t* ga = (uint64_t*)(g_guest_memory + gui_addrs_guest);
                     uint64_t B = g_main_mod_64.base_addr;  // base for brevity
                     
@@ -2571,7 +2643,198 @@ void load_and_boot_arm64() {
                               << std::endl;
                 }
 
+                // =============================================================
+                // MOD SYSTEM: Read mod configs and pass to SRE
+                // =============================================================
+                {
+                    uint64_t sre_init_mods_addr = g_loader_64->get_symbol_vaddr(
+                        &g_sre_mod, "sre_init_mods");
+                    
+                    // Guest address for mod config block (0x49000, 8KB)
+                    const uint64_t MOD_CONFIG_GUEST = 0x49000;
+                    const uint32_t MOD_MAGIC   = 0x4D4F4453; // "MODS"
+                    const uint32_t MOD_VERSION = 1;
+                    
+                    // Clear config block
+                    memset(g_guest_memory + MOD_CONFIG_GUEST, 0, 0x2000);
+                    
+                    // Scan mods directory
+                    std::string mods_dir = get_user_data_dir() + "/mods";
+                    uint32_t music_count = 0;
+                    uint32_t scene_count = 0;
+                    uint32_t bg_count = 0;
+                    uint32_t total_mods = 0;
+                    
+                    if (std::filesystem::exists(mods_dir)) {
+                        for (auto& entry : std::filesystem::directory_iterator(mods_dir)) {
+                            if (!entry.is_directory()) continue;
+                            // Skip disabled mods (dot-prefixed folders)
+                            std::string dirname = entry.path().filename().string();
+                            if (!dirname.empty() && dirname[0] == '.') continue;
+                            std::string mod_json_path = entry.path().string() + "/mod.json";
+                            if (!std::filesystem::exists(mod_json_path)) continue;
+                            
+                            // Read mod.json
+                            std::ifstream f(mod_json_path);
+                            if (!f.is_open()) continue;
+                            std::string content((std::istreambuf_iterator<char>(f)),
+                                                std::istreambuf_iterator<char>());
+                            f.close();
+                            
+                            // Check if mod is enabled (default: enabled)
+                            // For now, all mods in the directory are active
+                            total_mods++;
+                            
+                            // Simple JSON parser: find "type" field
+                            auto json_get = [&](const std::string& key) -> std::string {
+                                std::string search = "\"" + key + "\"";
+                                size_t pos = content.find(search);
+                                if (pos == std::string::npos) return "";
+                                pos = content.find("\"", pos + search.length() + 1);
+                                if (pos == std::string::npos) return "";
+                                size_t end = content.find("\"", pos + 1);
+                                if (end == std::string::npos) return "";
+                                return content.substr(pos + 1, end - pos - 1);
+                            };
+                            
+                            std::string mod_type = json_get("type");
+                            std::string mod_name = json_get("name");
+                            
+                            if (mod_type == "music") {
+                                // Parse music replacements from "replace" object
+                                // Simple: find "replace" block, extract key:value pairs
+                                size_t repl_pos = content.find("\"replace\"");
+                                if (repl_pos != std::string::npos) {
+                                    size_t brace = content.find("{", repl_pos);
+                                    size_t end_brace = content.find("}", brace);
+                                    if (brace != std::string::npos && end_brace != std::string::npos) {
+                                        std::string block = content.substr(brace + 1, end_brace - brace - 1);
+                                        // Parse key:value pairs
+                                        size_t scan = 0;
+                                        while (scan < block.size() && music_count < 32) {
+                                            size_t ks = block.find("\"", scan);
+                                            if (ks == std::string::npos) break;
+                                            size_t ke = block.find("\"", ks + 1);
+                                            if (ke == std::string::npos) break;
+                                            size_t vs = block.find("\"", ke + 1);
+                                            if (vs == std::string::npos) break;
+                                            size_t ve = block.find("\"", vs + 1);
+                                            if (ve == std::string::npos) break;
+                                            
+                                            std::string orig = block.substr(ks + 1, ke - ks - 1);
+                                            std::string repl = block.substr(vs + 1, ve - vs - 1);
+                                            
+                                            // Write to guest memory (music entries at 0x40, 64 bytes each)
+                                            uint64_t entry_addr = MOD_CONFIG_GUEST + 0x40 + music_count * 64;
+                                            strncpy((char*)(g_guest_memory + entry_addr), orig.c_str(), 31);
+                                            strncpy((char*)(g_guest_memory + entry_addr + 32), repl.c_str(), 31);
+                                            music_count++;
+                                            
+                                            scan = ve + 1;
+                                        }
+                                    }
+                                }
+                                std::cout << "[MOD] Loaded music mod: " << mod_name 
+                                          << " (" << music_count << " replacements)" << std::endl;
+                            } else if (mod_type == "scene" || mod_type == "asset") {
+                                // Parse scene/asset replacements from "replace" object
+                                size_t repl_pos = content.find("\"replace\"");
+                                if (repl_pos != std::string::npos) {
+                                    size_t brace = content.find("{", repl_pos);
+                                    size_t end_brace = content.find("}", brace);
+                                    if (brace != std::string::npos && end_brace != std::string::npos) {
+                                        std::string block = content.substr(brace + 1, end_brace - brace - 1);
+                                        size_t scan = 0;
+                                        while (scan < block.size() && scene_count < 16) {
+                                            size_t ks = block.find("\"", scan);
+                                            if (ks == std::string::npos) break;
+                                            size_t ke = block.find("\"", ks + 1);
+                                            if (ke == std::string::npos) break;
+                                            size_t vs = block.find("\"", ke + 1);
+                                            if (vs == std::string::npos) break;
+                                            size_t ve = block.find("\"", vs + 1);
+                                            if (ve == std::string::npos) break;
+                                            
+                                            std::string orig = block.substr(ks + 1, ke - ks - 1);
+                                            std::string repl = block.substr(vs + 1, ve - vs - 1);
+                                            
+                                            // Write to guest memory (scene entries at 0x840, 128 bytes each)
+                                            uint64_t entry_addr = MOD_CONFIG_GUEST + 0x840 + scene_count * 128;
+                                            strncpy((char*)(g_guest_memory + entry_addr), orig.c_str(), 63);
+                                            strncpy((char*)(g_guest_memory + entry_addr + 64), repl.c_str(), 63);
+                                            scene_count++;
+                                            
+                                            scan = ve + 1;
+                                        }
+                                    }
+                                }
+                                std::cout << "[MOD] Loaded scene mod: " << mod_name 
+                                          << " (" << scene_count << " replacements)" << std::endl;
+                            } else if (mod_type == "background") {
+                                // Parse background replacements from "replace" object
+                                size_t repl_pos = content.find("\"replace\"");
+                                if (repl_pos != std::string::npos) {
+                                    size_t brace = content.find("{", repl_pos);
+                                    size_t end_brace = content.find("}", brace);
+                                    if (brace != std::string::npos && end_brace != std::string::npos) {
+                                        std::string block = content.substr(brace + 1, end_brace - brace - 1);
+                                        size_t scan = 0;
+                                        while (scan < block.size() && bg_count < 16) {
+                                            size_t ks = block.find("\"", scan);
+                                            if (ks == std::string::npos) break;
+                                            size_t ke = block.find("\"", ks + 1);
+                                            if (ke == std::string::npos) break;
+                                            size_t vs = block.find("\"", ke + 1);
+                                            if (vs == std::string::npos) break;
+                                            size_t ve = block.find("\"", vs + 1);
+                                            if (ve == std::string::npos) break;
+                                            
+                                            std::string orig = block.substr(ks + 1, ke - ks - 1);
+                                            std::string repl = block.substr(vs + 1, ve - vs - 1);
+                                            
+                                            // Write to guest memory (bg entries at 0x1040, 128 bytes each)
+                                            uint64_t entry_addr = MOD_CONFIG_GUEST + 0x1040 + bg_count * 128;
+                                            strncpy((char*)(g_guest_memory + entry_addr), orig.c_str(), 63);
+                                            strncpy((char*)(g_guest_memory + entry_addr + 64), repl.c_str(), 63);
+                                            bg_count++;
+                                            
+                                            scan = ve + 1;
+                                        }
+                                    }
+                                }
+                                std::cout << "[MOD] Loaded background mod: " << mod_name 
+                                          << " (" << bg_count << " replacements)" << std::endl;
+                            }
+                            // Log unknown types
+                            if (mod_type != "music" && mod_type != "scene" && mod_type != "asset" && mod_type != "background") {
+                                std::cout << "[MOD] Unknown mod type '" << mod_type << "' for: " << mod_name << std::endl;
+                            }
+                        }
+                    }
+                    
+                    // Write header
+                    uint32_t* hdr = (uint32_t*)(g_guest_memory + MOD_CONFIG_GUEST);
+                    hdr[0] = MOD_MAGIC;
+                    hdr[1] = MOD_VERSION;
+                    hdr[2] = music_count;
+                    hdr[3] = scene_count;
+                    hdr[4] = bg_count;
+                    hdr[5] = 0; // flags
+                    hdr[6] = total_mods;
+                    
+                    // Call sre_init_mods
+                    if (sre_init_mods_addr) {
+                        g_emulator_64->call(sre_init_mods_addr, {MOD_CONFIG_GUEST});
+                        std::cout << "[MOD] SRE mod system initialized: " << total_mods 
+                                  << " mods, " << music_count << " music replacements"
+                                  << std::endl;
+                    } else {
+                        std::cout << "[MOD] sre_init_mods not found — mod support disabled"
+                                  << std::endl;
+                    }
+                }
                 
+
                 // Resolve GUI overlay state addresses
                 static uint64_t gui_overlay_addr = 0;
                 static uint64_t gui_screen_w_addr = 0;
@@ -2630,6 +2893,19 @@ void load_and_boot_arm64() {
                 sre_player_atk_level_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_player_atk_level");
                 sre_gui_scene_active_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_gui_scene_active");
                 sre_gamestate_ptr_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_gamestate_ptr");
+                sre_menu_active_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_menu_active");
+                if (sre_menu_active_addr)
+                    std::cout << "[SRE] Menu detection: 0x" << std::hex << sre_menu_active_addr << std::dec << std::endl;
+                
+                // Text input state — SRE sets this when StartTextInputWithDelegate fires
+                sre_text_input_active_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_text_input_active");
+                if (sre_text_input_active_addr)
+                    std::cout << "[SRE] TextInput detection: 0x" << std::hex << sre_text_input_active_addr << std::dec << std::endl;
+                
+                // Hard mode — controls frame limiter + ProgramState double-tick
+                sre_hardmode_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_hardmode");
+                if (sre_hardmode_addr)
+                    std::cout << "[SRE] Hardmode flag: 0x" << std::hex << sre_hardmode_addr << std::dec << std::endl;
                 
                 std::cout << "[SRE] GUI: hp=0x" << std::hex << sre_player_hp_addr
                           << " coins=0x" << sre_player_coins_addr
@@ -2710,12 +2986,14 @@ void load_and_boot_arm64() {
     // Guest path pointers are still uint32_t addresses (guest memory < 4GB)
     uint32_t path_ptr = 0x20000;
     uint32_t files_dir = path_ptr;
-    strcpy((char*)(g_guest_memory + files_dir), g_save_dir.c_str());
-    path_ptr += 100;
+    strncpy((char*)(g_guest_memory + files_dir), g_save_dir.c_str(), 255);
+    ((char*)(g_guest_memory + files_dir))[255] = '\0';
+    path_ptr += 256;
     
     uint32_t cache_dir = path_ptr;
-    strcpy((char*)(g_guest_memory + cache_dir), g_cache_dir.c_str());
-    path_ptr += 100;
+    strncpy((char*)(g_guest_memory + cache_dir), g_cache_dir.c_str(), 255);
+    ((char*)(g_guest_memory + cache_dir))[255] = '\0';
+    path_ptr += 256;
 
     // Reload controls for ARM64 (separate from ARM32 due to different scaling)
     g_input_config.load(g_save_dir + "/controls_arm64.ini");
@@ -3005,6 +3283,10 @@ void load_and_boot_arm64() {
                 if (g_snapshot_has_data && !g_snapshot_data.empty()) {
                     static uint32_t save_buf_addr = 0x40000000;
                     uint32_t array_len = g_snapshot_data.size();
+                    if (save_buf_addr + 4 + array_len > 0xE0000000ULL) {
+                        std::cerr << "[SAVE] Save data too large (" << array_len << " bytes), skipping" << std::endl;
+                        continue;
+                    }
                     *(uint32_t*)(g_guest_memory + save_buf_addr) = array_len;
                     memcpy(g_guest_memory + save_buf_addr + 4, g_snapshot_data.data(), array_len);
                     std::cout << "[Callback64] snapshotLoaded with " << array_len << " bytes of save data" << std::endl;
@@ -3082,6 +3364,21 @@ void load_and_boot_arm64() {
                         }
                     }
                     
+                    /* === PostFX Auto-Disable in Menus ===
+                     * DISABLED — Unreliable due to incomplete GUI hook coverage.
+                     * We only control ~8 DrawRect hooks but the engine has many
+                     * more GUI views (map, pause, equipment, shops, etc.) that
+                     * we can't detect yet. Re-enable once we hook a reliable
+                     * frame-level signal (e.g. ProgramState screen type, or a
+                     * top-level "is gameplay active" flag from the engine).
+                     *
+                     * Infrastructure in place:
+                     *   SRE:  g_sre_menu_active (volatile int, exported)
+                     *         Set by NewMenuView/GUIAlertView/GUISlider DrawRect hooks
+                     *   Host: sre_menu_active_addr, postfx_user_preset, etc.
+                     *         Reads flag, suppresses PostFX, restores on menu close
+                     */
+
                     fbo_end_game_and_blit(g_draw_w, g_draw_h, g_fbo_mode, &g_postfx);
                     
                     // Render portal in vanilla mode — DISABLED pending RE of vertex data
@@ -3235,7 +3532,7 @@ void load_and_boot_arm64() {
                 glColor4ub(0, 0, 0, 180);
                 glBegin(GL_QUADS);
                 glVertex2f(10, g_win_h - 10); glVertex2f(420, g_win_h - 10);
-                glVertex2f(420, g_win_h - 300); glVertex2f(10, g_win_h - 300);
+                glVertex2f(420, g_win_h - 315); glVertex2f(10, g_win_h - 315);
                 glEnd();
                 char dbg[256];
                 snprintf(dbg, sizeof(dbg), "FPS: %.1f", fps);
@@ -3292,6 +3589,11 @@ void load_and_boot_arm64() {
                 } else {
                     g_gui.draw_string("PostFX: Off", 20, g_win_h - 255, 1.2f, 120, 120, 120, 200);
                 }
+
+                // Graphics API
+                const char* api_str = (g_graphics_api == GraphicsAPI::VULKAN) ? "Vulkan" : "OpenGL";
+                snprintf(dbg, sizeof(dbg), "Graphics API: %s", api_str);
+                g_gui.draw_string(dbg, 20, g_win_h - 272, 1.2f, 100, 220, 255, 255);
 
                 // Player Stats (from SRE GUI hook)
                 if (sre_gui_scene_active_addr && g_guest_memory) {
@@ -3427,6 +3729,44 @@ void load_and_boot_arm64() {
                 {
                     g_display_ptr->swap();
                 }
+
+                // ========= Frame rate limiter =========
+                // The original game ran at 30fps with VSync. Without a frame cap,
+                // the loop runs at 500+ FPS and the dt floor clamp inflates tiny
+                // deltas to 16.6ms, making everything move ~8x faster.
+                // Target 60fps for smooth gameplay at correct speed.
+                // In HARD MODE this is bypassed — entities run at full uncapped speed.
+                {
+                    bool hardmode = false;
+                    if (sre_hardmode_addr) {
+                        hardmode = *(volatile int*)(g_emulator_64->get_memory_base() + sre_hardmode_addr) != 0;
+                    }
+                    if (!hardmode) {
+                        const float TARGET_FRAME_TIME_MS = 1000.0f / 60.0f;  // ~16.67ms
+                        Uint64 frame_end = SDL_GetTicks();
+                        float frame_elapsed_ms = (float)(frame_end - now_ticks);
+                        if (frame_elapsed_ms < TARGET_FRAME_TIME_MS) {
+                            SDL_Delay((uint32_t)(TARGET_FRAME_TIME_MS - frame_elapsed_ms));
+                        }
+                    }
+                }
+                // Sync text input state from SRE (replaces JNI bridge path)
+                // SRE's StartTextInputWithDelegate hook sets g_sre_text_input_active = 1,
+                // StopTextInputWithDelegate / textInputDidFinish set it to 0.
+                if (sre_text_input_active_addr) {
+                    uint8_t* mem = g_emulator_64->get_memory_base();
+                    int sre_ti = *(volatile int*)(mem + sre_text_input_active_addr);
+                    if (sre_ti && !g_text_input_active) {
+                        g_text_input_active = true;
+                        g_text_input_buffer.clear();
+                        std::cout << "[TextInput] SRE: text input activated" << std::endl;
+                    } else if (!sre_ti && g_text_input_active) {
+                        g_text_input_active = false;
+                        g_text_input_buffer.clear();
+                        std::cout << "[TextInput] SRE: text input deactivated" << std::endl;
+                    }
+                }
+
                 // Auto-toggle SDL text input when game requests it
                 if (g_text_input_active && !g_text_input_was_active) {
                     SDL_StartTextInput(g_display_ptr->get_window());
@@ -3437,7 +3777,9 @@ void load_and_boot_arm64() {
                 }
                 g_text_input_was_active = g_text_input_active;
 
-                // ARM64 text input callback helpers (lambdas capture env_ptr and g_emulator_64)
+                // ARM64 text input callback helpers
+                // Hooked by SRE — our reimplementation in sre_gui_native.c
+                // bypasses the corrupt ITextInputDelegate vtable entirely.
                 auto call_text_change_64 = [&](const std::string& text) {
                     if (!g_fw_textInputDidChange) return;
                     uint8_t* memory = g_emulator_64->get_memory_base();
@@ -3501,6 +3843,10 @@ void load_and_boot_arm64() {
                                     (static_cast<int>(g_postfx_preset) + 1) % static_cast<int>(PostFXPreset::COUNT)
                                 );
                                 postfx_apply_preset(g_postfx, g_postfx_preset);
+                                // Update saved user state for menu auto-restore
+                                postfx_user_preset = g_postfx_preset;
+                                postfx_user_enabled = g_postfx.enabled;
+                                postfx_suppressed_by_menu = false;
                                 std::cout << "[PostFX] Preset: " << g_postfx.preset_name << std::endl;
                                 break;
                             }
@@ -3693,13 +4039,23 @@ void load_and_boot_arm64() {
                                     call_text_finish_64();
                                     g_text_input_active = false;
                                     g_text_input_buffer.clear();
+                                    // Recovery: press Back to exit the glitched text field screen
+                                    if (g_fw_handleMenuBtn) {
+                                        g_emulator_64->call(g_fw_handleMenuBtn, {env_ptr, 0});
+                                    }
                                     break;
                                 } else if (event.key.key == SDLK_ESCAPE) {
-                                    std::cout << "[TextInput] Escape — cancelling" << std::endl;
+                                    std::cout << "[TextInput] Escape — cancelling + pressing Back to recover" << std::endl;
                                     g_text_input_buffer.clear();
                                     call_text_change_64("");
                                     call_text_finish_64();
                                     g_text_input_active = false;
+                                    // Recovery: press the menu/back button to escape the
+                                    // glitched set-name screen. The text field rendering is
+                                    // broken (primary vtable corrupt), so we navigate away.
+                                    if (g_fw_handleMenuBtn) {
+                                        g_emulator_64->call(g_fw_handleMenuBtn, {env_ptr, 0});
+                                    }
                                     break;
                                 } else if (event.key.key == SDLK_BACKSPACE) {
                                     if (!g_text_input_buffer.empty()) {
@@ -3929,8 +4285,10 @@ void load_and_boot_arm64() {
                         case SDL_EVENT_FINGER_MOTION: {
                             float x = event.tfinger.x * 960.0f;
                             float y = (1.0f - event.tfinger.y) * 544.0f;
+                            float old_x = (event.tfinger.x - event.tfinger.dx) * 960.0f;
+                            float old_y = (1.0f - (event.tfinger.y - event.tfinger.dy)) * 544.0f;
                             int finger_id = (int)(event.tfinger.fingerID % 10) + 20;
-                            call_touch_64(4, finger_id, accumulated_time, x, y, x, y, 0);
+                            call_touch_64(4, finger_id, accumulated_time, x, y, old_x, old_y, 0);
                             break;
                         }
                         case SDL_EVENT_GAMEPAD_ADDED:

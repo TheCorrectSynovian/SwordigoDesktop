@@ -62,6 +62,7 @@ void sre_vfs_init(const char* mod_prefix) {
  * ========================================================================= */
 
 static int sre_strlen(const char* s) {
+    if (!s) return 0;
     int n = 0;
     while (s[n]) n++;
     return n;

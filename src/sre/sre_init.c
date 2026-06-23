@@ -49,8 +49,11 @@ SreHookEntry sre_hook_table[] = {
      * Update calls Resume separately). After handling the resume safely,
      * sre_ProgramState_Update calls g_orig_ProgramState_Update (relay stub)
      * for the child ProgramState iteration loop.
-     * The relay stub is set up by the host after trampoline installation. */
-    { 0, "sre_ProgramState_Update"  },
+     * The relay stub is set up by the host after trampoline installation.
+     *
+     * DISABLED FOR TESTING — let the native engine handle it to reduce
+     * per-frame overhead. Lua resume errors will crash without this. */
+    /* { 0, "sre_ProgramState_Update"  }, */
 
     /* luaD_throw — ROOT of all Lua error handling. Every Lua error goes
      * through luaD_throw(L, errcode). Original calls __cxa_throw or
@@ -113,6 +116,23 @@ SreHookEntry sre_hook_table[] = {
     /* Death/Respawn fix — desktop has no ad SDK, so ShowAdMaybe hangs.
      * Hook it to directly call GameOverViewDidContinue (respawn). */
     { 0x347efc, "sre_GameOverVC_ShowAdMaybe" },
+
+    /* Text Input — fully intercept the text input chain.
+     *
+     * Layer 1: Hook StartTextInputWithDelegate / StopTextInputWithDelegate
+     *          to capture the delegate pointer in our OWN global and clear
+     *          DAT_007f3ca8. This prevents the draw cycle from dispatching
+     *          through the corrupt ITextInputDelegate vtable.
+     *
+     * Layer 2: Hook the JNI textInput functions to read/write
+     *          GUITextFieldImpl fields directly (no vtable calls).
+     *
+     * Layer 3: Host maps a safety RET-page at 0x2d6ce4c to catch any
+     *          remaining wild vtable jumps from the PRIMARY vtable. */
+    { 0x4792ac, "sre_StartTextInputWithDelegate" },  /* Caver::StartTextInputWithDelegate */
+    { 0x4793dc, "sre_StopTextInputWithDelegate"  },  /* Caver::StopTextInputWithDelegate  */
+    { 0x4790dc, "sre_textInputTextDidChange" },       /* Java_..._textInputTextDidChange   */
+    { 0x479290, "sre_textInputDidFinish"     },       /* Java_..._textInputDidFinish       */
 
     /* Lua error safety — wraps ALL lua_call with pcall
      * Installed as LATE trampoline in main.cpp (after sre_init_lua) */
@@ -202,4 +222,25 @@ void sre_init(uint64_t swordigo_base, uint64_t empty_bss_off) {
      * Let's store the base + offset and check at runtime.
      */
     g_empty_sentinel = (char*)(swordigo_base + empty_bss_off);
+
+    /* Fix ITextInputDelegate vtable — entries have unrelocated pointers.
+     *
+     * The vtable at binary offset 0x7e1688 contains function pointers to
+     * the TextInputTextDidChange and TextInputDidFinish thunks. These
+     * were never properly relocated by our ELF loader, causing wild jumps
+     * (e.g. to 0x2d6ce4c) when the game's drawApplication dispatches
+     * through the vtable during text field rendering.
+     *
+     * Fix: overwrite the vtable entries with pointers to our SRE handlers.
+     * This is safe because Unicorn maps all guest memory as RWX.
+     *
+     * Vtable layout (ITextInputDelegate):
+     *   [+0x00] TextInputTextDidChange(out_str, this, text_str)
+     *   [+0x08] TextInputDidFinish(this)
+     */
+    extern void sre_TextInputTextDidChange_vtable(void*, void*, void*);
+    extern void sre_TextInputDidFinish_vtable(void*);
+    uint64_t* itid_vtable = (uint64_t*)(swordigo_base + 0x7e1688);
+    itid_vtable[0] = (uint64_t)&sre_TextInputTextDidChange_vtable;
+    itid_vtable[1] = (uint64_t)&sre_TextInputDidFinish_vtable;
 }

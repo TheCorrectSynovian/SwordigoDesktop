@@ -177,6 +177,33 @@ static void*        g_main_menu_view_ptr  = 0;  /* detected from "Start" button 
 static int g_options_menu_open = 0;  /* 1 = overlay is visible */
 static int g_options_mode = 0;       /* 1 = next CreditsVC::LoadView creates Options, not Credits */
 
+/* ---- Menu detection for host-side PostFX auto-disable ----
+ * Exported to host via get_symbol_vaddr. The host reads this each frame
+ * to decide whether to suppress PostFX rendering.
+ *
+ * Bit flags:
+ *   0x01 = NewMenuView visible (main menu / tab bar)
+ *   0x02 = GUIAlertView visible (popup / dialog / death screen)
+ *   0x04 = GUISlider visible (settings panel)
+ *
+ * Cleared to 0 in GUIWindow::DrawRect (fires first each frame as root).
+ * Set by child DrawRect hooks during the same frame. */
+#define SRE_MENU_MAIN_MENU   0x01
+#define SRE_MENU_ALERT       0x02
+#define SRE_MENU_SLIDER      0x04
+volatile int g_sre_menu_active = 0;
+
+/* Text input state — set by SRE hooks, read by host each frame.
+ * 1 = text input active (game called StartTextInputWithDelegate)
+ * 0 = inactive (StopTextInputWithDelegate or textInputDidFinish called) */
+volatile int g_sre_text_input_active = 0;
+
+/* Hard mode toggle — read by both SRE and host.
+ * 0 = normal speed (frame-limited, no double-tick)
+ * 1 = hard mode (uncapped FPS, ProgramState double-tick — entities move faster)
+ * Toggled by host (future: Options menu). */
+volatile int g_sre_hardmode = 0;
+
 /* ---- Toggle the SRE Options menu ---- */
 static void sre_open_options_menu(void) {
     g_options_menu_open = !g_options_menu_open;
@@ -1001,18 +1028,21 @@ void sre_GUIWindow_DrawRect(void* self, void* ctx, void* rect, void* mat,
 
 void sre_GUIAlertView_DrawRect(void* self, void* ctx, void* rect, void* mat,
                                  void* p4, void* p5, void* p6, void* p7) {
+    g_sre_menu_active |= SRE_MENU_ALERT;
     if (g_orig_GUIAlertView_DrawRect)
         ((pfn_DrawRect_N)g_orig_GUIAlertView_DrawRect)(self, ctx, rect, mat, p4, p5, p6, p7);
 }
 
 void sre_GUISlider_DrawRect(void* self, void* ctx, void* rect, void* mat,
                               void* p4, void* p5, void* p6, void* p7) {
+    g_sre_menu_active |= SRE_MENU_SLIDER;
     if (g_orig_GUISlider_DrawRect)
         ((pfn_DrawRect_N)g_orig_GUISlider_DrawRect)(self, ctx, rect, mat, p4, p5, p6, p7);
 }
 
 void sre_NewMenuView_DrawRect(void* self, void* ctx, void* rect, void* mat,
                                 void* p4, void* p5, void* p6, void* p7) {
+    g_sre_menu_active |= SRE_MENU_MAIN_MENU;
     if (g_orig_NewMenuView_DrawRect)
         ((pfn_DrawRect_N)g_orig_NewMenuView_DrawRect)(self, ctx, rect, mat, p4, p5, p6, p7);
 }
@@ -1178,3 +1208,174 @@ void sre_GameOverVC_ShowAdMaybe(void* self) {
     /* Skip the ad, go straight to respawn */
     didContinue(self, 0);
 }
+
+/* =====================================================================
+ * TEXT INPUT — Full SRE Takeover
+ * =====================================================================
+ * libswordigo's text input subsystem is completely broken under Unicorn:
+ *
+ *   1. The PRIMARY GUITextFieldImpl vtable (binary 0x7e1490) has corrupt
+ *      entries that cause wild jumps to 0x2d6ce4c during drawApplication.
+ *
+ *   2. The SECONDARY ITextInputDelegate vtable (binary 0x7e1688) also
+ *      has unrelocated function pointers.
+ *
+ * Our strategy: intercept the ENTIRE text input chain in SRE.
+ *   - Hook StartTextInputWithDelegate → capture delegate, clear DAT_007f3ca8
+ *   - Hook StopTextInputWithDelegate  → clear state
+ *   - Hook textInputTextDidChange     → write text directly to fields
+ *   - Hook textInputDidFinish         → clear editing state
+ *   - Host maps RET-page at 0x2d6ce4c → catches primary vtable crashes
+ *   - sre_init patches ITextInputDelegate vtable → no-op handlers
+ *
+ * GUITextFieldImpl layout (from Ghidra, v1.4.12 ARM64):
+ *   +0x000  GUIView base class (primary vtable at +0x000)
+ *   +0x140  ITextInputDelegate sub-object (secondary vtable)
+ *   +0x148  GUILabel* shared_ptr data (display label)
+ *   +0x188  SreString — current text
+ *   +0x190  SreString — placeholder text
+ *   +0x198  uint8_t — isEditing flag
+ *   +0x199  uint8_t — cursor blink toggle
+ *   +0x19C  float — blink timer
+ *
+ * Key addresses (nm -D, v1.4.12 ARM64):
+ *   0x4792ac  StartTextInputWithDelegate (we hook this)
+ *   0x4793dc  StopTextInputWithDelegate  (we hook this)
+ *   0x4790dc  Java_..._textInputTextDidChange (we hook this)
+ *   0x479290  Java_..._textInputDidFinish     (we hook this)
+ *   0x7f3ca8  ITextInputDelegate* global (BSS — we clear this)
+ * ===================================================================== */
+
+/* BSS offset of the engine's global ITextInputDelegate* pointer */
+#define TEXTINPUT_DELEGATE_OFFSET  0x7f3ca8
+
+/* GUITextFieldImpl field offsets */
+#define TEXTFIELD_BASE_ADJUST      0x140  /* delegate_ptr - this = base */
+#define TEXTFIELD_LABEL_OFFSET     0x148  /* GUILabel* shared_ptr data */
+#define TEXTFIELD_TEXT_OFFSET      0x188  /* SreString — current text */
+#define TEXTFIELD_EDITING_OFFSET   0x198  /* uint8_t — isEditing */
+
+/* GUILabel text offset */
+#define GUILABEL_TEXT_OFFSET       0x100  /* SreString — label display text */
+
+/* ---- OUR private delegate pointer ----
+ * We store the delegate here instead of in DAT_007f3ca8.
+ * This way the draw cycle's delegate vtable check sees NULL and skips it,
+ * while our textInput hooks can still find the GUITextFieldImpl. */
+static uint64_t g_sre_text_delegate = 0;
+
+/* ---- StartTextInputWithDelegate (0x4792ac) ----
+ * Called when the game opens a text field for editing.
+ * Original: stores delegate in DAT_007f3ca8, calls JNI startTextInput.
+ *
+ * We intercept to:
+ *   1. Capture the delegate in our own global
+ *   2. Clear DAT_007f3ca8 to prevent draw-cycle vtable dispatch
+ *
+ * NOTE: We do NOT relay to the original (relay stubs break with ADRP).
+ *       The JNI startTextInput call is handled separately — StartEditing
+ *       calls this function, and the JNI bridge receives startTextInput
+ *       through the game's own CallStaticVoidMethod path.
+ *
+ * Calling convention: X0 = ITextInputDelegate*, X1 = const std::string*
+ */
+void sre_StartTextInputWithDelegate(void* delegate, void* text) {
+    (void)text;
+
+    /* Store delegate in OUR global */
+    g_sre_text_delegate = (uint64_t)delegate;
+
+    /* Signal the host that text input is now active */
+    g_sre_text_input_active = 1;
+
+    /* Clear the engine's global — this is the KEY fix.
+     * The draw cycle checks: if (DAT_007f3ca8 != 0) { dispatch through vtable }
+     * By clearing it, no delegate vtable dispatch happens during rendering. */
+    *(uint64_t*)(g_swordigo_base + TEXTINPUT_DELEGATE_OFFSET) = 0;
+}
+
+/* ---- StopTextInputWithDelegate (0x4793dc) ----
+ * Called when text editing ends (ResignFirstResponder, StopEditing).
+ *
+ * Calling convention: X0 = ITextInputDelegate*
+ */
+void sre_StopTextInputWithDelegate(void* delegate) {
+    (void)delegate;
+
+    g_sre_text_delegate = 0;
+    g_sre_text_input_active = 0;
+    *(uint64_t*)(g_swordigo_base + TEXTINPUT_DELEGATE_OFFSET) = 0;
+}
+
+/* ---- textInputTextDidChange (0x4790dc) ----
+ * Called by host when user types a character (SDL_EVENT_TEXT_INPUT).
+ *
+ * Calling convention: X0=env, X1=cls, X2=jstring (raw UTF-8 pointer)
+ */
+void sre_textInputTextDidChange(void* env, void* cls, void* jstring_text) {
+    (void)env; (void)cls;
+
+    /* Use OUR delegate pointer (engine's is cleared) */
+    uint64_t delegate = g_sre_text_delegate;
+    if (!delegate) return;
+
+    char* tf = (char*)(delegate - TEXTFIELD_BASE_ADJUST);
+
+    const char* text = (const char*)jstring_text;
+    if (!text) return;
+
+    /* Update the text field's internal string (tf + 0x188) */
+    SreString* field_text = (SreString*)(tf + TEXTFIELD_TEXT_OFFSET);
+    sre_CppString_release(field_text);
+    sre_CppString_from_char_p(field_text, text);
+
+    /* Also update the GUILabel so the new text displays immediately. */
+    uint64_t label = *(uint64_t*)(tf + TEXTFIELD_LABEL_OFFSET);
+    if (label) {
+        SreString* label_text = (SreString*)(label + GUILABEL_TEXT_OFFSET);
+        sre_CppString_release(label_text);
+        sre_CppString_from_char_p(label_text, text);
+    }
+}
+
+/* ---- textInputDidFinish (0x479290) ----
+ * Called by host when user presses Enter or Escape.
+ *
+ * Calling convention: X0=env, X1=cls
+ */
+void sre_textInputDidFinish(void* env, void* cls) {
+    (void)env; (void)cls;
+
+    uint64_t delegate = g_sre_text_delegate;
+    if (!delegate) return;
+
+    char* tf = (char*)(delegate - TEXTFIELD_BASE_ADJUST);
+
+    /* Clear editing state */
+    *(uint8_t*)(tf + TEXTFIELD_EDITING_OFFSET) = 0;
+
+    /* Clear both globals */
+    g_sre_text_delegate = 0;
+    g_sre_text_input_active = 0;
+    *(uint64_t*)(g_swordigo_base + TEXTINPUT_DELEGATE_OFFSET) = 0;
+}
+
+/* =====================================================================
+ * VTABLE DISPATCH HANDLERS — safety net for ITextInputDelegate
+ * =====================================================================
+ * sre_init() patches the ITextInputDelegate vtable (binary 0x7e1688)
+ * to point to these handlers, as a safety net in case the draw cycle
+ * still reaches the delegate vtable despite DAT_007f3ca8 being cleared.
+ * ===================================================================== */
+
+void sre_TextInputTextDidChange_vtable(void* out_str, void* delegate, void* text_str) {
+    (void)delegate; (void)text_str;
+    if (out_str) {
+        sre_CppString_from_char_p((SreString*)out_str, "");
+    }
+}
+
+void sre_TextInputDidFinish_vtable(void* delegate) {
+    (void)delegate;
+}
+

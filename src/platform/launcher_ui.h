@@ -1,10 +1,11 @@
-// Unified pre-launch configuration window for Swordigo Desktop
-// Borderless SDL3 + OpenGL window combining graphics API + binary selection
+// ImGui-based launcher UI for Swordigo Desktop
+// Replaces the old raw-OpenGL launcher with a full Dear ImGui implementation.
+// SDL3 + OpenGL 3.3 Core + ImGui v1.91.x
 
 #pragma once
 
-#include "platform/vulkan_backend.h"  // for GraphicsAPI enum
-#include "platform/binary_selector.h" // for BinarySelector, BinaryInfo
+#include "platform/vulkan_backend.h"   // for GraphicsAPI enum
+#include "platform/binary_selector.h"  // for BinarySelector, BinaryInfo
 #include <string>
 
 struct LaunchConfig {
@@ -16,6 +17,6 @@ struct LaunchConfig {
 };
 
 // Show the unified launcher window and block until user clicks Launch or closes.
-// Creates its own borderless SDL_Window + GL context, cleans up before returning.
+// Creates its own SDL_Window + GL context + ImGui context, cleans up before returning.
 // If selector has binaries, they are shown as a list; otherwise that section is hidden.
 LaunchConfig show_launcher(BinarySelector& selector);

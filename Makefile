@@ -3,7 +3,7 @@
 
 CXX     := g++
 CC      := gcc
-CXXFLAGS := -std=c++17 -g -O1 -Isrc -Iinclude -MMD -MP
+CXXFLAGS := -std=c++17 -g -O1 -Isrc -Isrc/imgui -Iinclude -MMD -MP
 CFLAGS   := -g -O1 -Isrc -Iinclude -MMD -MP
 
 # pkg-config queries
@@ -43,9 +43,15 @@ CXX_SRCS := \
     src/platform/io_thread.cpp \
     src/platform/data_path.cpp \
     src/platform/binary_selector.cpp \
-    src/platform/launcher.cpp \
+    src/platform/launcher_ui.cpp \
     src/platform/save_editor.cpp \
-    src/platform/srt_overlay.cpp
+    src/platform/srt_overlay.cpp \
+    src/imgui/imgui.cpp \
+    src/imgui/imgui_draw.cpp \
+    src/imgui/imgui_tables.cpp \
+    src/imgui/imgui_widgets.cpp \
+    src/imgui/backends/imgui_impl_sdl3.cpp \
+    src/imgui/backends/imgui_impl_opengl3.cpp
 
 C_SRCS := \
     src/android/asset_manager.c \
@@ -72,7 +78,7 @@ swordigo_boot: $(ALL_OBJS)
 # This is a guest-side library loaded into the Unicorn emulator.
 # It replaces problematic functions in libswordigo.so with clean C code.
 AARCH64_CC := aarch64-linux-gnu-gcc
-SRE_SRCS   := src/sre/sre_init.c src/sre/sre_string.c src/sre/sre_lua.c src/sre/sre_background.c src/sre/sre_effects.c src/sre/sre_music.c src/sre/sre_gui.c src/sre/sre_gui_native.c src/sre/sre_scene_update.c src/sre/sre_setjmp.S src/sre/sre_mini_api.c src/sre/sre_vfs.c src/sre/sre_lua_libs.c
+SRE_SRCS   := src/sre/sre_init.c src/sre/sre_string.c src/sre/sre_lua.c src/sre/sre_background.c src/sre/sre_effects.c src/sre/sre_music.c src/sre/sre_gui.c src/sre/sre_gui_native.c src/sre/sre_scene_update.c src/sre/sre_setjmp.S src/sre/sre_mini_api.c src/sre/sre_vfs.c src/sre/sre_lua_libs.c src/sre/sre_mod.c
 SRE_CFLAGS := -shared -fPIC -O2 -nostdlib -fno-builtin -Isrc/sre
 
 libsre.so: $(SRE_SRCS) src/sre/sre.h src/sre/sre_lua.h src/sre/sre_setjmp.h src/sre/sre_gui.h
@@ -90,8 +96,14 @@ install-sre: libsre.so
 # asset_viewer — Standalone asset browser/previewer tool
 # =========================================================================
 # Separate binary with minimal dependencies (no unicorn, no game code).
-AV_SRCS := src/tools/asset_viewer.cpp src/platform/pvr_loader.cpp
-AV_CXXFLAGS := -std=c++17 -g -O1 -Isrc -Iinclude $(SDL3_CFLAGS) $(SDL3I_CFLAGS)
+AV_SRCS := src/tools/asset_viewer.cpp \
+    src/tools/pod_loader.cpp src/tools/av_renderer.cpp \
+    src/tools/av_audio.cpp src/tools/scene_loader.cpp \
+    src/platform/pvr_loader.cpp \
+    src/imgui/imgui.cpp src/imgui/imgui_draw.cpp \
+    src/imgui/imgui_tables.cpp src/imgui/imgui_widgets.cpp \
+    src/imgui/backends/imgui_impl_sdl3.cpp src/imgui/backends/imgui_impl_opengl3.cpp
+AV_CXXFLAGS := -std=c++17 -g -O2 -Isrc -Isrc/imgui -Iinclude $(SDL3_CFLAGS) $(SDL3I_CFLAGS)
 AV_LIBS := $(SDL3_LIBS) $(SDL3I_LIBS) -lGL
 
 asset_viewer: $(AV_SRCS)

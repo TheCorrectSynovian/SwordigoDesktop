@@ -264,12 +264,10 @@ void sre_GameSceneView_Update(void* self, float deltaTime) {
             uint64_t skill_px = *(uint64_t*)(gamestate + 0x68);
             void*    skill_pn = *(void**)(gamestate + 0x70);
             
-            /* Release the old shared_ptr pn (non-atomic) */
+            /* Release stale skill shared_ptr if use_count dropped to 0 */
             if (skill_pn != NULL) {
                 int64_t* use_ct = (int64_t*)((char*)skill_pn + 0x08);
                 if (*use_ct == 0) {
-                    /* use_count is 0 means last reference was dropped elsewhere.
-                     * Call dispose + destroy (matches original decompiled pattern). */
                     sp_release(skill_pn);
                 }
             }

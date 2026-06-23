@@ -271,6 +271,9 @@ LaunchConfig show_launcher(BinarySelector& selector) {
     cfg.graphics_api = GraphicsAPI::OPENGL;
     cfg.should_launch = true;
 
+    // NOTE: This reference is refreshed as cur_bins each frame (line ~835).
+    // Direct use of 'bins' in click handlers is safe because mutations
+    // (add/remove) always break out of the event loop immediately.
     const auto& bins = selector.get_binaries();
     int bin_sel = 0;
     // Pre-select default binary
@@ -651,8 +654,11 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                             if (hit(mouse_x, mouse_y, ofbtn_x, ofbtn_y, ofbtn_w, ofbtn_h)) {
                                 if (bin_sel >= 0 && bin_sel < (int)bins.size()) {
                                     std::string folder = fs::path(bins[bin_sel].filepath).parent_path().string();
-                                    std::string cmd = "xdg-open \"" + folder + "\" &";
-                                    system(cmd.c_str());
+                                    pid_t pid = fork();
+                                    if (pid == 0) {
+                                        execlp("xdg-open", "xdg-open", folder.c_str(), (char*)NULL);
+                                        _exit(1);  // exec failed
+                                    }
                                 }
                                 break;
                             }
@@ -713,8 +719,11 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                                     }
                                 }
                                 if (fs::exists(av_path)) {
-                                    std::string cmd = av_path + " &";
-                                    system(cmd.c_str());
+                                    pid_t pid = fork();
+                                    if (pid == 0) {
+                                        execlp(av_path.c_str(), av_path.c_str(), (char*)NULL);
+                                        _exit(1);  // exec failed
+                                    }
                                     std::cout << "[Launcher] Launched asset_viewer" << std::endl;
                                 } else {
                                     std::cerr << "[Launcher] asset_viewer not found — run 'make asset_viewer' first" << std::endl;

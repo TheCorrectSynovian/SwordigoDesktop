@@ -1,5 +1,6 @@
 #include "platform/data_path.h"
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <filesystem>
 #include <iostream>
@@ -63,6 +64,14 @@ std::string get_user_data_dir() {
         try { fs::create_directories(s_user_data_dir_cache); } catch (...) {}
     }
     return s_user_data_dir_cache;
+}
+
+// C-linkage wrapper for asset_manager.c (pure C can't call std::string functions)
+static char s_data_dir_c[512] = {0};
+extern "C" char* get_user_data_dir_c(void) {
+    std::string dir = get_user_data_dir();
+    strncpy(s_data_dir_c, dir.c_str(), sizeof(s_data_dir_c) - 1);
+    return s_data_dir_c;
 }
 
 std::string get_system_data_dir() {

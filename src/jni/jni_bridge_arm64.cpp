@@ -989,6 +989,34 @@ static bool load_wav_to_buffer(const std::string& path, ALuint buffer) {
     return alGetError() == AL_NO_ERROR;
 }
 
+// Load MP3 file → decode via mpg123/ffmpeg → fill OpenAL buffer
+// Uses external tool to decode to raw PCM. Falls back gracefully.
+static bool load_mp3_to_buffer(const std::string& path, ALuint buffer) {
+    // Try mpg123 first (lightweight, commonly installed)
+    // Decodes to raw 16-bit signed PCM at original sample rate
+    std::string tmp_raw = "/tmp/sre_music_decode.raw";
+    std::string cmd = "mpg123 -q -w /tmp/sre_music_decode.wav \"" + path + "\" 2>/dev/null";
+    int ret = system(cmd.c_str());
+    if (ret == 0) {
+        // mpg123 -w produces a WAV file, load it
+        bool result = load_wav_to_buffer("/tmp/sre_music_decode.wav", buffer);
+        std::remove("/tmp/sre_music_decode.wav");
+        return result;
+    }
+    
+    // Fallback: try ffmpeg
+    cmd = "ffmpeg -y -i \"" + path + "\" -f wav /tmp/sre_music_decode.wav -loglevel quiet 2>/dev/null";
+    ret = system(cmd.c_str());
+    if (ret == 0) {
+        bool result = load_wav_to_buffer("/tmp/sre_music_decode.wav", buffer);
+        std::remove("/tmp/sre_music_decode.wav");
+        return result;
+    }
+    
+    std::cerr << "[SRE-Music] MP3 decode failed (install mpg123 or ffmpeg): " << path << std::endl;
+    return false;
+}
+
 // Load OGG Vorbis file → decode to PCM → fill OpenAL buffer
 static bool load_ogg_to_buffer(const std::string& path, ALuint buffer) {
     OggVorbis_File vf;
@@ -6496,6 +6524,45 @@ bool sre_music_host_load(const std::string& name) {
         alSourcei(g_music_source, AL_BUFFER, 0);
     }
     
+    // === MOD MUSIC: Check mod directories first ===
+    // Search by BOTH the original playlist name AND the resolved track name,
+    // because mod files are typically named after playlists (boss.mp3, squire.mp3)
+    // while vanilla files use track names (1_boss23.ogg, squire_new2.ogg).
+    std::string mod_music_path;
+    {
+        std::string mods_dir = get_user_data_dir() + "/mods";
+        if (std::filesystem::exists(mods_dir)) {
+            for (auto& mod_entry : std::filesystem::directory_iterator(mods_dir)) {
+                if (!mod_entry.is_directory()) continue;
+                // Skip disabled mods (dot-prefixed folders)
+                std::string dname = mod_entry.path().filename().string();
+                if (!dname.empty() && dname[0] == '.') continue;
+                std::string mod_music_dir = mod_entry.path().string() + "/assets/music";
+                if (!std::filesystem::exists(mod_music_dir)) continue;
+                
+                // Try playlist name first (what mods typically use), then track name
+                std::string try_names[] = {
+                    mod_music_dir + "/" + name + ".mp3",
+                    mod_music_dir + "/" + name + ".ogg",
+                    mod_music_dir + "/" + name + ".wav",
+                    mod_music_dir + "/" + track + ".mp3",
+                    mod_music_dir + "/" + track + ".ogg",
+                    mod_music_dir + "/" + track + ".wav",
+                    mod_music_dir + "/music_" + name + ".mp3",
+                    mod_music_dir + "/music_" + track + ".mp3",
+                };
+                for (auto& try_path : try_names) {
+                    if (std::filesystem::exists(try_path)) {
+                        mod_music_path = try_path;
+                        std::cout << "[SRE-Music] MOD override: " << try_path << std::endl;
+                        break;
+                    }
+                }
+                if (!mod_music_path.empty()) break;
+            }
+        }
+    }
+
     // Build paths using resolved track name
     std::string music_dir = get_data_path(g_assets_dir + "/resources/music");
     std::string music_dir_alt = get_data_path(g_assets_dir + "/music");
@@ -6506,26 +6573,36 @@ bool sre_music_host_load(const std::string& name) {
         if (safe[i] == '-') safe[i] = '_';
     }
     
-    // Try all path variants
-    std::string paths[] = {
-        music_dir + "/music_" + safe + ".ogg",
-        music_dir + "/" + safe + ".ogg",
-        music_dir_alt + "/" + safe + ".ogg",
-        music_dir_alt + "/music_" + safe + ".ogg",
-        music_dir + "/music_" + safe + ".wav",
-    };
+    // Try all path variants — mod path first, then vanilla
+    std::vector<std::string> paths;
+    if (!mod_music_path.empty()) {
+        paths.push_back(mod_music_path);
+    }
+    paths.push_back(music_dir + "/music_" + safe + ".ogg");
+    paths.push_back(music_dir + "/" + safe + ".ogg");
+    paths.push_back(music_dir_alt + "/" + safe + ".ogg");
+    paths.push_back(music_dir_alt + "/music_" + safe + ".ogg");
+    paths.push_back(music_dir + "/music_" + safe + ".wav");
+    // Also try res/raw/ directory (vanilla .mp3 files live here)
+    std::string res_raw = get_data_path("res/raw");
+    paths.push_back(res_raw + "/music_" + safe + ".mp3");
+    paths.push_back(res_raw + "/" + safe + ".mp3");
     
     if (g_music_buffer == 0) {
         alGenBuffers(1, &g_music_buffer);
     }
     
     bool loaded = false;
-    for (int i = 0; i < 5 && !loaded; i++) {
+    for (size_t i = 0; i < paths.size() && !loaded; i++) {
         std::cout << "[SRE-Music]   try[" << i << "]: " << paths[i] << std::endl;
-        if (i < 4) {
-            loaded = load_ogg_to_buffer(paths[i], g_music_buffer);
-        } else {
+        // Detect format by extension
+        std::string ext = paths[i].substr(paths[i].rfind('.'));
+        if (ext == ".mp3") {
+            loaded = load_mp3_to_buffer(paths[i], g_music_buffer);
+        } else if (ext == ".wav") {
             loaded = load_wav_to_buffer(paths[i], g_music_buffer);
+        } else {
+            loaded = load_ogg_to_buffer(paths[i], g_music_buffer);
         }
         if (loaded) {
             std::cout << "[SRE-Music] ✓ Loaded: " << paths[i] << std::endl;

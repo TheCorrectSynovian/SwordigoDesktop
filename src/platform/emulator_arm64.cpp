@@ -380,9 +380,36 @@ void EmulatorArm64::run(uint64_t start_pc) {
         last_chunk_pc = curr_pc;
         
         if (chunk > 0) {
-            std::cerr << "[ARM64] Heavy function 0x" << std::hex << start_pc 
-                      << " — chunk " << std::dec << (chunk + 1) << "/" << MAX_CHUNKS 
-                      << " (PC=0x" << std::hex << curr_pc << ")" << std::dec << std::endl;
+            // Only dump full trace on chunk 2 (first time we know it's heavy)
+            if (chunk == 1) {
+                uint64_t lr, fp, sp;
+                uc_reg_read((uc_engine*)uc, UC_ARM64_REG_LR, &lr);
+                uc_reg_read((uc_engine*)uc, UC_ARM64_REG_X29, &fp);
+                uc_reg_read((uc_engine*)uc, UC_ARM64_REG_SP, &sp);
+                
+                std::cerr << "[ARM64] ⚠ Heavy function 0x" << std::hex << start_pc 
+                          << " — chunk " << std::dec << (chunk + 1) << "/" << MAX_CHUNKS << std::endl;
+                std::cerr << "  PC=0x" << std::hex << curr_pc 
+                          << "  LR=0x" << lr << "  SP=0x" << sp << std::endl;
+                
+                // Walk frame pointer chain to dump call stack
+                std::cerr << "  --- Guest Call Stack ---" << std::endl;
+                uint64_t walk_fp = fp;
+                for (int frame = 0; frame < 12 && walk_fp > 0x1000 && walk_fp < 0xE0000000ULL; frame++) {
+                    uint64_t saved_fp = 0, saved_lr = 0;
+                    uc_mem_read((uc_engine*)uc, walk_fp, &saved_fp, 8);
+                    uc_mem_read((uc_engine*)uc, walk_fp + 8, &saved_lr, 8);
+                    std::cerr << "  [" << frame << "] LR=0x" << std::hex << saved_lr 
+                              << "  FP=0x" << saved_fp << std::dec << std::endl;
+                    if (saved_fp <= walk_fp || saved_fp == 0) break;  // stack grows down
+                    walk_fp = saved_fp;
+                }
+                std::cerr << "  ------------------------" << std::endl;
+            } else {
+                std::cerr << "[ARM64] Heavy function 0x" << std::hex << start_pc 
+                          << " — chunk " << std::dec << (chunk + 1) << "/" << MAX_CHUNKS 
+                          << " (PC=0x" << std::hex << curr_pc << ")" << std::dec << std::endl;
+            }
         }
     }
     
@@ -462,6 +489,21 @@ void EmulatorArm64::run(uint64_t start_pc) {
             std::cerr << "  Stuck at PC: 0x" << std::hex << curr_pc << std::dec << std::endl;
             std::cerr << "  (started at 0x" << std::hex << start_pc << std::dec 
                       << ", took " << ms << "ms)" << std::endl;
+            // Dump registers to help trace the caller
+            {
+                uint64_t lr, sp, fp, x0, x1, x2, x3;
+                uc_reg_read((uc_engine*)uc, UC_ARM64_REG_LR, &lr);
+                uc_reg_read((uc_engine*)uc, UC_ARM64_REG_SP, &sp);
+                uc_reg_read((uc_engine*)uc, UC_ARM64_REG_X29, &fp);
+                uc_reg_read((uc_engine*)uc, UC_ARM64_REG_X0, &x0);
+                uc_reg_read((uc_engine*)uc, UC_ARM64_REG_X1, &x1);
+                uc_reg_read((uc_engine*)uc, UC_ARM64_REG_X2, &x2);
+                uc_reg_read((uc_engine*)uc, UC_ARM64_REG_X3, &x3);
+                std::cerr << "  LR=0x" << std::hex << lr
+                          << " SP=0x" << sp << " FP=0x" << fp << std::dec << std::endl;
+                std::cerr << "  X0=0x" << std::hex << x0 << " X1=0x" << x1
+                          << " X2=0x" << x2 << " X3=0x" << x3 << std::dec << std::endl;
+            }
             print_trace();
             uc_reg_write((uc_engine*)uc, UC_ARM64_REG_PC, &magic_lr);
             uc_reg_write((uc_engine*)uc, UC_ARM64_REG_SP, &entry_sp);

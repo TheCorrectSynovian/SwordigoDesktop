@@ -139,6 +139,19 @@ void sre_PlayMusicWithName(void* self, void* name_ref, int restart) {
     }
     new_name[i] = 0;
     
+    /* === MOD API: Check for music replacement === */
+    extern const char* sre_mod_get_music_replacement(const char*);
+    const char* mod_repl = sre_mod_get_music_replacement(new_name);
+    if (mod_repl) {
+        /* Replace track name with mod's replacement */
+        sre_u64 j;
+        for (j = 0; mod_repl[j] && j < 255; j++) {
+            new_name[j] = mod_repl[j];
+        }
+        new_name[j] = 0;
+        len = j;
+    }
+    
     /* Check if same track already playing OR already pending (skip reload) */
     if (!restart) {
         /* Compare against currently playing track */
