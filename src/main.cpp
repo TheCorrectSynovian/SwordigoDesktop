@@ -1395,10 +1395,13 @@ void load_and_boot() {
                                 SDL_WindowFlags flags = SDL_GetWindowFlags(g_display_ptr->get_window());
                                 if (flags & SDL_WINDOW_FULLSCREEN) {
                                     SDL_SetWindowFullscreen(g_display_ptr->get_window(), false);
-                                    g_win_w = 1920;
-                                    g_win_h = 1080;
+                                    // Query actual window size — preserves native aspect ratio (16:10, etc.)
+                                    int ww, wh;
+                                    SDL_GetWindowSize(g_display_ptr->get_window(), &ww, &wh);
+                                    g_win_w = ww;
+                                    g_win_h = wh;
                                     SDL_GetWindowSizeInPixels(g_display_ptr->get_window(), &g_draw_w, &g_draw_h);
-                                    std::cout << "[Display] Windowed 1920x1080 (drawable: " << g_draw_w << "x" << g_draw_h << ")" << std::endl;
+                                    std::cout << "[Display] Windowed " << ww << "x" << wh << " (drawable: " << g_draw_w << "x" << g_draw_h << ")" << std::endl;
                                 } else {
                                     SDL_SetWindowFullscreen(g_display_ptr->get_window(), true);
                                     // Get actual fullscreen resolution (logical + physical)
@@ -3944,14 +3947,19 @@ void load_and_boot_arm64() {
                                 SDL_WindowFlags flags = SDL_GetWindowFlags(g_display_ptr->get_window());
                                 if (flags & SDL_WINDOW_FULLSCREEN) {
                                     SDL_SetWindowFullscreen(g_display_ptr->get_window(), false);
-                                    g_win_w = 1920; g_win_h = 1080;
+                                    // Query actual window size — preserves native aspect ratio (16:10, etc.)
+                                    int ww, wh;
+                                    SDL_GetWindowSize(g_display_ptr->get_window(), &ww, &wh);
+                                    g_win_w = ww; g_win_h = wh;
                                     SDL_GetWindowSizeInPixels(g_display_ptr->get_window(), &g_draw_w, &g_draw_h);
+                                    std::cout << "[Display] Windowed " << ww << "x" << wh << " (drawable: " << g_draw_w << "x" << g_draw_h << ")" << std::endl;
                                 } else {
                                     SDL_SetWindowFullscreen(g_display_ptr->get_window(), true);
                                     int fw, fh;
                                     SDL_GetWindowSize(g_display_ptr->get_window(), &fw, &fh);
                                     g_win_w = fw; g_win_h = fh;
                                     SDL_GetWindowSizeInPixels(g_display_ptr->get_window(), &g_draw_w, &g_draw_h);
+                                    std::cout << "[Display] Fullscreen " << fw << "x" << fh << " (drawable: " << g_draw_w << "x" << g_draw_h << ")" << std::endl;
                                 }
                                 break;
                             }

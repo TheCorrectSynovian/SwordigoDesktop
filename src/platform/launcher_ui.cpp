@@ -7,6 +7,7 @@
 #include "platform/launcher_ui.h"
 #include "platform/data_path.h"
 #include "platform/save_editor.h"
+#include "platform/IconsFontAwesome6.h"
 
 #include "imgui/imgui.h"
 #include "imgui/backends/imgui_impl_sdl3.h"
@@ -140,82 +141,100 @@ static void ApplyCustomTheme() {
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
 
-    // Rounding
-    style.WindowRounding    = 0.0f;   // Full-window, no rounding on outer
-    style.ChildRounding     = 8.0f;
-    style.FrameRounding     = 8.0f;
-    style.GrabRounding      = 6.0f;
-    style.PopupRounding     = 8.0f;
-    style.ScrollbarRounding = 12.0f;
-    style.TabRounding       = 6.0f;
+    // Rounding — modern, rounded UI
+    style.WindowRounding    = 0.0f;
+    style.ChildRounding     = 10.0f;
+    style.FrameRounding     = 10.0f;
+    style.GrabRounding      = 8.0f;
+    style.PopupRounding     = 10.0f;
+    style.ScrollbarRounding = 14.0f;
+    style.TabRounding       = 8.0f;
 
-    // Sizing
-    style.FramePadding  = ImVec2(10, 6);
-    style.ItemSpacing   = ImVec2(10, 8);
+    // Sizing — generous spacing for readability
+    style.FramePadding  = ImVec2(12, 8);
+    style.ItemSpacing   = ImVec2(12, 8);
+    style.ItemInnerSpacing = ImVec2(8, 6);
     style.ScrollbarSize = 14.0f;
-    style.GrabMinSize   = 12.0f;
+    style.GrabMinSize   = 14.0f;
+    style.IndentSpacing = 20.0f;
 
-    // Borders
+    // Borders — subtle
     style.WindowBorderSize = 0.0f;
     style.ChildBorderSize  = 1.0f;
     style.FrameBorderSize  = 0.0f;
+    style.PopupBorderSize  = 1.0f;
+    style.SeparatorTextBorderSize = 2.0f;
 
-    // Colors — #1a1a2e / #16213e / #0f3460 / #e94560 palette
+    // Anti-aliasing
+    style.AntiAliasedLines = true;
+    style.AntiAliasedFill  = true;
+
+    // Colors — refined dark theme with coral accent
+    //   Background: #0d1117 (GitHub-dark inspired)
+    //   Surface:    #161b22
+    //   Elevated:   #1c2333
+    //   Border:     #30363d
+    //   Accent:     #e94560 (coral red)
+    //   AccentAlt:  #ff6b81 (soft coral hover)
+    //   Text:       #e6edf3
+    //   Muted:      #8b949e
     ImVec4* c = style.Colors;
 
-    c[ImGuiCol_WindowBg]          = ImVec4(0.102f, 0.102f, 0.180f, 1.00f); // #1a1a2e
-    c[ImGuiCol_ChildBg]           = ImVec4(0.059f, 0.204f, 0.376f, 0.30f); // #0f3460 @ 0.3
-    c[ImGuiCol_PopupBg]           = ImVec4(0.086f, 0.129f, 0.243f, 0.95f); // #16213e
-    c[ImGuiCol_Border]            = ImVec4(0.235f, 0.235f, 0.353f, 0.60f); // rgb(60,60,90)
+    c[ImGuiCol_WindowBg]          = ImVec4(0.051f, 0.067f, 0.090f, 1.00f); // #0d1117
+    c[ImGuiCol_ChildBg]           = ImVec4(0.086f, 0.106f, 0.133f, 1.00f); // #161b22
+    c[ImGuiCol_PopupBg]           = ImVec4(0.110f, 0.137f, 0.200f, 0.98f); // #1c2333
+    c[ImGuiCol_Border]            = ImVec4(0.188f, 0.212f, 0.239f, 0.60f); // #30363d
     c[ImGuiCol_BorderShadow]      = ImVec4(0.000f, 0.000f, 0.000f, 0.00f);
 
-    c[ImGuiCol_FrameBg]           = ImVec4(0.086f, 0.129f, 0.243f, 1.00f); // #16213e
-    c[ImGuiCol_FrameBgHovered]    = ImVec4(0.120f, 0.180f, 0.340f, 1.00f);
-    c[ImGuiCol_FrameBgActive]     = ImVec4(0.160f, 0.220f, 0.400f, 1.00f);
+    c[ImGuiCol_FrameBg]           = ImVec4(0.110f, 0.137f, 0.200f, 1.00f); // #1c2333
+    c[ImGuiCol_FrameBgHovered]    = ImVec4(0.140f, 0.170f, 0.240f, 1.00f);
+    c[ImGuiCol_FrameBgActive]     = ImVec4(0.170f, 0.200f, 0.280f, 1.00f);
 
-    c[ImGuiCol_TitleBg]           = ImVec4(0.070f, 0.070f, 0.140f, 1.00f);
-    c[ImGuiCol_TitleBgActive]     = ImVec4(0.102f, 0.102f, 0.180f, 1.00f);
-    c[ImGuiCol_TitleBgCollapsed]  = ImVec4(0.070f, 0.070f, 0.140f, 0.50f);
+    c[ImGuiCol_TitleBg]           = ImVec4(0.051f, 0.067f, 0.090f, 1.00f);
+    c[ImGuiCol_TitleBgActive]     = ImVec4(0.086f, 0.106f, 0.133f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]  = ImVec4(0.051f, 0.067f, 0.090f, 0.50f);
 
-    c[ImGuiCol_MenuBarBg]         = ImVec4(0.086f, 0.129f, 0.243f, 1.00f);
+    c[ImGuiCol_MenuBarBg]         = ImVec4(0.086f, 0.106f, 0.133f, 1.00f);
 
-    c[ImGuiCol_ScrollbarBg]       = ImVec4(0.050f, 0.050f, 0.100f, 0.50f);
-    c[ImGuiCol_ScrollbarGrab]     = ImVec4(0.235f, 0.235f, 0.353f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.300f, 0.300f, 0.450f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.400f, 0.400f, 0.550f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]       = ImVec4(0.051f, 0.067f, 0.090f, 0.50f);
+    c[ImGuiCol_ScrollbarGrab]     = ImVec4(0.188f, 0.212f, 0.239f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.250f, 0.280f, 0.320f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.350f, 0.380f, 0.420f, 1.00f);
 
     c[ImGuiCol_CheckMark]         = ImVec4(0.914f, 0.271f, 0.376f, 1.00f); // #e94560
     c[ImGuiCol_SliderGrab]        = ImVec4(0.914f, 0.271f, 0.376f, 0.80f);
-    c[ImGuiCol_SliderGrabActive]  = ImVec4(1.000f, 0.349f, 0.455f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]  = ImVec4(1.000f, 0.420f, 0.506f, 1.00f); // #ff6b81
 
     c[ImGuiCol_Button]            = ImVec4(0.914f, 0.271f, 0.376f, 1.00f); // #e94560
-    c[ImGuiCol_ButtonHovered]     = ImVec4(1.000f, 0.349f, 0.455f, 1.00f); // #ff5974
+    c[ImGuiCol_ButtonHovered]     = ImVec4(1.000f, 0.420f, 0.506f, 1.00f); // #ff6b81
     c[ImGuiCol_ButtonActive]      = ImVec4(0.784f, 0.196f, 0.275f, 1.00f); // #c83246
 
-    c[ImGuiCol_Header]            = ImVec4(0.914f, 0.271f, 0.376f, 0.40f);
-    c[ImGuiCol_HeaderHovered]     = ImVec4(0.914f, 0.271f, 0.376f, 0.60f);
-    c[ImGuiCol_HeaderActive]      = ImVec4(0.914f, 0.271f, 0.376f, 0.80f);
+    c[ImGuiCol_Header]            = ImVec4(0.914f, 0.271f, 0.376f, 0.30f);
+    c[ImGuiCol_HeaderHovered]     = ImVec4(0.914f, 0.271f, 0.376f, 0.50f);
+    c[ImGuiCol_HeaderActive]      = ImVec4(0.914f, 0.271f, 0.376f, 0.70f);
 
-    c[ImGuiCol_Separator]         = ImVec4(0.235f, 0.235f, 0.353f, 0.50f);
+    c[ImGuiCol_Separator]         = ImVec4(0.188f, 0.212f, 0.239f, 0.50f);
     c[ImGuiCol_SeparatorHovered]  = ImVec4(0.914f, 0.271f, 0.376f, 0.60f);
     c[ImGuiCol_SeparatorActive]   = ImVec4(0.914f, 0.271f, 0.376f, 1.00f);
 
-    c[ImGuiCol_ResizeGrip]        = ImVec4(0.914f, 0.271f, 0.376f, 0.25f);
-    c[ImGuiCol_ResizeGripHovered] = ImVec4(0.914f, 0.271f, 0.376f, 0.60f);
-    c[ImGuiCol_ResizeGripActive]  = ImVec4(0.914f, 0.271f, 0.376f, 0.95f);
+    c[ImGuiCol_ResizeGrip]        = ImVec4(0.914f, 0.271f, 0.376f, 0.20f);
+    c[ImGuiCol_ResizeGripHovered] = ImVec4(0.914f, 0.271f, 0.376f, 0.50f);
+    c[ImGuiCol_ResizeGripActive]  = ImVec4(0.914f, 0.271f, 0.376f, 0.90f);
 
-    c[ImGuiCol_Tab]               = ImVec4(0.086f, 0.129f, 0.243f, 1.00f);
-    c[ImGuiCol_TabHovered]        = ImVec4(0.914f, 0.271f, 0.376f, 0.60f);
-    c[ImGuiCol_TabSelected]       = ImVec4(0.914f, 0.271f, 0.376f, 0.80f);
+    c[ImGuiCol_Tab]               = ImVec4(0.110f, 0.137f, 0.200f, 1.00f);
+    c[ImGuiCol_TabHovered]        = ImVec4(0.914f, 0.271f, 0.376f, 0.50f);
+    c[ImGuiCol_TabSelected]       = ImVec4(0.914f, 0.271f, 0.376f, 0.75f);
 
-    c[ImGuiCol_Text]              = ImVec4(0.933f, 0.933f, 0.933f, 1.00f); // #eeeeee
-    c[ImGuiCol_TextDisabled]      = ImVec4(0.667f, 0.667f, 0.667f, 1.00f); // #aaaaaa
+    c[ImGuiCol_Text]              = ImVec4(0.902f, 0.929f, 0.953f, 1.00f); // #e6edf3
+    c[ImGuiCol_TextDisabled]      = ImVec4(0.545f, 0.580f, 0.620f, 1.00f); // #8b949e
 
-    c[ImGuiCol_TableHeaderBg]     = ImVec4(0.086f, 0.129f, 0.243f, 1.00f);
-    c[ImGuiCol_TableBorderStrong] = ImVec4(0.235f, 0.235f, 0.353f, 0.80f);
-    c[ImGuiCol_TableBorderLight]  = ImVec4(0.235f, 0.235f, 0.353f, 0.40f);
+    c[ImGuiCol_TableHeaderBg]     = ImVec4(0.110f, 0.137f, 0.200f, 1.00f);
+    c[ImGuiCol_TableBorderStrong] = ImVec4(0.188f, 0.212f, 0.239f, 0.80f);
+    c[ImGuiCol_TableBorderLight]  = ImVec4(0.188f, 0.212f, 0.239f, 0.40f);
     c[ImGuiCol_TableRowBg]        = ImVec4(0.000f, 0.000f, 0.000f, 0.00f);
-    c[ImGuiCol_TableRowBgAlt]     = ImVec4(1.000f, 1.000f, 1.000f, 0.03f);
+    c[ImGuiCol_TableRowBgAlt]     = ImVec4(1.000f, 1.000f, 1.000f, 0.02f);
+
+    c[ImGuiCol_NavHighlight]      = ImVec4(0.914f, 0.271f, 0.376f, 1.00f);
 }
 
 // =============================================================================
@@ -318,9 +337,9 @@ static void DrawToolbar(bool& running, LaunchConfig& cfg, bool& show_options) {
 
     // Title
     if (g_font_heading) ImGui::PushFont(g_font_heading);
-    ImGui::TextColored(ImVec4(0.914f, 0.271f, 0.376f, 1.0f), "\xe2\x9a\x94");
+    ImGui::TextColored(ImVec4(0.914f, 0.271f, 0.376f, 1.0f), ICON_FA_GAMEPAD);
     ImGui::SameLine();
-    ImGui::Text("SWORDIGO DESKTOP");
+    ImGui::TextColored(ImVec4(0.902f, 0.929f, 0.953f, 1.0f), " SWORDIGO DESKTOP");
     if (g_font_heading) ImGui::PopFont();
 
     // Right-aligned buttons
@@ -330,7 +349,7 @@ static void DrawToolbar(bool& running, LaunchConfig& cfg, bool& show_options) {
     ImGui::SameLine(rhs - 45);
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.15f, 0.15f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
-    if (ImGui::Button("\xe2\x9c\x95", ImVec2(35, 35))) {
+    if (ImGui::Button(ICON_FA_XMARK, ImVec2(35, 35))) {
         cfg.should_launch = false;
         running = false;
     }
@@ -341,7 +360,7 @@ static void DrawToolbar(bool& running, LaunchConfig& cfg, bool& show_options) {
     ImGui::SameLine(rhs - 90);
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.30f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.25f, 0.45f, 1.0f));
-    if (ImGui::Button("\xe2\x9a\x99", ImVec2(35, 35))) {
+    if (ImGui::Button(ICON_FA_GEAR, ImVec2(35, 35))) {
         show_options = true;
         ImGui::OpenPopup("Options");
     }
@@ -384,7 +403,7 @@ static void DrawInstancePanel(BinarySelector& selector, int& selected, float wid
     if (g_font_heading) ImGui::PopFont();
 
     ImGui::SameLine(width - 50);
-    if (ImGui::Button("+", ImVec2(30, 30))) {
+    if (ImGui::Button(ICON_FA_PLUS, ImVec2(30, 30))) {
         g_show_add_instance = true;
         // Reset form fields
         memset(g_add_name, 0, sizeof(g_add_name));
@@ -537,7 +556,7 @@ static void DrawInstancePanel(BinarySelector& selector, int& selected, float wid
         // Default star indicator
         if (b.is_default) {
             dl->AddText(ImVec2(item_min.x + width - 45, item_min.y + 4),
-                IM_COL32(255, 215, 0, 255), "\xe2\x98\x85");
+                IM_COL32(255, 215, 0, 255), ICON_FA_STAR);
         }
 
         ImGui::PopID();
@@ -694,7 +713,7 @@ static void DrawDetailPanel(BinarySelector& selector, int selected,
     ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.784f, 0.196f, 0.275f, 1.0f));
     if (g_font_heading) ImGui::PushFont(g_font_heading);
     float launch_w = ImGui::GetContentRegionAvail().x;
-    if (ImGui::Button("\xe2\x96\xb6  LAUNCH", ImVec2(launch_w, 50))) {
+    if (ImGui::Button(ICON_FA_ROCKET "  LAUNCH", ImVec2(launch_w, 50))) {
         cfg.graphics_api = (api_sel == 0) ? GraphicsAPI::OPENGL : GraphicsAPI::VULKAN;
         cfg.use_dynarmic = (engine_sel == 1);
         cfg.selected_binary = b.filepath;
@@ -745,7 +764,7 @@ static void DrawDetailPanel(BinarySelector& selector, int selected,
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.086f, 0.129f, 0.243f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.150f, 0.220f, 0.400f, 1.0f));
 
-    if (ImGui::Button("Save Editor", ImVec2(btn_w, 36))) {
+    if (ImGui::Button(ICON_FA_FLOPPY_DISK "  Save Editor", ImVec2(btn_w, 36))) {
         show_save_editor = true;
         // Load saves
         g_save_loaded = false;
@@ -767,7 +786,7 @@ static void DrawDetailPanel(BinarySelector& selector, int selected,
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Edit save files (.gplayer)");
 
     ImGui::SameLine();
-    if (ImGui::Button("Open Folder", ImVec2(btn_w, 36))) {
+    if (ImGui::Button(ICON_FA_FOLDER_OPEN "  Open Folder", ImVec2(btn_w, 36))) {
         std::string dir = fs::path(get_user_data_dir() + "/" + b.filepath).parent_path().string();
         pid_t pid = fork();
         if (pid == 0) {
@@ -778,7 +797,7 @@ static void DrawDetailPanel(BinarySelector& selector, int selected,
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open instance folder in file manager");
 
     ImGui::SameLine();
-    if (ImGui::Button("Asset Viewer", ImVec2(btn_w, 36))) {
+    if (ImGui::Button(ICON_FA_EYE "  Asset Viewer", ImVec2(btn_w, 36))) {
         pid_t pid = fork();
         if (pid == 0) {
             // Try local build first, then installed path
@@ -796,7 +815,7 @@ static void DrawDetailPanel(BinarySelector& selector, int selected,
             ImGui::SameLine();
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.15f, 0.15f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
-            if (ImGui::Button("Remove", ImVec2(btn_w, 36))) {
+            if (ImGui::Button(ICON_FA_TRASH "  Remove", ImVec2(btn_w, 36))) {
                 g_confirm_delete = true;
                 g_delete_target_idx = selected;
             }
@@ -845,7 +864,7 @@ static void DrawModsPanel(float width) {
     ImGui::SameLine(width - 120);
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.086f, 0.129f, 0.243f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.150f, 0.220f, 0.400f, 1.0f));
-    if (ImGui::Button("\xf0\x9f\x93\x81 Load Mod", ImVec2(105, 28))) {
+    if (ImGui::Button(ICON_FA_FOLDER " Load Mod", ImVec2(105, 28))) {
         std::string mods_dir = get_user_data_dir() + "/mods";
         pid_t pid = fork();
         if (pid == 0) {
@@ -947,7 +966,7 @@ static void DrawModsPanel(float width) {
     // Rescan button at bottom
     ImGui::SetCursorPosY(ImGui::GetWindowHeight() - 40);
     ImGui::Separator();
-    if (ImGui::Button("Rescan Mods", ImVec2(-1, 28))) {
+    if (ImGui::Button(ICON_FA_MAGNIFYING_GLASS "  Rescan Mods", ImVec2(-1, 28))) {
         g_mods_scanned = false;
     }
 
@@ -1165,7 +1184,7 @@ static void DrawOptionsModal(bool& show_options) {
 
 static void DrawSaveEditor(bool& show_save_editor) {
     // Back button
-    if (ImGui::Button("\xe2\x86\x90 Back", ImVec2(100, 30))) {
+    if (ImGui::Button(ICON_FA_ARROW_LEFT " Back", ImVec2(100, 30))) {
         show_save_editor = false;
         g_save_sel = -1;
         return;
@@ -1228,7 +1247,7 @@ static void DrawSaveEditor(bool& show_save_editor) {
         ImGui::Spacing();
 
         // Apply / Back
-        if (ImGui::Button("Apply & Save", ImVec2(160, 36))) {
+        if (ImGui::Button(ICON_FA_CHECK " Apply & Save", ImVec2(160, 36))) {
             if (save_write(sf.filepath, sf)) {
                 g_save_status = "Save written successfully!";
                 g_save_status_ok = true;
@@ -1331,7 +1350,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
     SDL_Window* window = SDL_CreateWindow(
         "Swordigo Desktop",
         1200, 700,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!window) {
         std::cerr << "[Launcher] Window creation failed: " << SDL_GetError() << std::endl;
         SDL_Quit();
@@ -1342,9 +1361,11 @@ LaunchConfig show_launcher(BinarySelector& selector) {
     // Set window icon
     {
         std::string icon_via_data = get_data_path("src/assets/launcer_icon.png");
+        std::string icon_via_launcher = get_user_data_dir() + "/launcher/launcer_icon.png";
         const char* icon_paths[] = {
             icon_via_data.c_str(),
             "src/assets/launcer_icon.png",
+            icon_via_launcher.c_str(),
             "src/assets/icon_gnome.png",
             "/usr/share/icons/hicolor/128x128/apps/swordigo-desktop.png",
             "/usr/share/pixmaps/swordigo-desktop.png",
@@ -1382,11 +1403,10 @@ LaunchConfig show_launcher(BinarySelector& selector) {
     // Theme
     ApplyCustomTheme();
 
-    // Font loading — try multiple paths, with DPI scaling and Unicode glyphs
+    // Font loading — Inter + Font Awesome 6 icons, DPI-aware
     {
         // Detect DPI scale for crisp rendering on HiDPI displays
         float dpi_scale = 1.0f;
-        float ddpi = 0;
         int display_id = SDL_GetDisplayForWindow(window);
         if (display_id) {
             float content_scale = SDL_GetDisplayContentScale(display_id);
@@ -1398,52 +1418,105 @@ LaunchConfig show_launcher(BinarySelector& selector) {
         float font_size_main    = 18.0f * dpi_scale;
         float font_size_heading = 28.0f * dpi_scale;
         
-        // Extended glyph ranges: Latin + symbols used in the UI (⚔✕⚙★▶←→ etc)
-        static const ImWchar glyph_ranges[] = {
-            0x0020, 0x00FF, // Basic Latin + Latin Supplement
-            0x2190, 0x21FF, // Arrows (← → ↑ ↓)
-            0x2500, 0x257F, // Box drawing
-            0x2580, 0x259F, // Block elements (▶ etc)
-            0x25A0, 0x25FF, // Geometric shapes (▶ ▷ ◀ ◁)
-            0x2600, 0x26FF, // Miscellaneous symbols (⚔ ⚙ ☆ ★)
-            0x2700, 0x27BF, // Dingbats (✕ ✓ ✗)
-            0x2B00, 0x2BFF, // Miscellaneous Symbols and Arrows
-            0,
-        };
+        // Primary font config (Inter)
+        ImFontConfig text_cfg;
+        text_cfg.OversampleH = 3;
+        text_cfg.OversampleV = 2;
+        text_cfg.PixelSnapH = true;
         
-        ImFontConfig font_cfg;
-        font_cfg.OversampleH = 2;
-        font_cfg.OversampleV = 2;
-        font_cfg.PixelSnapH = true;
-        font_cfg.GlyphRanges = glyph_ranges;
+        // Icon font config (Font Awesome 6 — merged into same atlas)
+        static const ImWchar icon_ranges[] = { ICON_FA_MIN, ICON_FA_MAX, 0 };
+        ImFontConfig icon_cfg;
+        icon_cfg.MergeMode = true;            // merge into previous font
+        icon_cfg.OversampleH = 2;
+        icon_cfg.OversampleV = 2;
+        icon_cfg.PixelSnapH = true;
+        icon_cfg.GlyphMinAdvanceX = font_size_main;  // monospace icons
+        icon_cfg.GlyphOffset = ImVec2(0, 2);  // slight vertical offset to align
         
-        std::string font_paths[] = {
+        // Search paths for Inter font
+        std::string inter_paths[] = {
             get_data_path("src/assets/fonts/Inter-Regular.ttf"),
+            get_user_data_dir() + "/launcher/fonts/Inter-Regular.ttf",
             get_user_data_dir() + "/src/assets/fonts/Inter-Regular.ttf",
             "src/assets/fonts/Inter-Regular.ttf",
             "/usr/share/swordigo-desktop/src/assets/fonts/Inter-Regular.ttf",
         };
+        
+        // Search paths for Font Awesome (FA7 .otf or FA6 .ttf)
+        std::string fa_paths[] = {
+            // FA7 in fontawesome directory (user's actual location)
+            "src/assets/fontawesome/otfs/Font Awesome 7 Free-Solid-900.otf",
+            get_data_path("src/assets/fontawesome/otfs/Font Awesome 7 Free-Solid-900.otf"),
+            // launcher/ subfolder (RPM/DEB friendly)
+            get_user_data_dir() + "/launcher/fontawesome/otfs/Font Awesome 7 Free-Solid-900.otf",
+            get_user_data_dir() + "/launcher/fonts/fa-solid-900.ttf",
+            get_user_data_dir() + "/launcher/fonts/fa-solid-900.otf",
+            // FA6/FA7 in fonts directory (legacy/simple naming)
+            "src/assets/fonts/fa-solid-900.ttf",
+            "src/assets/fonts/fa-solid-900.otf",
+            get_data_path("src/assets/fonts/fa-solid-900.ttf"),
+            get_data_path("src/assets/fonts/fa-solid-900.otf"),
+            get_user_data_dir() + "/src/assets/fonts/fa-solid-900.ttf",
+            get_user_data_dir() + "/src/assets/fontawesome/otfs/Font Awesome 7 Free-Solid-900.otf",
+            // System install paths
+            "/usr/share/swordigo-desktop/src/assets/fonts/fa-solid-900.ttf",
+            "/usr/share/swordigo-desktop/src/assets/fontawesome/otfs/Font Awesome 7 Free-Solid-900.otf",
+        };
+        
+        // Find font files
+        std::string inter_path, fa_path;
+        for (auto& fp : inter_paths) {
+            if (fs::exists(fp)) { inter_path = fp; break; }
+        }
+        for (auto& fp : fa_paths) {
+            if (fs::exists(fp)) { fa_path = fp; break; }
+        }
+        
         bool font_loaded = false;
-        for (auto& fp : font_paths) {
-            if (fs::exists(fp)) {
-                g_font_main    = io.Fonts->AddFontFromFileTTF(fp.c_str(), font_size_main, &font_cfg);
-                g_font_heading = io.Fonts->AddFontFromFileTTF(fp.c_str(), font_size_heading, &font_cfg);
-                if (g_font_main && g_font_heading) {
-                    font_loaded = true;
-                    std::cout << "[Launcher] Font loaded from: " << fp 
-                              << " (scale=" << dpi_scale << "x, size=" << font_size_main << "px)" << std::endl;
-                    break;
-                }
+        if (!inter_path.empty()) {
+            // Load Inter as primary font (main size)
+            g_font_main = io.Fonts->AddFontFromFileTTF(inter_path.c_str(), font_size_main, &text_cfg);
+            
+            // Merge Font Awesome icons into main font
+            if (g_font_main && !fa_path.empty()) {
+                icon_cfg.GlyphMinAdvanceX = font_size_main;
+                icon_cfg.GlyphOffset = ImVec2(0, 2);
+                io.Fonts->AddFontFromFileTTF(fa_path.c_str(), font_size_main * 0.85f, &icon_cfg, icon_ranges);
+                std::cout << "[Launcher] Icons merged (FA6) from: " << fa_path << std::endl;
+            }
+            
+            // Load Inter as heading font (larger size)
+            ImFontConfig heading_cfg = text_cfg;  // fresh config, no merge
+            g_font_heading = io.Fonts->AddFontFromFileTTF(inter_path.c_str(), font_size_heading, &heading_cfg);
+            
+            // Merge FA icons into heading font too
+            if (g_font_heading && !fa_path.empty()) {
+                ImFontConfig icon_heading_cfg = icon_cfg;
+                icon_heading_cfg.GlyphMinAdvanceX = font_size_heading;
+                icon_heading_cfg.GlyphOffset = ImVec2(0, 3);
+                io.Fonts->AddFontFromFileTTF(fa_path.c_str(), font_size_heading * 0.85f, &icon_heading_cfg, icon_ranges);
+            }
+            
+            if (g_font_main && g_font_heading) {
+                font_loaded = true;
+                std::cout << "[Launcher] Font loaded: " << inter_path 
+                          << " (scale=" << dpi_scale << "x, size=" << font_size_main << "px)" << std::endl;
             }
         }
+        
         if (!font_loaded) {
-            std::cout << "[Launcher] Using ImGui default font" << std::endl;
+            std::cout << "[Launcher] WARNING: Using ImGui default font (Inter not found)" << std::endl;
             g_font_main    = io.Fonts->AddFontDefault();
             g_font_heading = g_font_main;
         }
         
+        if (fa_path.empty()) {
+            std::cout << "[Launcher] WARNING: Font Awesome not found — icons will show as '?'" << std::endl;
+            std::cout << "[Launcher] Place Font Awesome 7 Free-Solid-900.otf in src/assets/fontawesome/otfs/" << std::endl;
+        }
+        
         // Apply inverse DPI scale so ImGui layout math stays consistent
-        // (we loaded larger glyphs, so tell ImGui to scale layout down)
         io.FontGlobalScale = 1.0f / dpi_scale;
     }
 
@@ -1458,25 +1531,35 @@ LaunchConfig show_launcher(BinarySelector& selector) {
             GLuint tex = 0;
             // Try 1: relative to CWD (dev mode: ~/SwordigoDesktop/)
             tex = LoadTextureFromFile((std::string("src/assets/") + sub).c_str(), &w, &h);
-            // Try 2: user data dir (~/.local/share/swordigo-desktop/)
+            // Try 2: launcher/ subfolder in user data dir (RPM/DEB friendly)
             if (!tex) {
-                std::string p2 = get_user_data_dir() + "/assets/" + sub;
+                std::string p2 = get_user_data_dir() + "/launcher/" + sub;
                 tex = LoadTextureFromFile(p2.c_str(), &w, &h);
             }
-            // Try 3: via get_data_path (resolves system install paths)
+            // Try 3: user data dir src/assets (legacy layout)
             if (!tex) {
-                std::string p3 = get_data_path(std::string("assets/") + sub);
+                std::string p3 = get_user_data_dir() + "/src/assets/" + sub;
                 tex = LoadTextureFromFile(p3.c_str(), &w, &h);
             }
-            // Try 4: also try src/assets under get_data_path
+            // Try 3b: user data dir /assets/ (original fallback)
             if (!tex) {
-                std::string p4 = get_data_path(std::string("src/assets/") + sub);
+                std::string p3b = get_user_data_dir() + "/assets/" + sub;
+                tex = LoadTextureFromFile(p3b.c_str(), &w, &h);
+            }
+            // Try 4: via get_data_path (resolves system install paths)
+            if (!tex) {
+                std::string p4 = get_data_path(std::string("assets/") + sub);
                 tex = LoadTextureFromFile(p4.c_str(), &w, &h);
             }
-            // Try 5: system install path (deb/rpm packages)
+            // Try 5: also try src/assets under get_data_path
             if (!tex) {
-                std::string p5 = std::string("/usr/share/swordigo-desktop/src/assets/") + sub;
+                std::string p5 = get_data_path(std::string("src/assets/") + sub);
                 tex = LoadTextureFromFile(p5.c_str(), &w, &h);
+            }
+            // Try 6: system install path (deb/rpm packages)
+            if (!tex) {
+                std::string p6 = std::string("/usr/share/swordigo-desktop/src/assets/") + sub;
+                tex = LoadTextureFromFile(p6.c_str(), &w, &h);
             }
             if (ow) *ow = w;
             if (oh) *oh = h;
@@ -1695,7 +1778,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
 
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.55f, 0.34f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.65f, 0.40f, 1.0f));
-            if (ImGui::Button("Create", ImVec2(btn_w, 36))) {
+            if (ImGui::Button(ICON_FA_PLUS "  Create", ImVec2(btn_w, 36))) {
                 g_add_status.clear();
                 // Validate
                 if (strlen(g_add_name) == 0) {
