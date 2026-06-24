@@ -168,6 +168,98 @@ static const char* g_sre_string_replacements[][2] = {
     { 0, 0 }  /* sentinel — do NOT remove */
 };
 
+/* =========================================================================
+ * Dynamic CString Replacement Table
+ * =========================================================================
+ * The host populates this table from config files (e.g. cstrings.toml).
+ * Format: packed key-value pairs separated by null bytes.
+ *
+ * Layout: "original1\0replacement1\0original2\0replacement2\0\0"
+ * The double-null at the end marks the end of entries.
+ *
+ * Host writes this via sre_cstring_add_replacement() or directly to
+ * g_sre_cstring_table before the game starts creating strings.
+ * ========================================================================= */
+
+/* Dynamic replacement table — host populates this */
+char g_sre_cstring_table[8192] = {0};  /* Packed key\0value\0key\0value\0\0 */
+int  g_sre_cstring_count = 0;          /* Number of active replacements */
+
+/*
+ * sre_cstring_add — Add a dynamic string replacement
+ * Called by the host to add entries from cstrings.toml / config.
+ *
+ * @param original     The original string to match
+ * @param replacement  The replacement string
+ * @return 1 on success, 0 if table full
+ */
+int sre_cstring_add(const char* original, const char* replacement) {
+    if (!original || !replacement) return 0;
+
+    /* Find the end of the current table */
+    int pos = 0;
+    int entries = 0;
+    while (pos < 8190 && entries < g_sre_cstring_count) {
+        /* Skip original */
+        while (pos < 8190 && g_sre_cstring_table[pos]) pos++;
+        pos++; /* skip null */
+        /* Skip replacement */
+        while (pos < 8190 && g_sre_cstring_table[pos]) pos++;
+        pos++; /* skip null */
+        entries++;
+    }
+
+    /* Copy original */
+    int orig_len = 0;
+    while (original[orig_len]) orig_len++;
+    if (pos + orig_len + 1 >= 8190) return 0;
+    for (int i = 0; i <= orig_len; i++)
+        g_sre_cstring_table[pos + i] = original[i];
+    pos += orig_len + 1;
+
+    /* Copy replacement */
+    int repl_len = 0;
+    while (replacement[repl_len]) repl_len++;
+    if (pos + repl_len + 1 >= 8190) return 0;
+    for (int i = 0; i <= repl_len; i++)
+        g_sre_cstring_table[pos + i] = replacement[i];
+    pos += repl_len + 1;
+
+    /* Terminate */
+    g_sre_cstring_table[pos] = '\0';
+    g_sre_cstring_count++;
+
+    return 1;
+}
+
+/* Forward declaration — sre_strcmp defined below */
+static int sre_strcmp(const char* a, const char* b);
+
+/* Look up a string in the dynamic table */
+static const char* sre_cstring_lookup(const char* src) {
+    if (g_sre_cstring_count == 0) return 0;
+
+    int pos = 0;
+    int entries = 0;
+    while (pos < 8190 && entries < g_sre_cstring_count) {
+        const char* key = &g_sre_cstring_table[pos];
+        /* Skip to value */
+        while (pos < 8190 && g_sre_cstring_table[pos]) pos++;
+        pos++;
+        const char* val = &g_sre_cstring_table[pos];
+        /* Skip to next entry */
+        while (pos < 8190 && g_sre_cstring_table[pos]) pos++;
+        pos++;
+        entries++;
+
+        /* Compare key with src */
+        if (sre_strcmp(src, key) == 0) {
+            return val;
+        }
+    }
+    return 0;
+}
+
 /* Simple strcmp — we don't have libc strcmp in freestanding */
 static int sre_strcmp(const char* a, const char* b) {
     while (*a && *b && *a == *b) { a++; b++; }
@@ -194,7 +286,7 @@ void sre_CppString_from_char_p(SreString* self, const char* src) {
         return;
     }
 
-    /* Apply string replacement table */
+    /* Apply string replacement table (static) */
     {
         int i;
         for (i = 0; g_sre_string_replacements[i][0] != 0; i++) {
@@ -202,6 +294,14 @@ void sre_CppString_from_char_p(SreString* self, const char* src) {
                 src = g_sre_string_replacements[i][1];
                 break;
             }
+        }
+    }
+
+    /* Apply dynamic replacements (from cstrings.toml / host config) */
+    {
+        const char* dyn_repl = sre_cstring_lookup(src);
+        if (dyn_repl) {
+            src = dyn_repl;
         }
     }
 

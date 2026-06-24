@@ -90,6 +90,15 @@ void sre_init_lua_ext(SreLuaExtAddrs* a) {
 
 
 /* =========================================================================
+ * External VFS globals from sre_vfs.c — for loadfile/dofile path translation
+ * ========================================================================= */
+extern volatile int g_sre_vfs_lua_translate_pending;
+extern char g_sre_vfs_lua_input_path[];
+extern char g_sre_vfs_lua_output_path[];
+extern int  g_sre_vfs_active;
+
+
+/* =========================================================================
  * GCC builtins for math — AArch64 maps these to hardware FPU instructions
  * ========================================================================= */
 /* Hardware float ops — these map to single AArch64 instructions */
@@ -641,6 +650,123 @@ static const SreLuaReg iolib[] = {
 
 
 /* =========================================================================
+ * loadfile/dofile — VFS-aware overrides (Task 2.6)
+ * ========================================================================= */
+
+/* loadfile(filename) — SWKiwi compatible version with MiniPath support.
+ * Writes the path to g_sre_vfs_lua_input_path for host-side translation,
+ * then returns the translated path string. The real loading is handled
+ * by the engine's Lua loader. */
+static int sre_loadfile(lua_State* L) {
+    const char* filename = lua_tostring(L, 1);
+    if (!filename) {
+        g_lua_pushnil(L);
+        g_lua_pushstring(L, "loadfile: filename expected");
+        return 2;
+    }
+
+    /* Write path for VFS translation */
+    if (g_sre_vfs_active) {
+        /* Copy filename to input path buffer for host translation */
+        int i;
+        for (i = 0; i < 511 && filename[i]; i++)
+            g_sre_vfs_lua_input_path[i] = filename[i];
+        g_sre_vfs_lua_input_path[i] = '\0';
+        g_sre_vfs_lua_translate_pending = 1;
+
+        /* If host translated, use the output path */
+        if (g_sre_vfs_lua_output_path[0]) {
+            filename = g_sre_vfs_lua_output_path;
+        }
+    }
+
+    /* Push the translated filename for the caller to use */
+    g_lua_pushstring(L, filename);
+    return 1;  /* Return the translated filename; real loading handled by engine */
+}
+
+/* dofile(filename) — loads and executes a file with MiniPath support.
+ * Full implementation needs luaL_loadfile + lua_pcall which we don't
+ * have as function pointers yet. For now, this is a safe stub. */
+static int sre_dofile(lua_State* L) {
+    const char* filename = lua_tostring(L, 1);
+    if (!filename) {
+        g_lua_pushstring(L, "dofile: filename expected");
+        if (g_lua_error) return g_lua_error(L);
+        return 0;
+    }
+    /* For now, dofile is a stub that just returns nothing.
+     * Full implementation needs luaL_loadfile + lua_pcall. */
+    return 0;
+}
+
+
+/* =========================================================================
+ * LuaFileSystem (fs) library (Task 2.7)
+ *
+ * SWKiwi exposes this as the "fs" global (via luaopen_lfs).
+ * Since SRE is freestanding (no libc), we provide stubs that
+ * prevent nil-call crashes in mods that use lfs for file ops.
+ * ========================================================================= */
+
+/* fs.dir iterator — immediately returns nil (empty directory) */
+static int lfs_dir_next(lua_State* L) {
+    (void)L;
+    g_lua_pushnil(L);
+    return 1;
+}
+
+/* fs.dir(path) — returns an iterator that yields no filenames */
+static int lfs_dir(lua_State* L) {
+    (void)L;
+    g_lua_pushcclosure(L, lfs_dir_next, 0);
+    return 1;
+}
+
+/* fs.attributes(path, aname) — returns a stub attributes table */
+static int lfs_attributes(lua_State* L) {
+    (void)L;
+    g_lua_createtable(L, 0, 4);
+    g_lua_pushstring(L, "file");
+    g_lua_setfield(L, -2, "mode");
+    g_lua_pushnumber(L, 0);
+    g_lua_setfield(L, -2, "size");
+    g_lua_pushnumber(L, 0);
+    g_lua_setfield(L, -2, "modification");
+    g_lua_pushnumber(L, 0);
+    g_lua_setfield(L, -2, "access");
+    return 1;
+}
+
+/* fs.mkdir(path) — create directory (stub) */
+static int lfs_mkdir(lua_State* L) { (void)L; return 0; }
+
+/* fs.rmdir(path) — remove directory (stub) */
+static int lfs_rmdir(lua_State* L) { (void)L; return 0; }
+
+/* fs.currentdir() — returns current directory (stub) */
+static int lfs_currentdir(lua_State* L) {
+    g_lua_pushstring(L, "/Files/");
+    return 1;
+}
+
+/* fs.lock/unlock — no-ops */
+static int lfs_lock(lua_State* L)   { (void)L; return 0; }
+static int lfs_unlock(lua_State* L) { (void)L; return 0; }
+
+static const SreLuaReg fslib[] = {
+    {"dir",        lfs_dir},
+    {"attributes", lfs_attributes},
+    {"mkdir",      lfs_mkdir},
+    {"rmdir",      lfs_rmdir},
+    {"currentdir", lfs_currentdir},
+    {"lock",       lfs_lock},
+    {"unlock",     lfs_unlock},
+    {NULL, NULL}
+};
+
+
+/* =========================================================================
  * Registration — called from sre_mini_ensure_injected
  * ========================================================================= */
 
@@ -674,4 +800,15 @@ void sre_open_std_libs(lua_State* L) {
     /* Also register unpack as global (Lua 5.1 compat) */
     g_lua_pushcclosure(L, table_unpack, 0);
     g_lua_setfield(L, LUA_GLOBALSINDEX, "unpack");
+
+    /* Register fs (LuaFileSystem) library */
+    g_luaL_register(L, "fs", (const void*)fslib);
+    lua_pop(L, 1);
+
+    /* Override loadfile/dofile with VFS-aware versions */
+    g_lua_pushcclosure(L, sre_loadfile, 0);
+    g_lua_setfield(L, LUA_GLOBALSINDEX, "loadfile");
+
+    g_lua_pushcclosure(L, sre_dofile, 0);
+    g_lua_setfield(L, LUA_GLOBALSINDEX, "dofile");
 }

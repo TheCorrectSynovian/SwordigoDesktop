@@ -16,6 +16,20 @@
 #include "sre_lua.h"
 
 /* =========================================================================
+ * External globals from sre_scene_update.c — player stats
+ * ========================================================================= */
+extern volatile int g_sre_player_hp;
+extern volatile int g_sre_player_max_hp;
+extern volatile int g_sre_player_mana;
+extern volatile int g_sre_player_max_mana;
+extern volatile int g_sre_player_coins;
+extern volatile int g_sre_player_xp;
+extern volatile int g_sre_player_level;
+extern volatile int g_sre_player_atk_level;
+extern volatile int g_sre_player_hp_level;
+extern volatile int g_sre_player_mana_level;
+
+/* =========================================================================
  * Shared globals for host communication
  * ========================================================================= */
 
@@ -39,6 +53,391 @@ int g_sre_debug_active = 0;
 char g_sre_lni_command[64] = {0};
 char g_sre_lni_arg[256] = {0};
 int  g_sre_lni_pending = 0;
+
+/* Character modification requests — host polls these */
+volatile int g_sre_char_set_pending = 0;
+volatile int g_sre_char_set_field = 0;  /* 0=none, 1=level, 2=exp, 3=hp, 4=mana, 5=coins */
+volatile int g_sre_char_set_value = 0;
+
+/* Camera state — SRE-side globals, host polls g_sre_cam_set_pending */
+volatile float g_sre_cam_x = 0.0f;
+volatile float g_sre_cam_y = 0.0f;
+volatile float g_sre_cam_z = 0.0f;
+volatile int   g_sre_cam_set_pending = 0;
+volatile float g_sre_cam_zoom = 1.0f;
+volatile int   g_sre_cam_follow = 1;  /* 1 = follow hero, 0 = free */
+
+/* RecreateHero requires calling Caver::GameSceneController::RecreateHero()
+ * at engine offset. This needs a guest function callback mechanism that
+ * doesn't exist yet. For now, set a flag that the host can poll. */
+volatile int g_sre_recreate_hero_pending = 0;
+
+/* =========================================================================
+ * String helper (no libc)
+ * ========================================================================= */
+static int sre_streq(const char* a, const char* b) {
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        if (*a != *b) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+/* =========================================================================
+ * Mini.Health.* Lua Functions
+ * ========================================================================= */
+
+/* Mini.Health.CurrentMana() → number */
+static int l_mini_health_current_mana(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_mana);
+    return 1;
+}
+
+/* Mini.Health.CurrentManaPercent() → number (0.0–1.0) */
+static int l_mini_health_current_mana_percent(lua_State* L) {
+    if (g_sre_player_max_mana > 0)
+        g_lua_pushnumber(L, (double)g_sre_player_mana / (double)g_sre_player_max_mana);
+    else
+        g_lua_pushnumber(L, 0.0);
+    return 1;
+}
+
+/* =========================================================================
+ * Mini.Character.* Lua Functions — full player stats
+ * ========================================================================= */
+
+static int l_mini_char_get_level(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_level);
+    return 1;
+}
+
+static int l_mini_char_get_exp(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_xp);
+    return 1;
+}
+
+static int l_mini_char_get_health(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_hp);
+    return 1;
+}
+
+static int l_mini_char_get_max_health(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_max_hp);
+    return 1;
+}
+
+static int l_mini_char_get_mana(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_mana);
+    return 1;
+}
+
+static int l_mini_char_get_max_mana(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_max_mana);
+    return 1;
+}
+
+static int l_mini_char_get_coins(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_coins);
+    return 1;
+}
+
+static int l_mini_char_get_atk_level(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_atk_level);
+    return 1;
+}
+
+static int l_mini_char_get_hp_level(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_hp_level);
+    return 1;
+}
+
+static int l_mini_char_get_mana_level(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_mana_level);
+    return 1;
+}
+
+/* Setters — write to pending buffer, host polls */
+static int l_mini_char_set_level(lua_State* L) {
+    g_sre_char_set_value = (int)g_lua_tonumber(L, 1);
+    g_sre_char_set_field = 1;
+    g_sre_char_set_pending = 1;
+    return 0;
+}
+
+static int l_mini_char_set_exp(lua_State* L) {
+    g_sre_char_set_value = (int)g_lua_tonumber(L, 1);
+    g_sre_char_set_field = 2;
+    g_sre_char_set_pending = 1;
+    return 0;
+}
+
+static int l_mini_char_set_health(lua_State* L) {
+    g_sre_char_set_value = (int)g_lua_tonumber(L, 1);
+    g_sre_char_set_field = 3;
+    g_sre_char_set_pending = 1;
+    return 0;
+}
+
+static int l_mini_char_set_mana(lua_State* L) {
+    g_sre_char_set_value = (int)g_lua_tonumber(L, 1);
+    g_sre_char_set_field = 4;
+    g_sre_char_set_pending = 1;
+    return 0;
+}
+
+static int l_mini_char_set_coins(lua_State* L) {
+    g_sre_char_set_value = (int)g_lua_tonumber(L, 1);
+    g_sre_char_set_field = 5;
+    g_sre_char_set_pending = 1;
+    return 0;
+}
+
+/* =========================================================================
+ * Mini.Camera.* Lua Functions
+ * ========================================================================= */
+
+/* Mini.Camera.GetPosition() → table {x, y, z} */
+static int l_mini_cam_get_position(lua_State* L) {
+    g_lua_createtable(L, 0, 3);
+    g_lua_pushnumber(L, (double)g_sre_cam_x);
+    g_lua_setfield(L, -2, "x");
+    g_lua_pushnumber(L, (double)g_sre_cam_y);
+    g_lua_setfield(L, -2, "y");
+    g_lua_pushnumber(L, (double)g_sre_cam_z);
+    g_lua_setfield(L, -2, "z");
+    return 1;
+}
+
+/* Mini.Camera.SetPosition(x, y, z) */
+static int l_mini_cam_set_position(lua_State* L) {
+    g_sre_cam_x = (float)g_lua_tonumber(L, 1);
+    g_sre_cam_y = (float)g_lua_tonumber(L, 2);
+    g_sre_cam_z = (float)g_lua_tonumber(L, 3);
+    g_sre_cam_set_pending = 1;
+    return 0;
+}
+
+/* Mini.Camera.GetZoom() → number */
+static int l_mini_cam_get_zoom(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_cam_zoom);
+    return 1;
+}
+
+/* Mini.Camera.SetZoom(n) */
+static int l_mini_cam_set_zoom(lua_State* L) {
+    float z = (float)g_lua_tonumber(L, 1);
+    if (z > 0.0f && z <= 20.0f)
+        g_sre_cam_zoom = z;
+    return 0;
+}
+
+/* Mini.Camera.GetFollow() → boolean */
+static int l_mini_cam_get_follow(lua_State* L) {
+    g_lua_pushboolean(L, g_sre_cam_follow);
+    return 1;
+}
+
+/* Mini.Camera.SetFollow(bool) */
+static int l_mini_cam_set_follow(lua_State* L) {
+    g_sre_cam_follow = g_lua_toboolean(L, 1);
+    return 0;
+}
+
+/* =========================================================================
+ * Components.Health / Components.Physics / Components.Entity
+ * ========================================================================= */
+
+/* Components.Health.GetValue(entity, fieldName) */
+static int l_comp_health_get_value(lua_State* L) {
+    const char* field = lua_tostring(L, 2);
+    if (!field) return 0;
+
+    if (sre_streq(field, "CurrentHealth")) {
+        g_lua_pushnumber(L, (double)g_sre_player_hp);
+        return 1;
+    }
+    if (sre_streq(field, "MaxHealth")) {
+        g_lua_pushnumber(L, (double)g_sre_player_max_hp);
+        return 1;
+    }
+    if (sre_streq(field, "CurrentMana")) {
+        g_lua_pushnumber(L, (double)g_sre_player_mana);
+        return 1;
+    }
+    if (sre_streq(field, "MaxMana")) {
+        g_lua_pushnumber(L, (double)g_sre_player_max_mana);
+        return 1;
+    }
+
+    g_lua_pushnumber(L, 0.0);
+    return 1;
+}
+
+/* Components.Health.SetValue(entity, fieldName, value) */
+static int l_comp_health_set_value(lua_State* L) {
+    const char* field = lua_tostring(L, 2);
+    int val = (int)g_lua_tonumber(L, 3);
+    if (!field) return 0;
+
+    if (sre_streq(field, "CurrentHealth")) {
+        g_sre_char_set_value = val;
+        g_sre_char_set_field = 3;
+        g_sre_char_set_pending = 1;
+    } else if (sre_streq(field, "CurrentMana")) {
+        g_sre_char_set_value = val;
+        g_sre_char_set_field = 4;
+        g_sre_char_set_pending = 1;
+    }
+    return 0;
+}
+
+/* Components.Physics.GetValue(entity, fieldName) — stub */
+static int l_comp_physics_get_value(lua_State* L) {
+    (void)L;
+    g_lua_pushnumber(L, 0.0);
+    return 1;
+}
+
+/* Components.Entity.GetValue(entity, fieldName) — stub */
+static int l_comp_entity_get_value(lua_State* L) {
+    (void)L;
+    g_lua_pushnumber(L, 0.0);
+    return 1;
+}
+
+/* =========================================================================
+ * Skeleton.* Lua Functions (stubs)
+ * ========================================================================= */
+
+/* Skeleton.GetBonePosition(entity, boneName) → {0, 0, 0} */
+static int l_skeleton_get_bone_position(lua_State* L) {
+    (void)L;
+    g_lua_createtable(L, 3, 0);
+    g_lua_pushnumber(L, 0.0);
+    if (g_lua_rawseti) g_lua_rawseti(L, -2, 1);
+    else lua_pop(L, 1);
+    g_lua_pushnumber(L, 0.0);
+    if (g_lua_rawseti) g_lua_rawseti(L, -2, 2);
+    else lua_pop(L, 1);
+    g_lua_pushnumber(L, 0.0);
+    if (g_lua_rawseti) g_lua_rawseti(L, -2, 3);
+    else lua_pop(L, 1);
+    return 1;
+}
+
+/* Skeleton.GetBoneRotation(entity, boneName) → {0, 0, 0, 1} (quaternion) */
+static int l_skeleton_get_bone_rotation(lua_State* L) {
+    (void)L;
+    g_lua_createtable(L, 4, 0);
+    g_lua_pushnumber(L, 0.0);
+    if (g_lua_rawseti) g_lua_rawseti(L, -2, 1);
+    else lua_pop(L, 1);
+    g_lua_pushnumber(L, 0.0);
+    if (g_lua_rawseti) g_lua_rawseti(L, -2, 2);
+    else lua_pop(L, 1);
+    g_lua_pushnumber(L, 0.0);
+    if (g_lua_rawseti) g_lua_rawseti(L, -2, 3);
+    else lua_pop(L, 1);
+    g_lua_pushnumber(L, 1.0);
+    if (g_lua_rawseti) g_lua_rawseti(L, -2, 4);
+    else lua_pop(L, 1);
+    return 1;
+}
+
+/* Skeleton.SetBoneScale(entity, boneName, sx, sy, sz) → 0 (no-op) */
+static int l_skeleton_set_bone_scale(lua_State* L) {
+    (void)L;
+    g_lua_pushnumber(L, 0.0);
+    return 1;
+}
+
+/* =========================================================================
+ * CharAnimController.* Lua Functions (stubs)
+ * ========================================================================= */
+
+/* CharAnimController.Play(entity, animName) → no-op */
+static int l_charanim_play(lua_State* L) {
+    (void)L;
+    return 0;
+}
+
+/* CharAnimController.Stop(entity) → no-op */
+static int l_charanim_stop(lua_State* L) {
+    (void)L;
+    return 0;
+}
+
+/* CharAnimController.GetCurrent(entity) → "" */
+static int l_charanim_get_current(lua_State* L) {
+    (void)L;
+    g_lua_pushstring(L, "");
+    return 1;
+}
+
+/* =========================================================================
+ * ButtonController.* Lua Functions (stubs)
+ *
+ * Mods heavily use ButtonController for custom UI. These stubs prevent
+ * nil-call crashes. A real implementation would require host-side Android
+ * View creation, which we don't have on desktop yet.
+ * ========================================================================= */
+
+/* ButtonController.New(id, label, x, y, w, h) → 0 */
+static int l_btn_new(lua_State* L) {
+    (void)L;
+    g_lua_pushnumber(L, 0.0);
+    return 1;
+}
+
+/* Generic no-op stub — used for many ButtonController functions */
+static int l_btn_noop(lua_State* L) {
+    (void)L;
+    return 0;
+}
+
+/* ButtonController.IsPressed(id) → false */
+static int l_btn_is_pressed(lua_State* L) {
+    (void)L;
+    g_lua_pushboolean(L, 0);
+    return 1;
+}
+
+/* ButtonController.IsDragging(id) → false */
+static int l_btn_is_dragging(lua_State* L) {
+    (void)L;
+    g_lua_pushboolean(L, 0);
+    return 1;
+}
+
+/* ButtonController.Exists(id) → false */
+static int l_btn_exists(lua_State* L) {
+    (void)L;
+    g_lua_pushboolean(L, 0);
+    return 1;
+}
+
+/* ButtonController.GetPosition(id) → 0, 0 */
+static int l_btn_get_position(lua_State* L) {
+    (void)L;
+    g_lua_pushnumber(L, 0.0);
+    g_lua_pushnumber(L, 0.0);
+    return 2;
+}
+
+/* ButtonController.GetPositionX(id) → 0 */
+static int l_btn_get_position_x(lua_State* L) {
+    (void)L;
+    g_lua_pushnumber(L, 0.0);
+    return 1;
+}
+
+/* ButtonController.GetPositionY(id) → 0 */
+static int l_btn_get_position_y(lua_State* L) {
+    (void)L;
+    g_lua_pushnumber(L, 0.0);
+    return 1;
+}
 
 /* =========================================================================
  * Mini.* Lua Functions
@@ -78,10 +477,12 @@ static int l_mini_toggle_debug(lua_State* L) {
     return 0;
 }
 
-/* Mini.RecreateHero() — placeholder, needs engine call */
+/* Mini.RecreateHero() — sets pending flag for host to poll.
+ * The real implementation needs Caver::GameSceneController::RecreateHero()
+ * called at the engine offset via a guest→host callback mechanism. */
 static int l_mini_recreate_hero(lua_State* L) {
     (void)L;
-    /* TODO: Call Caver::RecreateHero via guest function pointer */
+    g_sre_recreate_hero_pending = 1;
     return 0;
 }
 
@@ -287,7 +688,7 @@ void sre_register_mini_api(lua_State* L) {
     }
 
     /* ---- Mini table ---- */
-    g_lua_createtable(L, 0, 12);  /* Mini = {} */
+    g_lua_createtable(L, 0, 16);  /* Mini = {} */
 
     g_lua_pushcclosure(L, l_mini_arch, 0);
     g_lua_setfield(L, -2, "Arch");
@@ -320,12 +721,62 @@ void sre_register_mini_api(lua_State* L) {
     g_lua_setfield(L, -2, "map");
 
     /* Mini.Health = {} (sub-table) */
-    g_lua_createtable(L, 0, 2);
+    g_lua_createtable(L, 0, 4);
+    g_lua_pushcclosure(L, l_mini_health_current_mana, 0);
+    g_lua_setfield(L, -2, "CurrentMana");
+    g_lua_pushcclosure(L, l_mini_health_current_mana_percent, 0);
+    g_lua_setfield(L, -2, "CurrentManaPercent");
     g_lua_setfield(L, -2, "Health");
 
     /* Mini.Character = {} (sub-table) */
-    g_lua_createtable(L, 0, 2);
+    g_lua_createtable(L, 0, 16);
+    g_lua_pushcclosure(L, l_mini_char_get_level, 0);
+    g_lua_setfield(L, -2, "GetLevel");
+    g_lua_pushcclosure(L, l_mini_char_get_exp, 0);
+    g_lua_setfield(L, -2, "GetExp");
+    g_lua_pushcclosure(L, l_mini_char_get_health, 0);
+    g_lua_setfield(L, -2, "GetHealth");
+    g_lua_pushcclosure(L, l_mini_char_get_max_health, 0);
+    g_lua_setfield(L, -2, "GetMaxHealth");
+    g_lua_pushcclosure(L, l_mini_char_get_mana, 0);
+    g_lua_setfield(L, -2, "GetMana");
+    g_lua_pushcclosure(L, l_mini_char_get_max_mana, 0);
+    g_lua_setfield(L, -2, "GetMaxMana");
+    g_lua_pushcclosure(L, l_mini_char_get_coins, 0);
+    g_lua_setfield(L, -2, "GetCoins");
+    g_lua_pushcclosure(L, l_mini_char_get_atk_level, 0);
+    g_lua_setfield(L, -2, "GetAttackLevel");
+    g_lua_pushcclosure(L, l_mini_char_get_hp_level, 0);
+    g_lua_setfield(L, -2, "GetHealthLevel");
+    g_lua_pushcclosure(L, l_mini_char_get_mana_level, 0);
+    g_lua_setfield(L, -2, "GetManaLevel");
+    g_lua_pushcclosure(L, l_mini_char_set_level, 0);
+    g_lua_setfield(L, -2, "SetLevel");
+    g_lua_pushcclosure(L, l_mini_char_set_exp, 0);
+    g_lua_setfield(L, -2, "SetExp");
+    g_lua_pushcclosure(L, l_mini_char_set_health, 0);
+    g_lua_setfield(L, -2, "SetHealth");
+    g_lua_pushcclosure(L, l_mini_char_set_mana, 0);
+    g_lua_setfield(L, -2, "SetMana");
+    g_lua_pushcclosure(L, l_mini_char_set_coins, 0);
+    g_lua_setfield(L, -2, "SetCoins");
     g_lua_setfield(L, -2, "Character");
+
+    /* Mini.Camera = {} (sub-table) */
+    g_lua_createtable(L, 0, 8);
+    g_lua_pushcclosure(L, l_mini_cam_get_position, 0);
+    g_lua_setfield(L, -2, "GetPosition");
+    g_lua_pushcclosure(L, l_mini_cam_set_position, 0);
+    g_lua_setfield(L, -2, "SetPosition");
+    g_lua_pushcclosure(L, l_mini_cam_get_zoom, 0);
+    g_lua_setfield(L, -2, "GetZoom");
+    g_lua_pushcclosure(L, l_mini_cam_set_zoom, 0);
+    g_lua_setfield(L, -2, "SetZoom");
+    g_lua_pushcclosure(L, l_mini_cam_get_follow, 0);
+    g_lua_setfield(L, -2, "GetFollow");
+    g_lua_pushcclosure(L, l_mini_cam_set_follow, 0);
+    g_lua_setfield(L, -2, "SetFollow");
+    g_lua_setfield(L, -2, "Camera");
 
     g_lua_setfield(L, LUA_GLOBALSINDEX, "Mini");  /* _G.Mini = table */
 
@@ -369,22 +820,102 @@ void sre_register_mini_api(lua_State* L) {
 
     g_lua_setfield(L, LUA_GLOBALSINDEX, "LNI");  /* _G.LNI = table */
 
-    /* ---- Components table (stub) ---- */
+    /* ---- Components table ---- */
     g_lua_createtable(L, 0, 4);
 
-    /* Components.Health = {} */
+    /* Components.Health = { GetValue, SetValue } */
     g_lua_createtable(L, 0, 4);
+    g_lua_pushcclosure(L, l_comp_health_get_value, 0);
+    g_lua_setfield(L, -2, "GetValue");
+    g_lua_pushcclosure(L, l_comp_health_set_value, 0);
+    g_lua_setfield(L, -2, "SetValue");
     g_lua_setfield(L, -2, "Health");
 
-    /* Components.Physics = {} */
+    /* Components.Physics = { GetValue } */
     g_lua_createtable(L, 0, 4);
+    g_lua_pushcclosure(L, l_comp_physics_get_value, 0);
+    g_lua_setfield(L, -2, "GetValue");
     g_lua_setfield(L, -2, "Physics");
 
-    /* Components.Entity = {} */
+    /* Components.Entity = { GetValue } */
     g_lua_createtable(L, 0, 4);
+    g_lua_pushcclosure(L, l_comp_entity_get_value, 0);
+    g_lua_setfield(L, -2, "GetValue");
     g_lua_setfield(L, -2, "Entity");
 
     g_lua_setfield(L, LUA_GLOBALSINDEX, "Components");
+
+    /* ---- Skeleton table (stubs) ---- */
+    g_lua_createtable(L, 0, 4);
+    g_lua_pushcclosure(L, l_skeleton_get_bone_position, 0);
+    g_lua_setfield(L, -2, "GetBonePosition");
+    g_lua_pushcclosure(L, l_skeleton_get_bone_rotation, 0);
+    g_lua_setfield(L, -2, "GetBoneRotation");
+    g_lua_pushcclosure(L, l_skeleton_set_bone_scale, 0);
+    g_lua_setfield(L, -2, "SetBoneScale");
+    g_lua_setfield(L, LUA_GLOBALSINDEX, "Skeleton");
+
+    /* ---- CharAnimController table (stubs) ---- */
+    g_lua_createtable(L, 0, 4);
+    g_lua_pushcclosure(L, l_charanim_play, 0);
+    g_lua_setfield(L, -2, "Play");
+    g_lua_pushcclosure(L, l_charanim_stop, 0);
+    g_lua_setfield(L, -2, "Stop");
+    g_lua_pushcclosure(L, l_charanim_get_current, 0);
+    g_lua_setfield(L, -2, "GetCurrent");
+    g_lua_setfield(L, LUA_GLOBALSINDEX, "CharAnimController");
+
+    /* ---- ButtonController table (stubs) ---- */
+    g_lua_createtable(L, 0, 26);
+    g_lua_pushcclosure(L, l_btn_new, 0);
+    g_lua_setfield(L, -2, "New");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "Delete");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "SetHidden");
+    g_lua_pushcclosure(L, l_btn_is_pressed, 0);
+    g_lua_setfield(L, -2, "IsPressed");
+    g_lua_pushcclosure(L, l_btn_is_dragging, 0);
+    g_lua_setfield(L, -2, "IsDragging");
+    g_lua_pushcclosure(L, l_btn_exists, 0);
+    g_lua_setfield(L, -2, "Exists");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "SetText");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "SetPosition");
+    g_lua_pushcclosure(L, l_btn_get_position, 0);
+    g_lua_setfield(L, -2, "GetPosition");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "DeleteAll");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "SetAlpha");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "SetScaling");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "SetDimensions");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "MakeMovable");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "SetClickable");
+    g_lua_pushcclosure(L, l_btn_get_position_x, 0);
+    g_lua_setfield(L, -2, "GetPositionX");
+    g_lua_pushcclosure(L, l_btn_get_position_y, 0);
+    g_lua_setfield(L, -2, "GetPositionY");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "SetTextFont");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "SetTextScale");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "SetTextColor");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "SetPadding");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "SetAlignment");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "SetBackgroundResource");
+    g_lua_pushcclosure(L, l_btn_noop, 0);
+    g_lua_setfield(L, -2, "SetBackgroundAlpha");
+    g_lua_setfield(L, LUA_GLOBALSINDEX, "ButtonController");
 
     /* ---- fs (LuaFileSystem stub) ---- */
     g_lua_createtable(L, 0, 0);
