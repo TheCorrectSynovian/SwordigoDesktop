@@ -479,10 +479,33 @@ bool BinarySelector::add_custom_instance(const std::string& so_filepath, const s
     }
     elf_file.close();
 
-    // Create directory: engine/custom-NAME/<arch>/
+    // Create directory: <data_dir>/engine/custom-NAME/<arch>/
+    // Derive data dir from so_filepath (which is absolute, e.g. .../engine/v1.4.12/arm64-v8a/libswordigo.so)
     std::string version_dir = "custom-" + name;
-    std::string dest_dir = "engine/" + version_dir + "/" + arch_dir;
-    std::string dest_path = dest_dir + "/libswordigo.so";
+    std::string rel_dest = "engine/" + version_dir + "/" + arch_dir;
+    std::string rel_dest_so = rel_dest + "/libswordigo.so";
+    
+    // Extract base data directory from absolute so_filepath
+    // so_filepath = "<data_dir>/engine/<version>/<arch>/libswordigo.so"
+    std::string data_dir;
+    {
+        fs::path sp(so_filepath);
+        // Walk up to find the "engine" component
+        fs::path parent = sp.parent_path(); // <data_dir>/engine/<version>/<arch>
+        while (!parent.empty() && parent.filename() != "engine") {
+            parent = parent.parent_path();
+        }
+        if (parent.filename() == "engine") {
+            data_dir = parent.parent_path().string(); // <data_dir>
+        }
+    }
+    if (data_dir.empty()) {
+        // Fallback: use parent 4 levels up from so_filepath
+        data_dir = fs::path(so_filepath).parent_path().parent_path().parent_path().parent_path().string();
+    }
+    
+    std::string dest_dir = data_dir + "/" + rel_dest;
+    std::string dest_path = data_dir + "/" + rel_dest_so;
 
     try {
         fs::create_directories(dest_dir);
@@ -511,7 +534,7 @@ bool BinarySelector::add_custom_instance(const std::string& so_filepath, const s
     // Build BinaryInfo
     BinaryInfo info;
     info.filename = "libswordigo.so";
-    info.filepath = dest_path;
+    info.filepath = rel_dest_so;
     info.version_dir = version_dir;
     info.arch = arch;
     info.file_size = fs::file_size(dest_path);

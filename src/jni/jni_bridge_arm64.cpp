@@ -2139,7 +2139,7 @@ static void bridge_fputs(void* emu_ptr) {
     uint8_t* memory = emu->get_memory_base();
     uint32_t str_ptr = emu->get_reg(0);
     const char* str = (const char*)(memory + str_ptr);
-    std::cerr << str;
+    std::cerr << "[GUEST fputs] " << str;
     emu->set_reg(0, 0); // success
 }
 
