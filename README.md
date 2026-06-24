@@ -9,8 +9,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20x86__64-purple.svg)](#)
-[![Version](https://img.shields.io/badge/Version-v6.0-00e5ff.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases)
-[![Engine](https://img.shields.io/badge/Engine-SRT%20v6.0-8b3dff.svg)](#-srt-architecture)
+[![Version](https://img.shields.io/badge/Version-v7.0-00e5ff.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases)
+[![Engine](https://img.shields.io/badge/Engine-SRT%20v7.0-8b3dff.svg)](#-srt-architecture)
 
 [Website](https://thecorrectsynovian.github.io/SwordigoDesktop/web/) · [Download](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases) · [Research](https://thecorrectsynovian.github.io/SwordigoDesktop/web/research.html) · [Changelog](https://thecorrectsynovian.github.io/SwordigoDesktop/web/changelog.html)
 
@@ -20,7 +20,7 @@
 
 **Swordigo Desktop** is a native Linux port of the beloved mobile action-adventure platformer by Touch Foo. Rather than running through Android emulation layers, this project uses the **Swordigo Runtime (SRT)** — a layered runtime architecture that treats `libswordigo.so` as a gameplay kernel while progressively replacing subsystems with clean, native reimplementations.
 
-v6.0 brings **libsre.so** to 30+ hooks with a **full GUI stack** — buttons, labels, frames, and sliders rendered natively in C through 8 DrawRect hooks, plus an integrated save editor, asset viewer, and crash interception for Lua and C++ exceptions. This isn't patching. It's owning.
+v7.0 brings the **Dynarmic JIT revolution** — ARM64 code now runs through a Just-In-Time compiler at near-native speed, delivering **60fps buttery smooth gameplay** with instant touch response. Combined with **RLSwordigo support** and **KiwiAPI compatibility**, this is the biggest performance update ever.
 
 ---
 
@@ -40,8 +40,8 @@ v6.0 brings **libsre.so** to 30+ hooks with a **full GUI stack** — buttons, la
 │      200+ bridged functions   │      ARM32 + ARM64            │
 │      libc/GL/AL/IO/pthread    │      Full ELF relocation      │
 ├───────────────────────────────┴───────────────────────────────┤
-│  ⚙️  Unicorn Engine                                           │
-│      ARMv7 (VFP) + ARM64 (AArch64)                            │
+│  ⚙️  Dynarmic JIT (Default) / Unicorn Interpreter (Fallback) │
+│      ARM64 JIT → x86_64 native · 60fps · Near-native speed   │
 ├───────────────────────────────────────────────────────────────┤
 │  🏗️  libsre.so — Swordigo Runtime Engine (Guest ARM64)       │
 │      30+ active hooks · GUI · Music · HUD · Death · Saves    │
@@ -60,7 +60,7 @@ v6.0 brings **libsre.so** to 30+ hooks with a **full GUI stack** — buttons, la
 | **Controls** | Input Config + Macro Engine | Fully remappable keyboard/gamepad/touch |
 | **Bridge** | JNI Bridge (200+ functions) | Translates ARM JNI calls to host APIs |
 | **Loader** | ELF Loader (ARM32 + ARM64) | Parses, relocates, loads ARM shared objects |
-| **Emulator** | Unicorn Engine | Executes ARM instructions on x86_64 |
+| **Emulator** | Dynarmic JIT (default) / Unicorn | JIT compiles ARM64 → x86_64 at near-native speed |
 | **SRE** | libsre.so (30+ hooks) | **Replaces** game subsystems with clean C |
 | **Kernel** | libswordigo.so | Original game: physics, AI, Lua, combat |
 
@@ -92,6 +92,11 @@ v6.0 brings **libsre.so** to 30+ hooks with a **full GUI stack** — buttons, la
 - Full audio: music tracks + sound effects through OpenAL
 - **Music loop watchdog** — ensures background music never stops unexpectedly
 
+### 🚀 RLSwordigo Support
+- **RLSwordigo (ReallyLongSwordigo)** is now fully supported as an instance
+- Load RLSwordigo binaries alongside vanilla Swordigo
+- **Compatible with KiwiAPI** — the SwKiwi modding framework works out of the box
+
 ### 🖥️ Desktop-Native Experience
 - **1920×1080 internal rendering** with FBO-based scaling (Sharp Bilinear, Nearest, CRT Scanline)
 - **Keyboard controls** — fully remappable via the in-game Controls Editor (F2)
@@ -115,44 +120,42 @@ v6.0 brings **libsre.so** to 30+ hooks with a **full GUI stack** — buttons, la
 | **F6** | Cycle PostFX presets |
 | **F7** | Typing mode |
 | **F10** | Toggle native on-screen controls |
-| **F11** | *Reserved (v7)* |
 | **F12** | Fullscreen toggle |
 
 ### 🚀 SRT Launcher
 - **PolyMC-inspired Instance Manager** — Card grid layout with instance icons
 - **Multi-Binary Support** — v1.4.6, v1.4.12 in ARM32 + ARM64
+- **Engine Selection** — Dynarmic JIT (default) or Unicorn interpreter
 - **Binary Registry** — JSON-based version tracking with validation status
 - **Custom Instance Import** — Add any `.so` binary with custom naming
 
 ---
 
-## 📦 Install (v6.0)
+## 📦 Install (v7.0)
 
 ### Pre-built Packages
 | Format | Platform | Command |
 |--------|----------|---------|
-| `.rpm` | Fedora x86_64 | `sudo dnf install swordigo-desktop-6.0.0-1.x86_64.rpm` |
-| `.deb` | Debian/Ubuntu x86_64 | `sudo dpkg -i swordigo-desktop_6.0.0-1_amd64.deb` |
+| `.rpm` | Fedora x86_64 | `sudo dnf install swordigo-desktop-7.0.0-1.x86_64.rpm` |
+| `.deb` | Debian/Ubuntu x86_64 | `sudo dpkg -i swordigo-desktop_7.0.0-1_amd64.deb` |
 
 ### Build from Source
 
-**Dependencies:**
+See [BUILD.md](BUILD.md) for the full developer build guide.
+
+**Quick Start:**
 ```bash
-# Fedora / RHEL
+# Install dependencies (Fedora)
 sudo dnf install unicorn-devel SDL3-devel SDL3_image-devel openal-soft-devel \
-    mesa-libGL-devel zlib-devel libvorbis-devel gcc-aarch64-linux-gnu
+    mesa-libGL-devel zlib-devel libvorbis-devel gcc-aarch64-linux-gnu cmake
 
-# Ubuntu / Debian (24.04+)
-sudo apt install libunicorn-dev libsdl3-dev libsdl3-image-dev libopenal-dev \
-    libgl-dev zlib1g-dev libvorbis-dev gcc-aarch64-linux-gnu
+# Clone and build
+git clone https://github.com/TheCorrectSynovian/SwordigoDesktop.git
+cd SwordigoDesktop
+./run_swordigo.sh   # Auto-builds Dynarmic JIT, compiles, installs SRE, and launches
 ```
 
-```bash
-make clean && make -j$(nproc)   # Builds swordigo_boot + libsre.so
-./run_swordigo.sh               # Build, install SRE, and launch
-```
-
-> **Note**: `aarch64-linux-gnu-gcc` is required to cross-compile libsre.so for ARM64.
+> **Note**: `aarch64-linux-gnu-gcc` is required to cross-compile libsre.so for ARM64. Dynarmic JIT is built from included source automatically on first run.
 
 ---
 
@@ -189,8 +192,7 @@ All controls are fully remappable — press **F2** to open the Controls Editor. 
 ### ARM64 (arm64-v8a) — Primary Target
 | Issue | Severity | Details |
 |-------|----------|---------|
-| Bolt/timer misbehavior | 🟡 Medium | Timing misalignment causes certain bosses, bolt-shooting enemies, and bolt traps to fire at abnormal rates. Some sword enemies behave differently from Android. Will be patched. |
-| Heavy function stalls | 🟡 Medium | Some entity functions take 800ms+ in dungeon areas |
+| Bolt/timer misbehavior | 🟡 Medium | Timing misalignment causes certain bosses, bolt-shooting enemies, and bolt traps to fire at abnormal rates. Will be patched. |
 | Text input crash | 🟡 Medium | Typing into certain UI fields can crash — avoid F7 in menus |
 
 ### ARM32 (armeabi-v7a)
@@ -200,30 +202,29 @@ All controls are fully remappable — press **F2** to open the Controls Editor. 
 | Boss gates | 🔴 High | Post-boss gates don't trigger |
 | No SRE | 🟡 Medium | libsre.so only supports ARM64 — ARM32 runs without engine hooks |
 
-### ✅ Resolved in v6.0
-| Issue | Was | Fix |
-|-------|-----|-----|
-| **Wastelands spinlock** | 🔴 Game-breaking freeze | ARM64 emulation fix — plays through normally now |
-| **Death freeze** | 🔴 Permanent hang on death | SRE intercepts death handler → instant checkpoint respawn |
-
 ---
 
-## 🆕 What's New in v6.0
+## 🆕 What's New in v7.0
 
-### Full GUI Stack
-- **30+ active hooks** — up from 17 in v5.0
-- **8 DrawRect hooks** replace the game's GUI rendering — buttons, labels, frames, and sliders drawn natively in C
-- **Wastelands freeze fixed** — the 🔴 High severity ARM64 spinlock is resolved
+### ⚡ Dynarmic JIT — The Performance Revolution
+- **ARM64 JIT compiler** replaces Unicorn interpreter as the default engine
+- **60fps buttery smooth gameplay** — near-native execution speed
+- **Instant touch/input response** — zero perceptible input latency
+- **Handles any mob count** — no performance scaling issues
+- **Scene transitions work flawlessly** — portals, level loading, all at full speed
+- Unicorn interpreter remains available as fallback (`--no-dynarmic`)
 
-### New Tools
-- **Save Editor** — built into the launcher, edit coins, HP, mana, XP, weapons, and keys
-- **Asset Viewer** — browse PVR/PNG textures, audio files, and scene data (`make asset_viewer`)
+### 🎮 RLSwordigo Support
+- **ReallyLongSwordigo** is now a first-class supported mod
+- Load as a separate instance alongside vanilla Swordigo
+- **KiwiAPI compatible** — the SwKiwi modding framework works natively
 
-### Crash Safety
-- **luaD_throw interception** — Lua script errors no longer crash the process
-- **ProgramPanic + __cxa_throw** — C++ exceptions and engine panics caught and handled
+### Build System
+- **Dynarmic source included** in repo (`deps/dynarmic/`)
+- **`run_swordigo.sh`** auto-builds Dynarmic on first run
+- **`.gitignore`** added for clean repository management
 
-> See [v6.0 Release Notes](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/tag/v6.0) for full details.
+> See [v7.0 Release Notes](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/tag/v7.0) for full details.
 
 ---
 
@@ -235,13 +236,14 @@ All controls are fully remappable — press **F2** to open the Controls Editor. 
 |------|------|--------|
 | **Lead Developer** | TheMegineBraine | -- |
 | **Developer** | TheCorrectSynovian | [@QuantumCreeper](https://github.com/TheCorrectSynovian) |
+| **Developer** | MrSinup | -- |
 
 ### Research & Community
 
 | Contribution | Name | GitHub |
 |-------------|------|--------|
-| **SwMini Mod Loader** — Reverse engineering | ItsJustSomeDude | [@ItsJustSomeDude](https://github.com/ItsJustSomeDude) |
-| **SwMini Mod Loader** — Reverse engineering | Kiziyon | [@Kiziyon](https://github.com/Kiziyon) |
+| **SwMini** — Swordigo Mini mod loader & reverse engineering | ItsJustSomeDude (IJSD) | [@ItsJustSomeDude](https://github.com/ItsJustSomeDude) |
+| **SwKiwi API** — KiwiAPI modding framework for Swordigo | Kiziyon | [@Kiziyon](https://github.com/Kiziyon) |
 | **Swordigo Vita Port** — Original ARM→desktop porting research | Rinnegatamante | [@Rinnegatamante](https://github.com/Rinnegatamante) |
 
 ### Original Game
@@ -253,19 +255,11 @@ All controls are fully remappable — press **F2** to open the Controls Editor. 
 
 | Project | License | Purpose |
 |---------|---------|---------|
-| [Unicorn Engine](https://www.unicorn-engine.org/) | GPL-2.0 | ARM CPU emulation |
+| [Dynarmic](https://github.com/lioncash/dynarmic) | BSD-0-Clause | ARM64 JIT compiler (default engine) |
+| [Unicorn Engine](https://www.unicorn-engine.org/) | GPL-2.0 | ARM CPU interpreter (fallback engine) |
 | [SDL3](https://www.libsdl.org/) | Zlib | Window, input, gamepad |
 | [SDL3_image](https://github.com/libsdl-org/SDL_image) | Zlib | Texture loading |
 | [OpenAL Soft](https://openal-soft.org/) | LGPL-2.1 | Audio playback |
-
----
-
-## ⚠️ Known Issues
-
-| Issue | Status | Workaround |
-|-------|--------|------------|
-| **Set Name glitch** — Clicking the save slot name field causes visual glitches (text field rendering is broken due to corrupt vtable in emulated binary) | 🔧 Mitigated | Press **Escape** or **Enter** to auto-recover. The game will navigate back to the save selection screen. Default save name ("Player") will be used. |
-| ~~**AI/Bolt behavior**~~ — Enemies and bolt traps behaved erratically | ✅ Fixed | Root cause: redundant `ProgramState::Update` SRE hook caused double-ticking and child list corruption. Disabled the hook; 5 other error protection layers provide equivalent safety. |
 
 ---
 

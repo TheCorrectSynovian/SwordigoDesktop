@@ -1382,20 +1382,56 @@ LaunchConfig show_launcher(BinarySelector& selector) {
     // Theme
     ApplyCustomTheme();
 
-    // Font loading — try multiple paths
+    // Font loading — try multiple paths, with DPI scaling and Unicode glyphs
     {
+        // Detect DPI scale for crisp rendering on HiDPI displays
+        float dpi_scale = 1.0f;
+        float ddpi = 0;
+        int display_id = SDL_GetDisplayForWindow(window);
+        if (display_id) {
+            float content_scale = SDL_GetDisplayContentScale(display_id);
+            if (content_scale > 0) dpi_scale = content_scale;
+        }
+        if (dpi_scale < 1.0f) dpi_scale = 1.0f;
+        if (dpi_scale > 3.0f) dpi_scale = 3.0f;
+        
+        float font_size_main    = 18.0f * dpi_scale;
+        float font_size_heading = 28.0f * dpi_scale;
+        
+        // Extended glyph ranges: Latin + symbols used in the UI (⚔✕⚙★▶←→ etc)
+        static const ImWchar glyph_ranges[] = {
+            0x0020, 0x00FF, // Basic Latin + Latin Supplement
+            0x2190, 0x21FF, // Arrows (← → ↑ ↓)
+            0x2500, 0x257F, // Box drawing
+            0x2580, 0x259F, // Block elements (▶ etc)
+            0x25A0, 0x25FF, // Geometric shapes (▶ ▷ ◀ ◁)
+            0x2600, 0x26FF, // Miscellaneous symbols (⚔ ⚙ ☆ ★)
+            0x2700, 0x27BF, // Dingbats (✕ ✓ ✗)
+            0x2B00, 0x2BFF, // Miscellaneous Symbols and Arrows
+            0,
+        };
+        
+        ImFontConfig font_cfg;
+        font_cfg.OversampleH = 2;
+        font_cfg.OversampleV = 2;
+        font_cfg.PixelSnapH = true;
+        font_cfg.GlyphRanges = glyph_ranges;
+        
         std::string font_paths[] = {
+            get_data_path("src/assets/fonts/Inter-Regular.ttf"),
             get_user_data_dir() + "/src/assets/fonts/Inter-Regular.ttf",
             "src/assets/fonts/Inter-Regular.ttf",
+            "/usr/share/swordigo-desktop/src/assets/fonts/Inter-Regular.ttf",
         };
         bool font_loaded = false;
         for (auto& fp : font_paths) {
             if (fs::exists(fp)) {
-                g_font_main    = io.Fonts->AddFontFromFileTTF(fp.c_str(), 16.0f);
-                g_font_heading = io.Fonts->AddFontFromFileTTF(fp.c_str(), 24.0f);
+                g_font_main    = io.Fonts->AddFontFromFileTTF(fp.c_str(), font_size_main, &font_cfg);
+                g_font_heading = io.Fonts->AddFontFromFileTTF(fp.c_str(), font_size_heading, &font_cfg);
                 if (g_font_main && g_font_heading) {
                     font_loaded = true;
-                    std::cout << "[Launcher] Font loaded from: " << fp << std::endl;
+                    std::cout << "[Launcher] Font loaded from: " << fp 
+                              << " (scale=" << dpi_scale << "x, size=" << font_size_main << "px)" << std::endl;
                     break;
                 }
             }
@@ -1405,6 +1441,10 @@ LaunchConfig show_launcher(BinarySelector& selector) {
             g_font_main    = io.Fonts->AddFontDefault();
             g_font_heading = g_font_main;
         }
+        
+        // Apply inverse DPI scale so ImGui layout math stays consistent
+        // (we loaded larger glyphs, so tell ImGui to scale layout down)
+        io.FontGlobalScale = 1.0f / dpi_scale;
     }
 
     // Platform/renderer backends
@@ -1423,10 +1463,20 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                 std::string p2 = get_user_data_dir() + "/assets/" + sub;
                 tex = LoadTextureFromFile(p2.c_str(), &w, &h);
             }
-            // Try 3: via get_data_path
+            // Try 3: via get_data_path (resolves system install paths)
             if (!tex) {
                 std::string p3 = get_data_path(std::string("assets/") + sub);
                 tex = LoadTextureFromFile(p3.c_str(), &w, &h);
+            }
+            // Try 4: also try src/assets under get_data_path
+            if (!tex) {
+                std::string p4 = get_data_path(std::string("src/assets/") + sub);
+                tex = LoadTextureFromFile(p4.c_str(), &w, &h);
+            }
+            // Try 5: system install path (deb/rpm packages)
+            if (!tex) {
+                std::string p5 = std::string("/usr/share/swordigo-desktop/src/assets/") + sub;
+                tex = LoadTextureFromFile(p5.c_str(), &w, &h);
             }
             if (ow) *ow = w;
             if (oh) *oh = h;
