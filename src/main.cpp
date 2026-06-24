@@ -122,6 +122,11 @@ static uint64_t g_sre_resume_err_count_addr = 0;
 static uint64_t g_sre_resume_last_err_addr = 0;
 static int g_sre_resume_err_last_seen = 0;  // host-side last read value
 
+// SRE lua_call_safe error monitoring — guest addresses
+static uint64_t g_sre_lua_error_buf_addr = 0;
+static uint64_t g_sre_lua_error_count_addr = 0;
+static int g_sre_lua_error_last_seen = 0;
+
 // SRE __cxa_throw caller diagnostics — guest addresses
 static uint64_t g_sre_cxa_caller_addr = 0;     // addr of g_sre_cxa_throw_caller
 static uint64_t g_sre_cxa_unrecovered_addr = 0; // addr of g_sre_cxa_throw_unrecovered
@@ -157,6 +162,18 @@ static uint64_t sre_music_volume_dirty_addr = 0;  // int — 1 = volume changed
 static uint64_t sre_music_looping_addr = 0;       // int — looping flag
 static uint64_t sre_music_looping_dirty_addr = 0; // int — 1 = looping changed
 
+// Host-side music ducking — triggered by 0item.wav asset loading
+// When the engine loads this SFX (boss kill, XP sack), we duck the
+// background music volume: fade down → hold low → fade back up.
+#define DUCK_FADE_DOWN_TIME  2.0f    // seconds to fade volume down
+#define DUCK_HOLD_TIME       7.0f    // seconds to hold at low volume
+#define DUCK_FADE_UP_TIME    3.0f    // seconds to fade volume back up
+#define DUCK_LOW_VOLUME      0.15f   // volume floor during ducking (15%)
+int   g_music_duck_trigger = 0;      // set to 1 by bridge — starts ducking
+static int   s_duck_phase = 0;       // 0=off, 1=fading down, 2=holding, 3=fading up
+static float s_duck_timer = 0.0f;    // time remaining in current phase
+static float s_duck_volume = 1.0f;   // current ducking multiplier (0..1)
+
 // SRE GUI — player stats (read from GameState via GameSceneView::Update hook)
 static uint64_t sre_player_hp_addr = 0;         // int — current HP
 static uint64_t sre_player_max_hp_addr = 0;     // int — max HP (computed: level*2+4)
@@ -171,6 +188,38 @@ static uint64_t sre_gamestate_ptr_addr = 0;      // uint64_t — guest ptr to Ga
 static uint64_t sre_menu_active_addr = 0;        // int — bitfield, nonzero = menu open
 static uint64_t sre_text_input_active_addr = 0;  // int — nonzero = SRE text input active
 static uint64_t sre_hardmode_addr = 0;            // int — nonzero = hard mode (no frame cap, double-tick)
+
+// SRE ButtonController — guest addresses and layout struct
+#define SRE_BTN_MAX       32
+#define SRE_BTN_ID_LEN    32
+#define SRE_BTN_LABEL_LEN 64
+
+struct SreBtnSlot {
+    char     id[SRE_BTN_ID_LEN];
+    char     label[SRE_BTN_LABEL_LEN];
+    float    x, y;
+    float    w, h;
+    float    alpha;
+    float    scale_x, scale_y;
+    int      text_color;
+    float    text_scale;
+    int      bg_alpha;
+    int      hidden;
+    int      clickable;
+    int      movable;
+    int      snapback;
+    float    home_x, home_y;
+    int      padding_l, padding_t, padding_r, padding_b;
+    int      alignment;
+    int      pressed;
+    int      dragging;
+    float    cur_x, cur_y;
+    int      active;
+    int      dirty;
+};
+
+static uint64_t sre_btn_array_addr = 0;           // SreBtnSlot[SRE_BTN_MAX]
+static uint64_t sre_btn_globally_hidden_addr = 0;  // int — 1 = all buttons hidden
 
 // PostFX auto-disable state — tracks what the user chose so we can restore
 static bool postfx_suppressed_by_menu = false;
@@ -2516,6 +2565,16 @@ void load_and_boot_arm64() {
                               << std::dec << ")" << std::endl;
                 }
 
+                // Resolve lua_call_safe error monitoring symbols
+                g_sre_lua_error_buf_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_last_lua_error");
+                g_sre_lua_error_count_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_lua_error_count");
+                if (g_sre_lua_error_count_addr) {
+                    std::cout << "[SRE] lua_call_safe error monitoring active"
+                              << " (buf=0x" << std::hex << g_sre_lua_error_buf_addr
+                              << " count=0x" << g_sre_lua_error_count_addr
+                              << std::dec << ")" << std::endl;
+                }
+
                 // Resolve achievement popup symbols
                 {
                     uint64_t ach_pending = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_achievement_pending");
@@ -2923,6 +2982,41 @@ void load_and_boot_arm64() {
                 sre_hardmode_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_hardmode");
                 if (sre_hardmode_addr)
                     std::cout << "[SRE] Hardmode flag: 0x" << std::hex << sre_hardmode_addr << std::dec << std::endl;
+                
+                // ButtonController — SRE-side button array for host rendering + hit-testing
+                sre_btn_array_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_buttons");
+                sre_btn_globally_hidden_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_btn_globally_hidden");
+                if (sre_btn_array_addr)
+                    std::cout << "[SRE] ButtonController: array=0x" << std::hex << sre_btn_array_addr
+                              << " hidden=0x" << sre_btn_globally_hidden_addr << std::dec << std::endl;
+                
+                // VFS MiniPath globals — populate so SRE can translate
+                // /ExternalFiles/, /Files/, /Cache/ without calling getenv
+                {
+                    auto write_vfs_path = [&](const char* sym, const std::string& path) {
+                        uint64_t addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, sym);
+                        if (addr) {
+                            strncpy((char*)(g_guest_memory + addr), path.c_str(), 511);
+                            ((char*)(g_guest_memory + addr))[511] = '\0';
+                            std::cout << "[SRE] VFS " << sym << " = " << path << std::endl;
+                        }
+                    };
+                    std::string data_base = get_data_path("");
+                    // Remove trailing slash if present
+                    if (!data_base.empty() && data_base.back() == '/')
+                        data_base.pop_back();
+                    
+                    write_vfs_path("g_sre_vfs_path_external", data_base + "/external");
+                    write_vfs_path("g_sre_vfs_path_files",    g_save_dir);
+                    write_vfs_path("g_sre_vfs_path_cache",    g_cache_dir);
+                    write_vfs_path("g_sre_vfs_path_assets",   get_data_path(g_assets_dir));
+                    
+                    // Also create the directories if missing
+                    std::string ext_dir = data_base + "/external";
+                    mkdir(ext_dir.c_str(), 0755);
+                    mkdir(g_save_dir.c_str(), 0755);
+                    mkdir(g_cache_dir.c_str(), 0755);
+                }
                 
                 std::cout << "[SRE] GUI: hp=0x" << std::hex << sre_player_hp_addr
                           << " coins=0x" << sre_player_coins_addr
@@ -3454,6 +3548,8 @@ void load_and_boot_arm64() {
                         int vol_dirty = *(int*)(g_guest_memory + sre_music_volume_dirty_addr);
                         if (vol_dirty) {
                             float vol = *(float*)(g_guest_memory + sre_music_volume_addr);
+                            // Apply duck multiplier on top of guest volume
+                            vol *= s_duck_volume;
                             sre_music_host_set_volume(vol);
                             int zero = 0;
                             memcpy(g_guest_memory + sre_music_volume_dirty_addr, &zero, 4);
@@ -3465,6 +3561,58 @@ void load_and_boot_arm64() {
                             sre_music_host_set_looping(looping != 0);
                             int zero = 0;
                             memcpy(g_guest_memory + sre_music_looping_dirty_addr, &zero, 4);
+                        }
+                        
+                        // === Host-side music ducking ===
+                        // Triggered by 0item.wav asset loading (boss kill / XP sack SFX).
+                        // 3-phase: fade down → hold low → fade back up.
+                        if (g_music_duck_trigger) {
+                            g_music_duck_trigger = 0;
+                            s_duck_phase = 1;
+                            s_duck_timer = DUCK_FADE_DOWN_TIME;
+                            std::cout << "[SRE-Music] Duck triggered (0item.wav detected)" << std::endl;
+                        }
+                        
+                        if (s_duck_phase > 0) {
+                            s_duck_timer -= dt_seconds;
+                            float prev_duck = s_duck_volume;
+                            
+                            if (s_duck_phase == 1) {
+                                // Phase 1: fading down
+                                float progress = 1.0f - (s_duck_timer / DUCK_FADE_DOWN_TIME);
+                                if (progress < 0.0f) progress = 0.0f;
+                                if (progress > 1.0f) progress = 1.0f;
+                                s_duck_volume = 1.0f - progress * (1.0f - DUCK_LOW_VOLUME);
+                                if (s_duck_timer <= 0.0f) {
+                                    s_duck_phase = 2;
+                                    s_duck_timer = DUCK_HOLD_TIME;
+                                    s_duck_volume = DUCK_LOW_VOLUME;
+                                }
+                            } else if (s_duck_phase == 2) {
+                                // Phase 2: holding low
+                                s_duck_volume = DUCK_LOW_VOLUME;
+                                if (s_duck_timer <= 0.0f) {
+                                    s_duck_phase = 3;
+                                    s_duck_timer = DUCK_FADE_UP_TIME;
+                                }
+                            } else if (s_duck_phase == 3) {
+                                // Phase 3: fading back up
+                                float progress = 1.0f - (s_duck_timer / DUCK_FADE_UP_TIME);
+                                if (progress < 0.0f) progress = 0.0f;
+                                if (progress > 1.0f) progress = 1.0f;
+                                s_duck_volume = DUCK_LOW_VOLUME + progress * (1.0f - DUCK_LOW_VOLUME);
+                                if (s_duck_timer <= 0.0f) {
+                                    s_duck_phase = 0;
+                                    s_duck_volume = 1.0f;
+                                    std::cout << "[SRE-Music] Duck complete — volume restored" << std::endl;
+                                }
+                            }
+                            
+                            // Apply ducked volume to OpenAL
+                            if (s_duck_volume != prev_duck && sre_music_volume_addr) {
+                                float guest_vol = *(float*)(g_guest_memory + sre_music_volume_addr);
+                                sre_music_host_set_volume(guest_vol * s_duck_volume);
+                            }
                         }
                         
                         // Music loop watchdog: if looping is enabled but source
@@ -3763,6 +3911,81 @@ void load_and_boot_arm64() {
                         int b = entry.second ? 100 : 150;
                         g_gui.draw_string(entry.first, 10, y, 1.0f, r, g, b, 220);
                         y += line_h;
+                    }
+                }
+                
+                // ---- ButtonController: auto-hide during menus ----
+                if (sre_btn_globally_hidden_addr && sre_menu_active_addr) {
+                    int menu_active = *(int32_t*)(g_guest_memory + sre_menu_active_addr);
+                    *(int32_t*)(g_guest_memory + sre_btn_globally_hidden_addr) = (menu_active != 0) ? 1 : 0;
+                }
+                
+                // ---- ButtonController overlay ----
+                if (sre_btn_array_addr) {
+                    int btn_globally_hidden = 0;
+                    if (sre_btn_globally_hidden_addr)
+                        btn_globally_hidden = *(int32_t*)(g_guest_memory + sre_btn_globally_hidden_addr);
+                    
+                    if (!btn_globally_hidden) {
+                        int base = std::min(g_win_w, g_win_h);
+                        
+                        for (int i = 0; i < SRE_BTN_MAX; i++) {
+                            SreBtnSlot* btn = (SreBtnSlot*)(g_guest_memory + sre_btn_array_addr + i * sizeof(SreBtnSlot));
+                            if (!btn->active || btn->hidden) continue;
+                            
+                            // Convert normalized coords to pixels
+                            int pw = (int)(base * btn->w * btn->scale_x);
+                            int ph = (int)(base * btn->h * btn->scale_y);
+                            int px = (int)(g_win_w * btn->cur_x) - pw / 2;
+                            int py_gl = (int)(g_win_h * (1.0f - btn->cur_y)) - ph / 2; // GL Y-flip
+                            
+                            float a = btn->alpha / 255.0f;
+                            int ba = (int)(btn->bg_alpha * a);
+                            
+                            // Background quad
+                            glEnable(GL_BLEND);
+                            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                            glBegin(GL_QUADS);
+                            glColor4ub(30, 50, 80, ba);  // Dark blue tint
+                            glVertex2i(px, py_gl);
+                            glVertex2i(px + pw, py_gl);
+                            glColor4ub(20, 35, 60, ba);  // Slightly darker bottom
+                            glVertex2i(px + pw, py_gl + ph);
+                            glVertex2i(px, py_gl + ph);
+                            glEnd();
+                            
+                            // Border
+                            glBegin(GL_LINE_LOOP);
+                            glColor4ub(80, 120, 180, (int)(200 * a));
+                            glVertex2i(px, py_gl);
+                            glVertex2i(px + pw, py_gl);
+                            glVertex2i(px + pw, py_gl + ph);
+                            glVertex2i(px, py_gl + ph);
+                            glEnd();
+                            
+                            // Pressed highlight
+                            if (btn->pressed) {
+                                glBegin(GL_QUADS);
+                                glColor4ub(100, 160, 255, (int)(80 * a));
+                                glVertex2i(px, py_gl);
+                                glVertex2i(px + pw, py_gl);
+                                glVertex2i(px + pw, py_gl + ph);
+                                glVertex2i(px, py_gl + ph);
+                                glEnd();
+                            }
+                            
+                            // Label text
+                            if (btn->label[0]) {
+                                int tr = (btn->text_color >> 16) & 0xFF;
+                                int tg = (btn->text_color >> 8) & 0xFF;
+                                int tb = btn->text_color & 0xFF;
+                                int ta = (int)(((btn->text_color >> 24) & 0xFF) * a);
+                                if (ta == 0) ta = (int)(255 * a); // Default opaque
+                                float ts = btn->text_scale * (ph * 0.04f);
+                                if (ts < 0.5f) ts = 0.5f;
+                                g_gui.draw_string(btn->label, px + btn->padding_l + 4, py_gl + ph / 2 - 5, ts, tr, tg, tb, ta);
+                            }
+                        }
                     }
                 }
                 
@@ -4309,17 +4532,58 @@ void load_and_boot_arm64() {
                                     // Overlay is open — swallow click, don't send to game
                                     click_swallowed_by_gui = true;
                                 } else {
-                                    click_swallowed_by_gui = false;
-                                    float x = event.button.x * 960.0f / (float)g_win_w;
-                                    float y = 544.0f - (event.button.y * 544.0f / (float)g_win_h);
-                                    last_mouse_x = x; last_mouse_y = y;
-                                    call_touch_64(1, 1, accumulated_time, x, y, x, y, 1);
+                                    // ButtonController hit-test (before game touch)
+                                    bool btn_hit = false;
+                                    if (sre_btn_array_addr) {
+                                        int mx = event.button.x;
+                                        int my = event.button.y;
+                                        int base = std::min(g_win_w, g_win_h);
+                                        int globally_hidden = sre_btn_globally_hidden_addr ?
+                                            *(int32_t*)(g_guest_memory + sre_btn_globally_hidden_addr) : 0;
+                                        
+                                        if (!globally_hidden) {
+                                            for (int i = SRE_BTN_MAX - 1; i >= 0; i--) {
+                                                SreBtnSlot* btn = (SreBtnSlot*)(g_guest_memory + sre_btn_array_addr + i * sizeof(SreBtnSlot));
+                                                if (!btn->active || btn->hidden || !btn->clickable) continue;
+                                                
+                                                int pw = (int)(base * btn->w * btn->scale_x);
+                                                int ph = (int)(base * btn->h * btn->scale_y);
+                                                int bx = (int)(g_win_w * btn->cur_x) - pw / 2;
+                                                int by = (int)(g_win_h * btn->cur_y) - ph / 2;
+                                                
+                                                if (mx >= bx && mx <= bx + pw && my >= by && my <= by + ph) {
+                                                    btn->pressed = 1;
+                                                    if (btn->movable) btn->dragging = 1;
+                                                    btn_hit = true;
+                                                    break; // Top-most button wins
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (btn_hit) {
+                                        click_swallowed_by_gui = true;
+                                    } else {
+                                        click_swallowed_by_gui = false;
+                                        float x = event.button.x * 960.0f / (float)g_win_w;
+                                        float y = 544.0f - (event.button.y * 544.0f / (float)g_win_h);
+                                        last_mouse_x = x; last_mouse_y = y;
+                                        call_touch_64(1, 1, accumulated_time, x, y, x, y, 1);
+                                    }
                                 }
                             }
                             break;
                         case SDL_EVENT_MOUSE_MOTION:
                             mouse_x = event.motion.x;
                             mouse_y = g_win_h - event.motion.y;
+                            // ButtonController drag tracking
+                            if (sre_btn_array_addr) {
+                                for (int i = 0; i < SRE_BTN_MAX; i++) {
+                                    SreBtnSlot* btn = (SreBtnSlot*)(g_guest_memory + sre_btn_array_addr + i * sizeof(SreBtnSlot));
+                                    if (!btn->active || !btn->dragging) continue;
+                                    btn->cur_x = (float)event.motion.x / g_win_w;
+                                    btn->cur_y = (float)event.motion.y / g_win_h;
+                                }
+                            }
                             if (g_input_config.is_editing() && mouse_pressed) {
                                 float gx = event.motion.x * 960.0f / (float)g_win_w;
                                 float gy = 544.0f - (event.motion.y * 544.0f / (float)g_win_h);
@@ -4336,6 +4600,19 @@ void load_and_boot_arm64() {
                                 mouse_pressed = false;
                                 mouse_x = event.button.x;
                                 mouse_y = g_win_h - event.button.y;
+                                // ButtonController release + snapback
+                                if (sre_btn_array_addr) {
+                                    for (int i = 0; i < SRE_BTN_MAX; i++) {
+                                        SreBtnSlot* btn = (SreBtnSlot*)(g_guest_memory + sre_btn_array_addr + i * sizeof(SreBtnSlot));
+                                        if (!btn->active) continue;
+                                        if (btn->dragging && btn->snapback) {
+                                            btn->cur_x = btn->home_x;
+                                            btn->cur_y = btn->home_y;
+                                        }
+                                        btn->pressed = 0;
+                                        btn->dragging = 0;
+                                    }
+                                }
                                 if (g_input_config.is_editing()) {
                                     g_input_config.editor_mouse_up();
                                 } else if (!click_swallowed_by_gui && !g_srt_overlay.is_visible()) {
@@ -4515,6 +4792,18 @@ void load_and_boot_arm64() {
                               << " (nm offset 0x" << nm_offset << ")"
                               << std::dec << std::endl;
                     g_sre_cxa_last_seen = count;
+                }
+            }
+
+            // Poll lua_call_safe errors from SRE
+            if (g_sre_lua_error_count_addr) {
+                int err_count = *(int32_t*)(g_guest_memory + g_sre_lua_error_count_addr);
+                if (err_count > g_sre_lua_error_last_seen && g_sre_lua_error_buf_addr) {
+                    const char* err_msg = (const char*)(g_guest_memory + g_sre_lua_error_buf_addr);
+                    std::cerr << "[SRE-LUA] Error #" << err_count
+                              << " (frame " << completed_frames << "): "
+                              << std::string(err_msg, strnlen(err_msg, 200)) << std::endl;
+                    g_sre_lua_error_last_seen = err_count;
                 }
             }
             

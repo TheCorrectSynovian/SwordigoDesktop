@@ -560,20 +560,44 @@ static const SreLuaReg tablib[] = {
 
 
 /* =========================================================================
- * os library (minimal — RL uses os.time/os.clock)
+ * os library — real time/date/clock via libc
  * ========================================================================= */
 
-static uint64_t g_fake_time = 1000000;
+/* libc time/date functions — resolved at load time via the bridge.
+ * We don't #include <time.h> because the ARM64 cross-compiler uses -nostdlib.
+ * These are resolved at load time just like the FILE* functions above. */
+typedef long time_t;
+typedef long clock_t;
+#define CLOCKS_PER_SEC 1000000L
+
+struct tm {
+    int tm_sec;
+    int tm_min;
+    int tm_hour;
+    int tm_mday;
+    int tm_mon;
+    int tm_year;
+    int tm_wday;
+    int tm_yday;
+    int tm_isdst;
+    long tm_gmtoff;
+    const char* tm_zone;
+};
+
+extern time_t time(time_t* tloc);
+extern clock_t clock(void);
+extern struct tm* localtime(const time_t* timep);
+extern struct tm* gmtime(const time_t* timep);
+extern size_t strftime(char* s, size_t max, const char* format, const struct tm* tm);
+extern int remove(const char* path);
 
 static int os_time(lua_State* L) {
-    g_lua_pushnumber(L, (double)(g_fake_time++));
+    g_lua_pushnumber(L, (double)time(NULL));
     return 1;
 }
 
 static int os_clock(lua_State* L) {
-    static double clock_val = 0.0;
-    clock_val += 0.001;
-    g_lua_pushnumber(L, clock_val);
+    g_lua_pushnumber(L, (double)clock() / (double)CLOCKS_PER_SEC);
     return 1;
 }
 
@@ -583,17 +607,115 @@ static int os_difftime(lua_State* L) {
 }
 
 static int os_date(lua_State* L) {
-    g_lua_pushstring(L, "2026-06-22");
+    const char* fmt = "%c";
+    if (g_lua_gettop(L) >= 1 && g_lua_type(L, 1) == LUA_TSTRING) {
+        const char* s = lua_tostring(L, 1);
+        if (s) fmt = s;
+    }
+
+    time_t t;
+    if (g_lua_gettop(L) >= 2 && g_lua_type(L, 2) == LUA_TNUMBER) {
+        t = (time_t)g_lua_tonumber(L, 2);
+    } else {
+        t = time(NULL);
+    }
+
+    /* Handle "*t" — return table */
+    if (fmt[0] == '!' || (fmt[0] == '*' && fmt[1] == 't')) {
+        int utc = 0;
+        if (fmt[0] == '!') { utc = 1; fmt++; }
+        if (fmt[0] == '*' && fmt[1] == 't') {
+            struct tm* tm_p = utc ? gmtime(&t) : localtime(&t);
+            if (!tm_p) { g_lua_pushnil(L); return 1; }
+            g_lua_createtable(L, 0, 9);
+            g_lua_pushnumber(L, (double)tm_p->tm_year + 1900);
+            g_lua_setfield(L, -2, "year");
+            g_lua_pushnumber(L, (double)tm_p->tm_mon + 1);
+            g_lua_setfield(L, -2, "month");
+            g_lua_pushnumber(L, (double)tm_p->tm_mday);
+            g_lua_setfield(L, -2, "day");
+            g_lua_pushnumber(L, (double)tm_p->tm_hour);
+            g_lua_setfield(L, -2, "hour");
+            g_lua_pushnumber(L, (double)tm_p->tm_min);
+            g_lua_setfield(L, -2, "min");
+            g_lua_pushnumber(L, (double)tm_p->tm_sec);
+            g_lua_setfield(L, -2, "sec");
+            g_lua_pushnumber(L, (double)tm_p->tm_wday + 1);
+            g_lua_setfield(L, -2, "wday");
+            g_lua_pushnumber(L, (double)tm_p->tm_yday + 1);
+            g_lua_setfield(L, -2, "yday");
+            g_lua_pushboolean(L, tm_p->tm_isdst);
+            g_lua_setfield(L, -2, "isdst");
+            return 1;
+        }
+    }
+
+    /* Handle "!fmt" — use UTC */
+    int utc = 0;
+    if (fmt[0] == '!') { utc = 1; fmt++; }
+    struct tm* tm_p = utc ? gmtime(&t) : localtime(&t);
+    if (!tm_p) { g_lua_pushstring(L, ""); return 1; }
+
+    char buf[256];
+    size_t n = strftime(buf, sizeof(buf), fmt, tm_p);
+    if (n > 0) {
+        g_lua_pushlstring(L, buf, n);
+    } else {
+        g_lua_pushstring(L, "");
+    }
     return 1;
 }
 
 static int os_exit(lua_State* L) { (void)L; return 0; }
+
+/* Forward declaration — defined below near io_open */
+static const char* sre_minipath_translate(const char* path, char* out, int outlen);
+
+static int os_remove(lua_State* L) {
+    const char* path = lua_tostring(L, 1);
+    if (!path) {
+        g_lua_pushnil(L);
+        g_lua_pushstring(L, "os.remove: filename expected");
+        return 2;
+    }
+
+    /* VFS path translation */
+    const char* real_path = path;
+    char vfs_buf[512];
+    if (g_sre_vfs_active) {
+        int i;
+        for (i = 0; i < 511 && path[i]; i++)
+            g_sre_vfs_lua_input_path[i] = path[i];
+        g_sre_vfs_lua_input_path[i] = '\0';
+        g_sre_vfs_lua_translate_pending = 1;
+        if (g_sre_vfs_lua_output_path[0]) {
+            /* Copy to local buffer since output_path may be reused */
+            for (i = 0; i < 511 && g_sre_vfs_lua_output_path[i]; i++)
+                vfs_buf[i] = g_sre_vfs_lua_output_path[i];
+            vfs_buf[i] = '\0';
+            real_path = vfs_buf;
+        }
+    } else {
+        /* Fallback: try MiniPath translation when VFS is not active */
+        real_path = sre_minipath_translate(path, vfs_buf, 512);
+    }
+
+    if (remove(real_path) == 0) {
+        g_lua_pushboolean(L, 1);
+        return 1;
+    } else {
+        g_lua_pushnil(L);
+        g_lua_pushstring(L, "cannot remove file");
+        return 2;
+    }
+}
 
 static const SreLuaReg oslib[] = {
     {"clock",    os_clock},
     {"date",     os_date},
     {"difftime", os_difftime},
     {"exit",     os_exit},
+    {"remove",   os_remove},
     {"time",     os_time},
     {NULL, NULL}
 };
@@ -847,6 +969,66 @@ static int filemethod_lines(lua_State* L) {
     return 1;
 }
 
+/* MiniPath translation for io.open — translates Android virtual paths to desktop paths.
+ * Uses g_sre_vfs_path_* globals from sre_vfs.c if set, otherwise falls back to
+ * hardcoded ~/.local/share/swordigo-desktop/ paths. */
+extern char g_sre_vfs_path_external[512];
+extern char g_sre_vfs_path_files[512];
+extern char g_sre_vfs_path_cache[512];
+extern char g_sre_vfs_path_assets[512];
+
+static int sre_str_starts_with(const char* s, const char* prefix) {
+    int i;
+    for (i = 0; prefix[i]; i++)
+        if (s[i] != prefix[i]) return 0;
+    return 1;
+}
+
+static const char* sre_minipath_translate(const char* path, char* out, int outlen) {
+    if (!path || path[0] != '/') return path; /* Not a MiniPath */
+    
+    const char* base = 0;
+    const char* rest = 0;
+    
+    if (sre_str_starts_with(path, "/ExternalFiles/")) {
+        rest = path + 15;
+        base = g_sre_vfs_path_external[0] ? g_sre_vfs_path_external : 0;
+    } else if (sre_str_starts_with(path, "/Files/")) {
+        rest = path + 7;
+        base = g_sre_vfs_path_files[0] ? g_sre_vfs_path_files : 0;
+    } else if (sre_str_starts_with(path, "/Cache/")) {
+        rest = path + 7;
+        base = g_sre_vfs_path_cache[0] ? g_sre_vfs_path_cache : 0;
+    } else if (sre_str_starts_with(path, "/ExternalCache/")) {
+        rest = path + 15;
+        base = g_sre_vfs_path_cache[0] ? g_sre_vfs_path_cache : 0;
+    } else if (sre_str_starts_with(path, "/Assets/")) {
+        rest = path + 8;
+        base = g_sre_vfs_path_assets[0] ? g_sre_vfs_path_assets : 0;
+    } else {
+        return path; /* Not a recognized MiniPath */
+    }
+    
+    if (!base) return path; /* VFS path not set by host — pass through */
+    
+    /* Build: base + "/" + rest */
+    {
+
+        int i = 0, j;
+        for (j = 0; i < outlen - 1 && base[j]; j++)
+            out[i++] = base[j];
+        /* Ensure trailing slash */
+        if (i > 0 && out[i-1] != '/')
+            out[i++] = '/';
+        for (j = 0; i < outlen - 1 && rest[j]; j++)
+            out[i++] = rest[j];
+        out[i] = '\0';
+        return out;
+    }
+    
+    return path;
+}
+
 /* io.open(filename, mode) → file table or nil, errmsg */
 static int io_open(lua_State* L) {
     const char* path = lua_tostring(L, 1);
@@ -861,6 +1043,10 @@ static int io_open(lua_State* L) {
         g_lua_pushstring(L, "io.open: invalid path or missing APIs");
         return 2;
     }
+
+    /* Translate MiniPaths (/ExternalFiles/, /Files/, /Cache/) to desktop paths */
+    char minipath_buf[512];
+    path = sre_minipath_translate(path, minipath_buf, 512);
 
     FILE* fp = fopen(path, mode);
     if (!fp) {
@@ -950,12 +1136,32 @@ static const SreLuaReg iolib[] = {
 
 /* =========================================================================
  * loadfile/dofile — VFS-aware overrides (Task 2.6)
+ *
+ * Uses loadstring from Lua globals (same pattern as sre_run_console in
+ * sre_lua.c) since we don't have a luaL_loadbuffer function pointer.
+ * Flow: read file into buffer → loadstring(contents, chunkname)
  * ========================================================================= */
 
-/* loadfile(filename) — SWKiwi compatible version with MiniPath support.
- * Writes the path to g_sre_vfs_lua_input_path for host-side translation,
- * then returns the translated path string. The real loading is handled
- * by the engine's Lua loader. */
+/* VFS path helper — translates virtual path, returns pointer to use.
+ * out_buf must be at least 512 bytes. */
+static const char* sre_vfs_resolve_path(const char* path, char* out_buf) {
+    if (!g_sre_vfs_active || !path) return path;
+    int i;
+    for (i = 0; i < 511 && path[i]; i++)
+        g_sre_vfs_lua_input_path[i] = path[i];
+    g_sre_vfs_lua_input_path[i] = '\0';
+    g_sre_vfs_lua_translate_pending = 1;
+    if (g_sre_vfs_lua_output_path[0]) {
+        for (i = 0; i < 511 && g_sre_vfs_lua_output_path[i]; i++)
+            out_buf[i] = g_sre_vfs_lua_output_path[i];
+        out_buf[i] = '\0';
+        return out_buf;
+    }
+    return path;
+}
+
+/* loadfile(filename) — reads file, compiles via loadstring, returns chunk.
+ * Returns: function on success, or nil + errmsg on failure. */
 static int sre_loadfile(lua_State* L) {
     const char* filename = lua_tostring(L, 1);
     if (!filename) {
@@ -964,29 +1170,84 @@ static int sre_loadfile(lua_State* L) {
         return 2;
     }
 
-    /* Write path for VFS translation */
-    if (g_sre_vfs_active) {
-        /* Copy filename to input path buffer for host translation */
-        int i;
-        for (i = 0; i < 511 && filename[i]; i++)
-            g_sre_vfs_lua_input_path[i] = filename[i];
-        g_sre_vfs_lua_input_path[i] = '\0';
-        g_sre_vfs_lua_translate_pending = 1;
+    /* VFS path translation */
+    char vfs_buf[512];
+    const char* real_path = sre_vfs_resolve_path(filename, vfs_buf);
 
-        /* If host translated, use the output path */
-        if (g_sre_vfs_lua_output_path[0]) {
-            filename = g_sre_vfs_lua_output_path;
-        }
+    /* Read the entire file */
+    FILE* fp = fopen(real_path, "r");
+    if (!fp) {
+        g_lua_pushnil(L);
+        g_lua_pushstring(L, "cannot open file");
+        return 2;
     }
 
-    /* Push the translated filename for the caller to use */
-    g_lua_pushstring(L, filename);
-    return 1;  /* Return the translated filename; real loading handled by engine */
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    if (size <= 0) {
+        fclose(fp);
+        g_lua_pushnil(L);
+        g_lua_pushstring(L, "empty file");
+        return 2;
+    }
+    if (size > 1024 * 1024) {
+        fclose(fp);
+        g_lua_pushnil(L);
+        g_lua_pushstring(L, "file too large");
+        return 2;
+    }
+
+    char* buf = (char*)malloc(size + 1);
+    if (!buf) {
+        fclose(fp);
+        g_lua_pushnil(L);
+        g_lua_pushstring(L, "out of memory");
+        return 2;
+    }
+
+    size_t nread = fread(buf, 1, size, fp);
+    fclose(fp);
+    buf[nread] = '\0';
+
+    /* Use loadstring(contents, chunkname) from Lua globals to compile */
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "loadstring");
+    if (g_lua_type(L, -1) != LUA_TFUNCTION) {
+        lua_pop(L, 1);
+        free(buf);
+        g_lua_pushnil(L);
+        g_lua_pushstring(L, "loadstring not available");
+        return 2;
+    }
+
+    /* Push file contents and chunk name */
+    g_lua_pushlstring(L, buf, nread);
+    free(buf);
+    g_lua_pushstring(L, filename);  /* chunk name = "@filename" convention */
+
+    /* pcall(loadstring, contents, chunkname) → func or nil, errmsg */
+    int r = g_lua_pcall(L, 2, 2, 0);
+    if (r != 0) {
+        /* pcall itself errored — stack: [..., errmsg] */
+        /* Insert nil before the error message for (nil, errmsg) return */
+        g_lua_pushnil(L);
+        if (g_lua_insert) g_lua_insert(L, -2);
+        return 2;
+    }
+
+    /* loadstring returns (func, nil) on success, (nil, errmsg) on failure */
+    if (g_lua_type(L, -2) == LUA_TFUNCTION) {
+        lua_pop(L, 1);  /* pop the nil, leave function */
+        return 1;
+    } else {
+        /* Compilation failed: (nil, errmsg) already on stack */
+        return 2;
+    }
 }
 
-/* dofile(filename) — loads and executes a file with MiniPath support.
- * Full implementation needs luaL_loadfile + lua_pcall which we don't
- * have as function pointers yet. For now, this is a safe stub. */
+/* dofile(filename) — loads and executes a Lua file.
+ * Uses sre_loadfile logic, then pcall's the resulting chunk. */
 static int sre_dofile(lua_State* L) {
     const char* filename = lua_tostring(L, 1);
     if (!filename) {
@@ -994,9 +1255,82 @@ static int sre_dofile(lua_State* L) {
         if (g_lua_error) return g_lua_error(L);
         return 0;
     }
-    /* For now, dofile is a stub that just returns nothing.
-     * Full implementation needs luaL_loadfile + lua_pcall. */
-    return 0;
+
+    /* VFS path translation */
+    char vfs_buf[512];
+    const char* real_path = sre_vfs_resolve_path(filename, vfs_buf);
+
+    /* Read the entire file */
+    FILE* fp = fopen(real_path, "r");
+    if (!fp) {
+        g_lua_pushstring(L, "dofile: cannot open file");
+        if (g_lua_error) return g_lua_error(L);
+        return 0;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    if (size <= 0 || size > 1024 * 1024) {
+        fclose(fp);
+        g_lua_pushstring(L, size <= 0 ? "dofile: empty file" : "dofile: file too large");
+        if (g_lua_error) return g_lua_error(L);
+        return 0;
+    }
+
+    char* buf = (char*)malloc(size + 1);
+    if (!buf) {
+        fclose(fp);
+        g_lua_pushstring(L, "dofile: out of memory");
+        if (g_lua_error) return g_lua_error(L);
+        return 0;
+    }
+
+    size_t nread = fread(buf, 1, size, fp);
+    fclose(fp);
+    buf[nread] = '\0';
+
+    /* Compile via loadstring */
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "loadstring");
+    if (g_lua_type(L, -1) != LUA_TFUNCTION) {
+        lua_pop(L, 1);
+        free(buf);
+        g_lua_pushstring(L, "dofile: loadstring not available");
+        if (g_lua_error) return g_lua_error(L);
+        return 0;
+    }
+
+    g_lua_pushlstring(L, buf, nread);
+    free(buf);
+    g_lua_pushstring(L, filename);
+
+    int r = g_lua_pcall(L, 2, 2, 0);
+    if (r != 0) {
+        /* pcall of loadstring itself failed */
+        if (g_lua_error) return g_lua_error(L);
+        return 0;
+    }
+
+    /* Check if loadstring succeeded */
+    if (g_lua_type(L, -2) != LUA_TFUNCTION) {
+        /* (nil, errmsg) — push the error message */
+        if (g_lua_error) return g_lua_error(L);  /* error with errmsg on top */
+        return 0;
+    }
+
+    /* Pop the nil from loadstring's second return, leaving the function */
+    lua_pop(L, 1);
+
+    /* Execute the compiled chunk */
+    r = g_lua_pcall(L, 0, LUA_MULTRET, 0);
+    if (r != 0) {
+        if (g_lua_error) return g_lua_error(L);
+        return 0;
+    }
+
+    /* Return all results from the executed chunk */
+    return g_lua_gettop(L);
 }
 
 
@@ -1004,44 +1338,207 @@ static int sre_dofile(lua_State* L) {
  * LuaFileSystem (fs) library (Task 2.7)
  *
  * SWKiwi exposes this as the "fs" global (via luaopen_lfs).
- * Since SRE is freestanding (no libc), we provide stubs that
- * prevent nil-call crashes in mods that use lfs for file ops.
+ * Real implementations using POSIX opendir/readdir/stat/mkdir/rmdir.
  * ========================================================================= */
 
-/* fs.dir iterator — immediately returns nil (empty directory) */
+/* POSIX directory and stat functions — resolved at load time via the bridge */
+typedef void DIR;
+typedef unsigned long ino_t;
+typedef long off_t;
+
+/* dirent structure — matches Linux AArch64 layout */
+struct dirent {
+    ino_t          d_ino;
+    off_t          d_off;
+    unsigned short d_reclen;
+    unsigned char  d_type;
+    char           d_name[256];
+};
+
+/* stat structure — we only need a few fields, use a compatible layout */
+struct stat {
+    uint64_t st_dev;
+    uint64_t st_ino;
+    uint32_t st_mode;
+    uint32_t st_nlink;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    uint64_t st_rdev;
+    uint64_t __pad1;
+    int64_t  st_size;
+    int32_t  st_blksize;
+    int32_t  __pad2;
+    int64_t  st_blocks;
+    int64_t  st_atime_sec;
+    int64_t  st_atime_nsec;
+    int64_t  st_mtime_sec;
+    int64_t  st_mtime_nsec;
+    int64_t  st_ctime_sec;
+    int64_t  st_ctime_nsec;
+    int32_t  __unused[2];
+};
+
+/* Mode bits from sys/stat.h */
+#define S_IFMT   0170000
+#define S_IFDIR  0040000
+#define S_IFREG  0100000
+#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
+#define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
+
+extern DIR* opendir(const char* name);
+extern struct dirent* readdir(DIR* dirp);
+extern int closedir(DIR* dirp);
+extern int stat(const char* path, struct stat* buf);
+extern int mkdir(const char* path, uint32_t mode);
+extern int rmdir(const char* path);
+
+/* fs.dir iterator — reads entries from a DIR* stored as lightuserdata upvalue */
 static int lfs_dir_next(lua_State* L) {
-    (void)L;
+    DIR* dp = (DIR*)g_lua_touserdata(L, lua_upvalueindex(1));
+    if (!dp) { g_lua_pushnil(L); return 1; }
+
+    struct dirent* ent;
+    while ((ent = readdir(dp)) != NULL) {
+        /* Skip "." and ".." */
+        if (ent->d_name[0] == '.') {
+            if (ent->d_name[1] == '\0') continue;
+            if (ent->d_name[1] == '.' && ent->d_name[2] == '\0') continue;
+        }
+        g_lua_pushstring(L, ent->d_name);
+        return 1;
+    }
+
+    /* No more entries — close the directory */
+    closedir(dp);
+    /* Clear the upvalue so we don't double-close */
+    if (g_lua_pushlightuserdata) {
+        g_lua_pushlightuserdata(L, NULL);
+        if (g_lua_replace) g_lua_replace(L, lua_upvalueindex(1));
+    }
     g_lua_pushnil(L);
     return 1;
 }
 
-/* fs.dir(path) — returns an iterator that yields no filenames */
+/* fs.dir(path) — returns a real directory iterator */
 static int lfs_dir(lua_State* L) {
-    (void)L;
+    const char* path = lua_tostring(L, 1);
+    if (!path) path = ".";
+
+    /* VFS path translation */
+    char vfs_buf[512];
+    const char* real_path = sre_vfs_resolve_path(path, vfs_buf);
+
+    DIR* dp = opendir(real_path);
+    if (!dp) {
+        g_lua_pushnil(L);
+        g_lua_pushstring(L, "cannot open directory");
+        return 2;
+    }
+
+    if (g_lua_pushlightuserdata) {
+        g_lua_pushlightuserdata(L, dp);
+        g_lua_pushcclosure(L, lfs_dir_next, 1);
+        return 1;
+    }
+
+    /* Fallback if pushlightuserdata unavailable */
+    closedir(dp);
     g_lua_pushcclosure(L, lfs_dir_next, 0);
     return 1;
 }
 
-/* fs.attributes(path, aname) — returns a stub attributes table */
+/* fs.attributes(path, aname) — returns real file stat data */
 static int lfs_attributes(lua_State* L) {
-    (void)L;
-    g_lua_createtable(L, 0, 4);
-    g_lua_pushstring(L, "file");
+    const char* path = lua_tostring(L, 1);
+    if (!path) { g_lua_pushnil(L); return 1; }
+
+    /* VFS path translation */
+    char vfs_buf[512];
+    const char* real_path = sre_vfs_resolve_path(path, vfs_buf);
+
+    struct stat st;
+    if (stat(real_path, &st) != 0) {
+        g_lua_pushnil(L);
+        g_lua_pushstring(L, "cannot obtain information from file");
+        return 2;
+    }
+
+    /* Check if caller wants a single attribute string */
+    const char* aname = NULL;
+    if (g_lua_gettop(L) >= 2 && g_lua_type(L, 2) == LUA_TSTRING) {
+        aname = lua_tostring(L, 2);
+    }
+
+    const char* mode_str = S_ISDIR(st.st_mode) ? "directory" : "file";
+
+    if (aname) {
+        /* Return single attribute value */
+        if (aname[0] == 'm' && aname[1] == 'o') {  /* "mode" */
+            g_lua_pushstring(L, mode_str);
+        } else if (aname[0] == 's') {  /* "size" */
+            g_lua_pushnumber(L, (double)st.st_size);
+        } else if (aname[0] == 'm') {  /* "modification" */
+            g_lua_pushnumber(L, (double)st.st_mtime_sec);
+        } else if (aname[0] == 'a') {  /* "access" */
+            g_lua_pushnumber(L, (double)st.st_atime_sec);
+        } else if (aname[0] == 'c') {  /* "change" */
+            g_lua_pushnumber(L, (double)st.st_ctime_sec);
+        } else {
+            g_lua_pushnil(L);
+        }
+        return 1;
+    }
+
+    /* Return full attributes table */
+    g_lua_createtable(L, 0, 6);
+    g_lua_pushstring(L, mode_str);
     g_lua_setfield(L, -2, "mode");
-    g_lua_pushnumber(L, 0);
+    g_lua_pushnumber(L, (double)st.st_size);
     g_lua_setfield(L, -2, "size");
-    g_lua_pushnumber(L, 0);
+    g_lua_pushnumber(L, (double)st.st_mtime_sec);
     g_lua_setfield(L, -2, "modification");
-    g_lua_pushnumber(L, 0);
+    g_lua_pushnumber(L, (double)st.st_atime_sec);
     g_lua_setfield(L, -2, "access");
+    g_lua_pushnumber(L, (double)st.st_ctime_sec);
+    g_lua_setfield(L, -2, "change");
+    g_lua_pushnumber(L, (double)st.st_ino);
+    g_lua_setfield(L, -2, "ino");
     return 1;
 }
 
-/* fs.mkdir(path) — create directory (stub) */
-static int lfs_mkdir(lua_State* L) { (void)L; return 0; }
+/* fs.mkdir(path) — create directory with 0755 permissions */
+static int lfs_mkdir(lua_State* L) {
+    const char* path = lua_tostring(L, 1);
+    if (!path) { g_lua_pushnil(L); return 1; }
 
-/* fs.rmdir(path) — remove directory (stub) */
-static int lfs_rmdir(lua_State* L) { (void)L; return 0; }
+    char vfs_buf[512];
+    const char* real_path = sre_vfs_resolve_path(path, vfs_buf);
+
+    if (mkdir(real_path, 0755) == 0) {
+        g_lua_pushboolean(L, 1);
+        return 1;
+    }
+    g_lua_pushnil(L);
+    g_lua_pushstring(L, "cannot create directory");
+    return 2;
+}
+
+/* fs.rmdir(path) — remove empty directory */
+static int lfs_rmdir(lua_State* L) {
+    const char* path = lua_tostring(L, 1);
+    if (!path) { g_lua_pushnil(L); return 1; }
+
+    char vfs_buf[512];
+    const char* real_path = sre_vfs_resolve_path(path, vfs_buf);
+
+    if (rmdir(real_path) == 0) {
+        g_lua_pushboolean(L, 1);
+        return 1;
+    }
+    g_lua_pushnil(L);
+    g_lua_pushstring(L, "cannot remove directory");
+    return 2;
+}
 
 /* fs.currentdir() — returns current directory (stub) */
 static int lfs_currentdir(lua_State* L) {

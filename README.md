@@ -93,7 +93,7 @@ v7.0 brings the **Dynarmic JIT revolution** — ARM64 code now runs through a Ju
 - **Music loop watchdog** — ensures background music never stops unexpectedly
 
 ### 🚀 RLSwordigo Support
-- **RLSwordigo (ReallyLongSwordigo)** is now fully supported as an instance
+- **RLSwordigo (RLSwordigo)** is now fully supported as an instance
 - Load RLSwordigo binaries alongside vanilla Swordigo
 - **Compatible with KiwiAPI** — the SwKiwi modding framework works out of the box
 
@@ -215,7 +215,7 @@ All controls are fully remappable — press **F2** to open the Controls Editor. 
 - Unicorn interpreter remains available as fallback (`--no-dynarmic`)
 
 ### 🎮 RLSwordigo Support
-- **ReallyLongSwordigo** is now a first-class supported mod
+- **RLSwordigo** is now a first-class supported mod
 - Load as a separate instance alongside vanilla Swordigo
 - **KiwiAPI compatible** — the SwKiwi modding framework works natively
 

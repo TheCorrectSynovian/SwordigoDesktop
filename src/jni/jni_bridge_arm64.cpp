@@ -748,6 +748,13 @@ static void bridge_AAssetManager_open(void* emu_ptr) {
         std::cout << "[ASSET PROOF] ✓ Common atlas loaded: " << filename << std::endl;
     }
     
+    // Music ducking trigger: when 0item.wav is loaded, duck the background music
+    // This is the SFX played for boss kills and XP sack events.
+    extern int g_music_duck_trigger;
+    if (fname.find("0item.wav") != std::string::npos) {
+        g_music_duck_trigger = 1;
+    }
+    
     void* asset = AAssetManager_open(mgr, filename, emu->get_reg(2));
     std::cout << "[ASSET] Open " << filename << (asset ? " -> SUCCESS" : " -> FAILED") << std::endl;
     emu->set_reg(0, register_pointer(asset));
