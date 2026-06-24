@@ -31,6 +31,7 @@
 
 /* Pseudo-indices */
 #define LUA_GLOBALSINDEX (-10002)
+#define LUA_REGISTRYINDEX (-10000)
 
 /* Opaque types */
 typedef void lua_State;

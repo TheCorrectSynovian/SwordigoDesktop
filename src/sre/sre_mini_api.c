@@ -461,13 +461,23 @@ static int l_mini_set_controls_hidden(lua_State* L) {
     return 0;
 }
 
-/* Mini.SetCoinLimit(n) */
+/* =========================================================================
+ * Coin Limit (Phase 3.5)
+ * ========================================================================= */
+
+/* Mini.SetCoinLimit(n) — set max coin count (host patches binary) */
 static int l_mini_set_coin_limit(lua_State* L) {
-    int limit = (int)g_lua_tonumber(L, 1);
-    if (limit > 0 && limit <= 65535) {
-        g_sre_coin_limit = limit;
-    }
+    int n = (int)g_lua_tonumber(L, 1);
+    if (n < 0) n = 0;
+    if (n > 65535) n = 65535;
+    g_sre_coin_limit = n;
     return 0;
+}
+
+/* Mini.GetCoinLimit() */
+static int l_mini_get_coin_limit(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_coin_limit);
+    return 1;
 }
 
 /* Mini.ToggleDebug() */
@@ -673,6 +683,128 @@ static int l_lni_open_url(lua_State* L) {
 }
 
 /* =========================================================================
+ * Armor Model Swap System (Phase 3.2)
+ * =========================================================================
+ * Host reads these to override ModelNameForArmor results.
+ * Format: packed key\0value\0 pairs like CString table.
+ * ========================================================================= */
+char g_sre_armor_models[2048] = {0};   /* item_id\0model_name\0...\0\0 */
+int  g_sre_armor_model_count = 0;
+char g_sre_default_player_model[64] = "hiro";
+
+/* Mini.SetArmorModel(item_id, model_name) */
+static int sre_mini_set_armor_model(lua_State* L) {
+    const char* item_id = lua_tostring(L, 1);
+    const char* model   = lua_tostring(L, 2);
+    if (!item_id || !model) return 0;
+
+    /* Find end of table */
+    int pos = 0;
+    int entries = 0;
+    while (pos < 2046 && entries < g_sre_armor_model_count) {
+        while (pos < 2046 && g_sre_armor_models[pos]) pos++;
+        pos++;
+        while (pos < 2046 && g_sre_armor_models[pos]) pos++;
+        pos++;
+        entries++;
+    }
+
+    /* Copy item_id */
+    int len1 = 0;
+    while (item_id[len1]) len1++;
+    if (pos + len1 + 1 >= 2046) return 0;
+    int i;
+    for (i = 0; i <= len1; i++)
+        g_sre_armor_models[pos + i] = item_id[i];
+    pos += len1 + 1;
+
+    /* Copy model_name */
+    int len2 = 0;
+    while (model[len2]) len2++;
+    if (pos + len2 + 1 >= 2046) return 0;
+    for (i = 0; i <= len2; i++)
+        g_sre_armor_models[pos + i] = model[i];
+    pos += len2 + 1;
+
+    g_sre_armor_models[pos] = '\0';
+    g_sre_armor_model_count++;
+    return 0;
+}
+
+/* Mini.SetDefaultPlayerModel(model_name) */
+static int sre_mini_set_default_model(lua_State* L) {
+    const char* model = lua_tostring(L, 1);
+    if (!model) return 0;
+    int i;
+    for (i = 0; i < 63 && model[i]; i++)
+        g_sre_default_player_model[i] = model[i];
+    g_sre_default_player_model[i] = '\0';
+    return 0;
+}
+
+/* =========================================================================
+ * Scene Event System (Phase 4.2)
+ * =========================================================================
+ * The host updates g_sre_current_scene_name whenever the scene changes.
+ * We check for changes and call registered Lua callbacks.
+ * ========================================================================= */
+char g_sre_current_scene_name[128] = {0};
+char g_sre_previous_scene_name[128] = {0};
+int  g_sre_scene_changed = 0;     /* Host sets to 1 when scene changes */
+int  g_sre_scene_callback_ref = 0; /* Lua registry ref for callback */
+
+/* Mini.OnSceneChange(callback_function)
+ * Stores the callback in the Lua registry at a fixed integer key.
+ * We use raw registry key 91001 as our private slot. */
+#define SRE_SCENE_CB_REGKEY 91001
+
+static int sre_mini_on_scene_change(lua_State* L) {
+    if (g_lua_type(L, 1) == LUA_TFUNCTION) {
+        if (g_lua_pushvalue) g_lua_pushvalue(L, 1);
+        if (g_lua_rawseti) g_lua_rawseti(L, LUA_REGISTRYINDEX, SRE_SCENE_CB_REGKEY);
+        g_sre_scene_callback_ref = SRE_SCENE_CB_REGKEY;
+    }
+    return 0;
+}
+
+/* Mini.GetCurrentScene() */
+static int sre_mini_get_current_scene(lua_State* L) {
+    g_lua_pushstring(L, g_sre_current_scene_name);
+    return 1;
+}
+
+/* Mini.GetPreviousScene() */
+static int sre_mini_get_previous_scene(lua_State* L) {
+    g_lua_pushstring(L, g_sre_previous_scene_name);
+    return 1;
+}
+
+/* =========================================================================
+ * Mod Info (Phase 4.3)
+ * ========================================================================= */
+char g_sre_mod_name[128] = {0};
+char g_sre_mod_version[32] = {0};
+char g_sre_mod_author[128] = {0};
+
+/* Mini.GetModName() */
+static int sre_mini_get_mod_name(lua_State* L) {
+    g_lua_pushstring(L, g_sre_mod_name[0] ? g_sre_mod_name : "Unknown");
+    return 1;
+}
+
+/* Mini.GetModVersion() */
+static int sre_mini_get_mod_version(lua_State* L) {
+    g_lua_pushstring(L, g_sre_mod_version[0] ? g_sre_mod_version : "1.0");
+    return 1;
+}
+
+/* Mini.GetModAuthor() */
+static int sre_mini_get_mod_author(lua_State* L) {
+    g_lua_pushstring(L, g_sre_mod_author[0] ? g_sre_mod_author : "Unknown");
+    return 1;
+}
+
+/* =========================================================================
  * Registration — inject Mini/LNI tables into a Lua state
  * ========================================================================= */
 
@@ -719,6 +851,32 @@ void sre_register_mini_api(lua_State* L) {
 
     g_lua_pushcclosure(L, l_mini_map, 0);
     g_lua_setfield(L, -2, "map");
+
+    /* Phase 3.2: Armor models */
+    g_lua_pushcclosure(L, sre_mini_set_armor_model, 0);
+    g_lua_setfield(L, -2, "SetArmorModel");
+    g_lua_pushcclosure(L, sre_mini_set_default_model, 0);
+    g_lua_setfield(L, -2, "SetDefaultPlayerModel");
+
+    /* Phase 3.5: Coin limit (getter) */
+    g_lua_pushcclosure(L, l_mini_get_coin_limit, 0);
+    g_lua_setfield(L, -2, "GetCoinLimit");
+
+    /* Phase 4.2: Scene events */
+    g_lua_pushcclosure(L, sre_mini_on_scene_change, 0);
+    g_lua_setfield(L, -2, "OnSceneChange");
+    g_lua_pushcclosure(L, sre_mini_get_current_scene, 0);
+    g_lua_setfield(L, -2, "GetCurrentScene");
+    g_lua_pushcclosure(L, sre_mini_get_previous_scene, 0);
+    g_lua_setfield(L, -2, "GetPreviousScene");
+
+    /* Phase 4.3: Mod info */
+    g_lua_pushcclosure(L, sre_mini_get_mod_name, 0);
+    g_lua_setfield(L, -2, "GetModName");
+    g_lua_pushcclosure(L, sre_mini_get_mod_version, 0);
+    g_lua_setfield(L, -2, "GetModVersion");
+    g_lua_pushcclosure(L, sre_mini_get_mod_author, 0);
+    g_lua_setfield(L, -2, "GetModAuthor");
 
     /* Mini.Health = {} (sub-table) */
     g_lua_createtable(L, 0, 4);

@@ -38,6 +38,7 @@ CXX_SRCS := \
     src/game/camera_override.cpp \
     src/game/mod_tools.cpp \
     src/game/save_editor_logic.cpp \
+    src/game/mod_config.cpp \
     src/platform/fbo_scaler.cpp \
     src/platform/pvr_loader.cpp \
     src/platform/io_thread.cpp \
