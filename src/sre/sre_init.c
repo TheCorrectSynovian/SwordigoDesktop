@@ -81,7 +81,8 @@ SreHookEntry sre_hook_table[] = {
      * Re-enable by uncommenting when we add passthrough trampolines. */
     /* { 0x2ae884, "sre_PortalEffectComponent_Draw"    }, */  /* Portal swirl */
     /* { 0x2b0e90, "sre_SimpleGlowComponent_Draw"      }, */  /* Glow FX */
-    /* { 0x2cb828, "sre_WeaponGlowComponent_Draw"      }, */  /* Weapon glow */
+    { 0x2cb828, "sre_WeaponGlowComponent_Draw"      },  /* Weapon glow — Phase 3.3 */
+    { 0x2ccf30, "sre_WeaponTrailComponent_Draw"     },  /* Weapon trail — Phase 3.3 */
     /* ========= FULL GUI STACK HOOKS =========
      * Every GUI class's DrawRect goes through our code.
      * All use relay stubs to call original, so the game

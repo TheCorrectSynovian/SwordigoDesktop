@@ -916,6 +916,243 @@ static int sre_mini_get_mod_author(lua_State* L) {
 }
 
 /* =========================================================================
+ * Bauble System (Phase 3.3)
+ * =========================================================================
+ * Tracks equippable baubles with name, level, and equipped state.
+ * Lua scripts access via the global Bauble table.
+ * ========================================================================= */
+
+typedef struct {
+    char name[32];
+    int level;
+    int equipped;
+} SreBauble;
+
+SreBauble g_sre_baubles[32] = {{0}};
+int g_sre_bauble_count = 0;
+
+static SreBauble* sre_find_bauble(const char* name) {
+    int i;
+    for (i = 0; i < g_sre_bauble_count; i++) {
+        if (sre_streq(g_sre_baubles[i].name, name)) return &g_sre_baubles[i];
+    }
+    return 0;
+}
+
+static SreBauble* sre_find_or_create_bauble(const char* name) {
+    SreBauble* b = sre_find_bauble(name);
+    if (b) return b;
+    if (g_sre_bauble_count >= 32) return 0;
+    b = &g_sre_baubles[g_sre_bauble_count++];
+    int i;
+    for (i = 0; name[i] && i < 31; i++) b->name[i] = name[i];
+    b->name[i] = '\0';
+    b->level = 0;
+    b->equipped = 0;
+    return b;
+}
+
+/* Bauble.Find(name) → table {name, level, equipped} or nil */
+static int l_bauble_find(lua_State* L) {
+    const char* name = lua_tostring(L, 1);
+    if (!name) { g_lua_pushnil(L); return 1; }
+    SreBauble* b = sre_find_bauble(name);
+    if (!b) { g_lua_pushnil(L); return 1; }
+    g_lua_createtable(L, 0, 3);
+    g_lua_pushstring(L, b->name);
+    g_lua_setfield(L, -2, "name");
+    g_lua_pushnumber(L, (double)b->level);
+    g_lua_setfield(L, -2, "level");
+    g_lua_pushboolean(L, b->equipped);
+    g_lua_setfield(L, -2, "equipped");
+    return 1;
+}
+
+/* Bauble.Equip(name) — set equipped=1, create if not found */
+static int l_bauble_equip(lua_State* L) {
+    const char* name = lua_tostring(L, 1);
+    if (!name) return 0;
+    SreBauble* b = sre_find_or_create_bauble(name);
+    if (b) b->equipped = 1;
+    return 0;
+}
+
+/* Bauble.Unequip(name) — set equipped=0 */
+static int l_bauble_unequip(lua_State* L) {
+    const char* name = lua_tostring(L, 1);
+    if (!name) return 0;
+    SreBauble* b = sre_find_bauble(name);
+    if (b) b->equipped = 0;
+    return 0;
+}
+
+/* Bauble.IsWearing(name) → boolean */
+static int l_bauble_is_wearing(lua_State* L) {
+    const char* name = lua_tostring(L, 1);
+    if (!name) { g_lua_pushboolean(L, 0); return 1; }
+    SreBauble* b = sre_find_bauble(name);
+    g_lua_pushboolean(L, b ? b->equipped : 0);
+    return 1;
+}
+
+/* Bauble.GetLevel(name) → integer (0 if not found) */
+static int l_bauble_get_level(lua_State* L) {
+    const char* name = lua_tostring(L, 1);
+    if (!name) { g_lua_pushnumber(L, 0.0); return 1; }
+    SreBauble* b = sre_find_bauble(name);
+    g_lua_pushnumber(L, b ? (double)b->level : 0.0);
+    return 1;
+}
+
+/* Bauble.IncLevel(name) — increment level by 1, create with level=1 if not found */
+static int l_bauble_inc_level(lua_State* L) {
+    const char* name = lua_tostring(L, 1);
+    if (!name) return 0;
+    SreBauble* b = sre_find_or_create_bauble(name);
+    if (b) b->level++;
+    return 0;
+}
+
+/* Bauble.HideAll() — set all baubles' equipped=0 */
+static int l_bauble_hide_all(lua_State* L) {
+    (void)L;
+    int i;
+    for (i = 0; i < g_sre_bauble_count; i++) {
+        g_sre_baubles[i].equipped = 0;
+    }
+    return 0;
+}
+
+/* =========================================================================
+ * Achievement System (Phase 3.4)
+ * =========================================================================
+ * Tracks unlocked achievements with id, title, description.
+ * Lua scripts access via Mini.Achievement sub-table.
+ * Host polls g_sre_achievement_pending for popup display.
+ * ========================================================================= */
+
+typedef struct {
+    char id[32];
+    char title[64];
+    char desc[128];
+    int unlocked;
+} SreAchievement;
+
+SreAchievement g_sre_achievements[64] = {{0}};
+int g_sre_achievement_count = 0;
+
+/* Pending popup data — host polls this */
+int g_sre_achievement_pending = 0;
+char g_sre_achievement_pending_title[64] = {0};
+char g_sre_achievement_pending_desc[128] = {0};
+
+static SreAchievement* sre_find_achievement(const char* id) {
+    int i;
+    for (i = 0; i < g_sre_achievement_count; i++) {
+        if (sre_streq(g_sre_achievements[i].id, id)) return &g_sre_achievements[i];
+    }
+    return 0;
+}
+
+static SreAchievement* sre_find_or_create_achievement(const char* id) {
+    SreAchievement* a = sre_find_achievement(id);
+    if (a) return a;
+    if (g_sre_achievement_count >= 64) return 0;
+    a = &g_sre_achievements[g_sre_achievement_count++];
+    int i;
+    for (i = 0; id[i] && i < 31; i++) a->id[i] = id[i];
+    a->id[i] = '\0';
+    a->title[0] = '\0';
+    a->desc[0] = '\0';
+    a->unlocked = 0;
+    return a;
+}
+
+/* Mini.Achievement.Unlock(id, title, desc) — mark unlocked, set pending */
+static int l_achievement_unlock(lua_State* L) {
+    const char* id = lua_tostring(L, 1);
+    if (!id) return 0;
+    const char* title = lua_tostring(L, 2);
+    const char* desc = lua_tostring(L, 3);
+
+    SreAchievement* a = sre_find_or_create_achievement(id);
+    if (!a) return 0;
+
+    a->unlocked = 1;
+
+    /* Copy title */
+    if (title) {
+        int i;
+        for (i = 0; title[i] && i < 63; i++) a->title[i] = title[i];
+        a->title[i] = '\0';
+        /* Also copy to pending title */
+        for (i = 0; title[i] && i < 63; i++) g_sre_achievement_pending_title[i] = title[i];
+        g_sre_achievement_pending_title[i] = '\0';
+    }
+
+    /* Copy desc */
+    if (desc) {
+        int i;
+        for (i = 0; desc[i] && i < 127; i++) a->desc[i] = desc[i];
+        a->desc[i] = '\0';
+        /* Also copy to pending desc */
+        for (i = 0; desc[i] && i < 127; i++) g_sre_achievement_pending_desc[i] = desc[i];
+        g_sre_achievement_pending_desc[i] = '\0';
+    }
+
+    g_sre_achievement_pending = 1;
+    return 0;
+}
+
+/* Mini.Achievement.IsUnlocked(id) → boolean */
+static int l_achievement_is_unlocked(lua_State* L) {
+    const char* id = lua_tostring(L, 1);
+    if (!id) { g_lua_pushboolean(L, 0); return 1; }
+    SreAchievement* a = sre_find_achievement(id);
+    g_lua_pushboolean(L, a ? a->unlocked : 0);
+    return 1;
+}
+
+/* Mini.Achievement.GetAll() → table of achievement tables */
+static int l_achievement_get_all(lua_State* L) {
+    g_lua_createtable(L, g_sre_achievement_count, 0);
+    int i;
+    for (i = 0; i < g_sre_achievement_count; i++) {
+        g_lua_createtable(L, 0, 4);
+        g_lua_pushstring(L, g_sre_achievements[i].id);
+        g_lua_setfield(L, -2, "id");
+        g_lua_pushstring(L, g_sre_achievements[i].title);
+        g_lua_setfield(L, -2, "title");
+        g_lua_pushstring(L, g_sre_achievements[i].desc);
+        g_lua_setfield(L, -2, "desc");
+        g_lua_pushboolean(L, g_sre_achievements[i].unlocked);
+        g_lua_setfield(L, -2, "unlocked");
+        if (g_lua_rawseti) g_lua_rawseti(L, -2, i + 1);
+        else lua_pop(L, 1);
+    }
+    return 1;
+}
+
+/* Mini.Achievement.Reset(id) — re-lock one achievement */
+static int l_achievement_reset(lua_State* L) {
+    const char* id = lua_tostring(L, 1);
+    if (!id) return 0;
+    SreAchievement* a = sre_find_achievement(id);
+    if (a) a->unlocked = 0;
+    return 0;
+}
+
+/* Mini.Achievement.ResetAll() — re-lock all achievements */
+static int l_achievement_reset_all(lua_State* L) {
+    (void)L;
+    int i;
+    for (i = 0; i < g_sre_achievement_count; i++) {
+        g_sre_achievements[i].unlocked = 0;
+    }
+    return 0;
+}
+
+/* =========================================================================
  * Registration — inject Mini/LNI tables into a Lua state
  * ========================================================================= */
 
@@ -1066,6 +1303,20 @@ void sre_register_mini_api(lua_State* L) {
     g_lua_setfield(L, -2, "SetFollow");
     g_lua_setfield(L, -2, "Camera");
 
+    /* Mini.Achievement = {} (sub-table, Phase 3.4) */
+    g_lua_createtable(L, 0, 5);
+    g_lua_pushcclosure(L, l_achievement_unlock, 0);
+    g_lua_setfield(L, -2, "Unlock");
+    g_lua_pushcclosure(L, l_achievement_is_unlocked, 0);
+    g_lua_setfield(L, -2, "IsUnlocked");
+    g_lua_pushcclosure(L, l_achievement_get_all, 0);
+    g_lua_setfield(L, -2, "GetAll");
+    g_lua_pushcclosure(L, l_achievement_reset, 0);
+    g_lua_setfield(L, -2, "Reset");
+    g_lua_pushcclosure(L, l_achievement_reset_all, 0);
+    g_lua_setfield(L, -2, "ResetAll");
+    g_lua_setfield(L, -2, "Achievement");
+
     g_lua_setfield(L, LUA_GLOBALSINDEX, "Mini");  /* _G.Mini = table */
 
     /* ---- LNI table ---- */
@@ -1152,6 +1403,26 @@ void sre_register_mini_api(lua_State* L) {
     g_lua_pushcclosure(L, l_charanim_get_current, 0);
     g_lua_setfield(L, -2, "GetCurrent");
     g_lua_setfield(L, LUA_GLOBALSINDEX, "CharAnimController");
+
+    /* ---- Bauble table (Phase 3.3) ---- */
+    g_lua_createtable(L, 0, 8);
+    g_lua_pushcclosure(L, l_bauble_find, 0);
+    g_lua_setfield(L, -2, "Find");
+    g_lua_pushcclosure(L, l_bauble_equip, 0);
+    g_lua_setfield(L, -2, "Equip");
+    g_lua_pushcclosure(L, l_bauble_equip, 0);  /* Wear is alias for Equip */
+    g_lua_setfield(L, -2, "Wear");
+    g_lua_pushcclosure(L, l_bauble_unequip, 0);
+    g_lua_setfield(L, -2, "Unequip");
+    g_lua_pushcclosure(L, l_bauble_is_wearing, 0);
+    g_lua_setfield(L, -2, "IsWearing");
+    g_lua_pushcclosure(L, l_bauble_get_level, 0);
+    g_lua_setfield(L, -2, "GetLevel");
+    g_lua_pushcclosure(L, l_bauble_inc_level, 0);
+    g_lua_setfield(L, -2, "IncLevel");
+    g_lua_pushcclosure(L, l_bauble_hide_all, 0);
+    g_lua_setfield(L, -2, "HideAll");
+    g_lua_setfield(L, LUA_GLOBALSINDEX, "Bauble");
 
     /* ---- ButtonController table (stubs) ---- */
     g_lua_createtable(L, 0, 26);

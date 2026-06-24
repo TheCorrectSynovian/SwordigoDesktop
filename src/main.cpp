@@ -2511,6 +2511,18 @@ void load_and_boot_arm64() {
                               << std::dec << ")" << std::endl;
                 }
 
+                // Resolve achievement popup symbols
+                {
+                    uint64_t ach_pending = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_achievement_pending");
+                    uint64_t ach_title = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_achievement_pending_title");
+                    uint64_t ach_desc = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_achievement_pending_desc");
+                    if (ach_pending && ach_title && ach_desc) {
+                        mod_achievement_set_offsets(ach_pending, ach_title, ach_desc);
+                        std::cout << "[SRE] Achievement popup active (pending=0x" << std::hex 
+                                  << ach_pending << ")" << std::dec << std::endl;
+                    }
+                }
+
                 // ========= Background Renderer Setup =========
                 // Our SRE re-implements BackgroundComponent::Draw using
                 // engine building blocks: SetMatrix, SetColor, Sprite::Draw
@@ -3636,6 +3648,8 @@ void load_and_boot_arm64() {
                 glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
                 glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                 mod_render_overlay(g_gui, g_win_w, g_win_h, dt_seconds);
+                mod_achievement_poll(g_guest_memory, 1);  // offsets are absolute guest VA
+                mod_achievement_render(g_gui, g_win_w, g_win_h, dt_seconds);
                 
                 // ---- Lua Console rendering ----
                 if (g_lua_console_open && g_lua_console_ready) {

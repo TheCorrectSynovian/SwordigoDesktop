@@ -77,6 +77,8 @@ void sre_effects_frame_reset(void) {
     g_sre_glow_active = 0;
     g_sre_glow_count = 0;
     g_sre_weapon_glow_active = 0;
+    extern int g_sre_weapon_trail_active;
+    g_sre_weapon_trail_active = 0;
 }
 
 /* ========== Portal Draw Hook ==========
@@ -163,9 +165,73 @@ void sre_SimpleGlowComponent_Draw(void* self, void* ctx, void* matrix_ref, void*
 
 /* ========== WeaponGlow Draw Hook ==========
  * Original: WeaponGlowComponent::Draw at 0x2cb828
+ *
+ * Reads glow color from component and optionally overrides with 
+ * equipped trinket's color from g_sre_trinket_glows[].
  */
+
+/* From sre_mini_api.c — equipped baubles */
+extern int g_sre_bauble_count;
+
+/* Trinket glow table (already defined in sre_mini_api.c) */
+typedef struct {
+    char item_id[32];
+    float r, g, b, a;
+    float intensity;
+} SreTrinketGlowRef;
+extern SreTrinketGlowRef g_sre_trinket_glows[16];
+extern int g_sre_trinket_glow_count;
+
 void sre_WeaponGlowComponent_Draw(void* self, void* ctx, void* matrix_ref, void* vec3_a, void* vec3_b) {
+    char* s = (char*)self;
+    
+    /* Read default glow color from component (FloatColor at ~0x60) */
+    g_sre_weapon_color_r = *(float*)(s + 0x60);
+    g_sre_weapon_color_g = *(float*)(s + 0x64);
+    g_sre_weapon_color_b = *(float*)(s + 0x68);
+    g_sre_weapon_color_a = *(float*)(s + 0x6c);
+    
+    /* Override with first equipped trinket glow if available */
+    if (g_sre_trinket_glow_count > 0) {
+        g_sre_weapon_color_r = g_sre_trinket_glows[0].r;
+        g_sre_weapon_color_g = g_sre_trinket_glows[0].g;
+        g_sre_weapon_color_b = g_sre_trinket_glows[0].b;
+        g_sre_weapon_color_a = g_sre_trinket_glows[0].a;
+    }
+    
     g_sre_weapon_glow_active = 1;
+}
+
+/* ========== WeaponTrail Draw Hook ==========
+ * Original: WeaponTrailComponent::Draw at 0x2ccf30
+ *
+ * The weapon trail is a ribbon mesh drawn behind the sword swing.
+ * We extract position/color data and export to host for FBO rendering.
+ */
+int     g_sre_weapon_trail_active = 0;
+float   g_sre_weapon_trail_r = 1.0f;
+float   g_sre_weapon_trail_g = 1.0f;
+float   g_sre_weapon_trail_b = 1.0f;
+float   g_sre_weapon_trail_a = 0.8f;
+
+void sre_WeaponTrailComponent_Draw(void* self, void* ctx, void* matrix_ref, void* vec3_a, void* vec3_b) {
+    char* s = (char*)self;
+    
+    /* Read trail color from component (FloatColor at ~0x70) */
+    g_sre_weapon_trail_r = *(float*)(s + 0x70);
+    g_sre_weapon_trail_g = *(float*)(s + 0x74);
+    g_sre_weapon_trail_b = *(float*)(s + 0x78);
+    g_sre_weapon_trail_a = *(float*)(s + 0x7c);
+    
+    /* Apply trinket color override if set */
+    if (g_sre_trinket_glow_count > 0) {
+        g_sre_weapon_trail_r = g_sre_trinket_glows[0].r;
+        g_sre_weapon_trail_g = g_sre_trinket_glows[0].g;
+        g_sre_weapon_trail_b = g_sre_trinket_glows[0].b;
+        g_sre_weapon_trail_a = g_sre_trinket_glows[0].a * 0.8f;
+    }
+    
+    g_sre_weapon_trail_active = 1;
 }
 
 /* ========== MusicPlayer::PlayMusicWithName Hook ==========
