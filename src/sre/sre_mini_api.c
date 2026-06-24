@@ -194,6 +194,117 @@ static int l_mini_char_set_coins(lua_State* L) {
 }
 
 /* =========================================================================
+ * Mini.Character.* Movement/Speed Stubs (Combatch mod compatibility)
+ *
+ * These track values in SRE globals. The host can poll them
+ * to apply engine-side changes if desired.
+ * ========================================================================= */
+float g_sre_walk_speed = 1.0f;
+float g_sre_run_speed = 1.0f;
+float g_sre_jump_height = 1.0f;
+int   g_sre_move_direction = 0;  /* 0=stopped, -1=left, 1=right */
+
+static int l_mini_char_get_walk_speed(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_walk_speed);
+    return 1;
+}
+
+static int l_mini_char_set_walk_speed(lua_State* L) {
+    g_sre_walk_speed = (float)g_lua_tonumber(L, 1);
+    return 0;
+}
+
+static int l_mini_char_get_run_speed(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_run_speed);
+    return 1;
+}
+
+static int l_mini_char_set_run_speed(lua_State* L) {
+    g_sre_run_speed = (float)g_lua_tonumber(L, 1);
+    return 0;
+}
+
+static int l_mini_char_set_jump_height(lua_State* L) {
+    g_sre_jump_height = (float)g_lua_tonumber(L, 1);
+    return 0;
+}
+
+static int l_mini_char_get_jump_height(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_jump_height);
+    return 1;
+}
+
+/* Mini.Character.StartMovingToDirection(dir) — dir: -1=left, 1=right */
+static int l_mini_char_start_moving(lua_State* L) {
+    g_sre_move_direction = (int)g_lua_tonumber(L, 1);
+    return 0;
+}
+
+/* Mini.Character.StopMovingToDirection() */
+static int l_mini_char_stop_moving(lua_State* L) {
+    (void)L;
+    g_sre_move_direction = 0;
+    return 0;
+}
+
+/* =========================================================================
+ * Mini.SetTrinketColor(item_id, r, g, b, a, intensity)
+ *
+ * Stores trinket glow color in a packed table for host to read.
+ * Format: item_id\0 followed by 5 floats (r,g,b,a,intensity)
+ * ========================================================================= */
+typedef struct {
+    char item_id[32];
+    float r, g, b, a;
+    float intensity;
+} SreTrinketGlow;
+
+SreTrinketGlow g_sre_trinket_glows[16] = {{0}};
+int g_sre_trinket_glow_count = 0;
+
+static int l_mini_set_trinket_color(lua_State* L) {
+    const char* item_id = lua_tostring(L, 1);
+    if (!item_id) return 0;
+
+    float r = (float)g_lua_tonumber(L, 2);
+    float g = (float)g_lua_tonumber(L, 3);
+    float b = (float)g_lua_tonumber(L, 4);
+    float a = (float)g_lua_tonumber(L, 5);
+    float intensity = (float)g_lua_tonumber(L, 6);
+
+    /* Find existing or add new */
+    int idx = -1;
+    int i;
+    for (i = 0; i < g_sre_trinket_glow_count; i++) {
+        /* strcmp inline */
+        const char* p = g_sre_trinket_glows[i].item_id;
+        const char* q = item_id;
+        int match = 1;
+        while (*p || *q) {
+            if (*p != *q) { match = 0; break; }
+            p++; q++;
+        }
+        if (match) { idx = i; break; }
+    }
+    if (idx < 0 && g_sre_trinket_glow_count < 16) {
+        idx = g_sre_trinket_glow_count++;
+    }
+    if (idx < 0) return 0;  /* table full */
+
+    /* Copy item_id */
+    for (i = 0; i < 31 && item_id[i]; i++)
+        g_sre_trinket_glows[idx].item_id[i] = item_id[i];
+    g_sre_trinket_glows[idx].item_id[i] = '\0';
+
+    g_sre_trinket_glows[idx].r = r;
+    g_sre_trinket_glows[idx].g = g;
+    g_sre_trinket_glows[idx].b = b;
+    g_sre_trinket_glows[idx].a = a;
+    g_sre_trinket_glows[idx].intensity = intensity;
+    return 0;
+}
+
+/* =========================================================================
  * Mini.Camera.* Lua Functions
  * ========================================================================= */
 
@@ -831,6 +942,9 @@ void sre_register_mini_api(lua_State* L) {
     g_lua_pushcclosure(L, l_mini_set_controls_hidden, 0);
     g_lua_setfield(L, -2, "SetControlsHidden");
 
+    g_lua_pushcclosure(L, l_mini_set_trinket_color, 0);
+    g_lua_setfield(L, -2, "SetTrinketColor");
+
     g_lua_pushcclosure(L, l_mini_set_coin_limit, 0);
     g_lua_setfield(L, -2, "SetCoinLimit");
 
@@ -918,6 +1032,22 @@ void sre_register_mini_api(lua_State* L) {
     g_lua_setfield(L, -2, "SetMana");
     g_lua_pushcclosure(L, l_mini_char_set_coins, 0);
     g_lua_setfield(L, -2, "SetCoins");
+    g_lua_pushcclosure(L, l_mini_char_get_walk_speed, 0);
+    g_lua_setfield(L, -2, "GetWalkSpeed");
+    g_lua_pushcclosure(L, l_mini_char_set_walk_speed, 0);
+    g_lua_setfield(L, -2, "SetWalkSpeed");
+    g_lua_pushcclosure(L, l_mini_char_get_run_speed, 0);
+    g_lua_setfield(L, -2, "GetRunSpeed");
+    g_lua_pushcclosure(L, l_mini_char_set_run_speed, 0);
+    g_lua_setfield(L, -2, "SetRunSpeed");
+    g_lua_pushcclosure(L, l_mini_char_set_jump_height, 0);
+    g_lua_setfield(L, -2, "SetJumpHeight");
+    g_lua_pushcclosure(L, l_mini_char_get_jump_height, 0);
+    g_lua_setfield(L, -2, "GetJumpHeight");
+    g_lua_pushcclosure(L, l_mini_char_start_moving, 0);
+    g_lua_setfield(L, -2, "StartMovingToDirection");
+    g_lua_pushcclosure(L, l_mini_char_stop_moving, 0);
+    g_lua_setfield(L, -2, "StopMovingToDirection");
     g_lua_setfield(L, -2, "Character");
 
     /* Mini.Camera = {} (sub-table) */
