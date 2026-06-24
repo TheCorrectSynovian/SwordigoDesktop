@@ -96,15 +96,13 @@ static int  g_delete_target_idx = -1;
 // Add Instance popup state
 static bool g_show_add_instance = false;
 static char g_add_name[128] = "";
-static char g_add_so_path[512] = "";
-static char g_add_deps_path[512] = "";
-static int  g_add_asset_type = 0;        // 0=vanilla, 1=RL assets, 2=custom
+static int  g_add_asset_type = 0;        // 0=vanilla, 1=RL assets, 2=custom folder
 static char g_add_custom_assets[512] = "";
 static bool g_add_use_sre = true;
-static char g_add_version[64] = "1.4.12";
-static int  g_add_arch = 0;              // 0=arm64, 1=armeabi-v7a
 static char g_add_game_type[64] = "Swordigo";
 static std::string g_add_status;
+static bool g_add_copying = false;       // true during async asset copy
+static float g_add_copy_progress = 0.0f; // 0.0-1.0 copy progress
 
 // =============================================================================
 // Texture helper
@@ -391,15 +389,13 @@ static void DrawInstancePanel(BinarySelector& selector, int& selected, float wid
         // Reset form fields
         memset(g_add_name, 0, sizeof(g_add_name));
         strncpy(g_add_name, "My Instance", sizeof(g_add_name) - 1);
-        memset(g_add_so_path, 0, sizeof(g_add_so_path));
-        memset(g_add_deps_path, 0, sizeof(g_add_deps_path));
         memset(g_add_custom_assets, 0, sizeof(g_add_custom_assets));
         g_add_asset_type = 0;
         g_add_use_sre = true;
-        strncpy(g_add_version, "1.4.12", sizeof(g_add_version) - 1);
-        g_add_arch = 0;
         strncpy(g_add_game_type, "Swordigo", sizeof(g_add_game_type) - 1);
         g_add_status.clear();
+        g_add_copying = false;
+        g_add_copy_progress = 0.0f;
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add new game instance");
 
@@ -520,6 +516,23 @@ static void DrawInstancePanel(BinarySelector& selector, int& selected, float wid
         // Version text next to badge (shifted right by 44px for icon)
         dl->AddText(ImVec2(badge_x + txt_size.x + 12, badge_y),
             IM_COL32(170, 170, 170, 255), b.version.c_str());
+
+        // Assets badge
+        if (b.assets_dir != "assets") {
+            float ver_w = ImGui::CalcTextSize(b.version.c_str()).x;
+            float ab_x = badge_x + txt_size.x + 12 + ver_w + 8;
+            ImVec4 asset_col = (b.assets_dir == "rl_assets")
+                ? ImVec4(0.8f, 0.2f, 0.4f, 1.0f)  // pink for RL
+                : ImVec4(0.6f, 0.4f, 0.9f, 1.0f); // purple for custom
+            std::string asset_tag = (b.assets_dir == "rl_assets") ? "[RL]" : "[Custom]";
+            ImVec2 ab_size = ImGui::CalcTextSize(asset_tag.c_str());
+            dl->AddRectFilled(
+                ImVec2(ab_x - 2, badge_y - 1),
+                ImVec2(ab_x + ab_size.x + 4, badge_y + ab_size.y + 2),
+                ImGui::ColorConvertFloat4ToU32(asset_col), 4.0f);
+            dl->AddText(ImVec2(ab_x, badge_y),
+                IM_COL32(255, 255, 255, 255), asset_tag.c_str());
+        }
 
         // Default star indicator
         if (b.is_default) {
@@ -657,6 +670,7 @@ static void DrawDetailPanel(BinarySelector& selector, int selected,
         Row("Version",   b.version.c_str());
         Row("Arch",      BinarySelector::arch_string(b.arch));
         Row("Game Type", b.game_type.c_str());
+        Row("Assets",    b.assets_dir.c_str());
         Row("Path",      b.filepath.c_str());
         Row("Size",      FormatFileSize(b.file_size).c_str());
         Row("SHA256",    b.sha256.empty() ? "(not computed)" : b.sha256.substr(0, 16).c_str());
@@ -1509,7 +1523,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
         if (ImGui::BeginPopupModal("Add Instance", &g_show_add_instance, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 6));
 
-            // Instance Name
+            // ── INSTANCE DETAILS ──
             ImGui::TextColored(ImVec4(0.45f, 0.65f, 1.0f, 1.0f), "INSTANCE DETAILS");
             ImGui::Separator();
             ImGui::Spacing();
@@ -1525,99 +1539,16 @@ LaunchConfig show_launcher(BinarySelector& selector) {
             ImGui::Text("Game Type");
             ImGui::SameLine(160);
             ImGui::SetNextItemWidth(-1);
-            const char* game_types[] = { "Swordigo", "SwordigoMini", "RLSwordigo", "Custom" };
+            const char* game_types[] = { "Swordigo", "RLSwordigo", "Custom" };
             static int gt_sel = 0;
-            if (ImGui::Combo("##game_type", &gt_sel, game_types, 4)) {
+            if (ImGui::Combo("##game_type", &gt_sel, game_types, 3)) {
                 strncpy(g_add_game_type, game_types[gt_sel], sizeof(g_add_game_type) - 1);
             }
 
-            // Version
-            ImGui::AlignTextToFramePadding();
-            ImGui::Text("Version");
-            ImGui::SameLine(160);
-            ImGui::SetNextItemWidth(-1);
-            ImGui::InputText("##inst_ver", g_add_version, sizeof(g_add_version));
-
             ImGui::Spacing();
             ImGui::Spacing();
 
-            // Binary Selection
-            ImGui::TextColored(ImVec4(0.45f, 0.65f, 1.0f, 1.0f), "BINARY");
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            // Architecture
-            ImGui::AlignTextToFramePadding();
-            ImGui::Text("Architecture");
-            ImGui::SameLine(160);
-            ImGui::RadioButton("ARM64 (arm64-v8a)", &g_add_arch, 0);
-            ImGui::SameLine();
-            ImGui::RadioButton("ARM32 (armeabi-v7a)", &g_add_arch, 1);
-
-            // Main library
-            ImGui::AlignTextToFramePadding();
-            ImGui::Text("libswordigo.so");
-            ImGui::SameLine(160);
-            ImGui::SetNextItemWidth(-70);
-            ImGui::InputText("##so_path", g_add_so_path, sizeof(g_add_so_path));
-            ImGui::SameLine();
-            if (ImGui::Button("Browse##so", ImVec2(60, 0))) {
-                // Open file manager to engine dir
-                std::string engine_dir = get_user_data_dir() + "/engine";
-                pid_t pid = fork();
-                if (pid == 0) {
-                    execlp("xdg-open", "xdg-open", engine_dir.c_str(), nullptr);
-                    _exit(1);
-                }
-            }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Browse engine directory to find .so file");
-
-            // Dependencies
-            ImGui::AlignTextToFramePadding();
-            ImGui::Text("Dependencies");
-            ImGui::SameLine(160);
-            ImGui::SetNextItemWidth(-70);
-            ImGui::InputText("##deps", g_add_deps_path, sizeof(g_add_deps_path));
-            ImGui::SameLine();
-            if (ImGui::Button("Browse##deps", ImVec2(60, 0))) {
-                std::string engine_dir = get_user_data_dir() + "/engine";
-                pid_t pid = fork();
-                if (pid == 0) {
-                    execlp("xdg-open", "xdg-open", engine_dir.c_str(), nullptr);
-                    _exit(1);
-                }
-            }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Optional: folder with extra .so dependencies");
-
-            // SRE Toggle
-            ImGui::Spacing();
-            ImGui::AlignTextToFramePadding();
-            ImGui::Text("Use SRE");
-            ImGui::SameLine(160);
-            ImGui::Checkbox("##use_sre", &g_add_use_sre);
-            ImGui::SameLine();
-            ImGui::TextDisabled("(?)");
-            if (ImGui::IsItemHovered()) {
-                ImGui::BeginTooltip();
-                ImGui::Text("Swordigo Runtime Engine (libsre.so)");
-                ImGui::Text("Provides hooks, fixes, and mod support.");
-                ImGui::Text("Required for mods, save editing, and custom content.");
-                ImGui::EndTooltip();
-            }
-
-            // SRE warning for non-1.4.12 ARM64
-            bool is_sre_compatible = (g_add_arch == 0) && (std::string(g_add_version).find("1.4.12") != std::string::npos);
-            if (g_add_use_sre && !is_sre_compatible) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.7f, 0.2f, 1.0f));
-                ImGui::TextWrapped("  WARNING: SRE is only tested with v1.4.12 ARM64. "
-                                   "Using it with other versions may cause crashes or undefined behavior.");
-                ImGui::PopStyleColor();
-            }
-
-            ImGui::Spacing();
-            ImGui::Spacing();
-
-            // Asset Selection
+            // ── ASSETS ──
             ImGui::TextColored(ImVec4(0.45f, 0.65f, 1.0f, 1.0f), "ASSETS");
             ImGui::Separator();
             ImGui::Spacing();
@@ -1626,14 +1557,14 @@ LaunchConfig show_launcher(BinarySelector& selector) {
             ImGui::Text("Asset Source");
             ImGui::SameLine(160);
             ImGui::RadioButton("Vanilla (assets/)", &g_add_asset_type, 0);
-            ImGui::SameLine(160);
-            ImGui::RadioButton("RL Assets (rl_assets/)", &g_add_asset_type, 1);
-            ImGui::SameLine(160);
+            ImGui::SameLine();
+            ImGui::RadioButton("RL (rl_assets/)", &g_add_asset_type, 1);
+            ImGui::SameLine();
             ImGui::RadioButton("Custom folder", &g_add_asset_type, 2);
 
             if (g_add_asset_type == 2) {
                 ImGui::AlignTextToFramePadding();
-                ImGui::Text("Custom Path");
+                ImGui::Text("Folder Path");
                 ImGui::SameLine(160);
                 ImGui::SetNextItemWidth(-70);
                 ImGui::InputText("##custom_assets", g_add_custom_assets, sizeof(g_add_custom_assets));
@@ -1649,6 +1580,33 @@ LaunchConfig show_launcher(BinarySelector& selector) {
             }
 
             ImGui::Spacing();
+            ImGui::Spacing();
+
+            // ── ENGINE (collapsed by default, advanced) ──
+            if (ImGui::CollapsingHeader("Engine (Advanced)")) {
+                ImGui::Indent(12);
+                ImGui::AlignTextToFramePadding();
+                ImGui::Text("Use SRE");
+                ImGui::SameLine(160);
+                ImGui::Checkbox("##use_sre", &g_add_use_sre);
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::BeginTooltip();
+                    ImGui::Text("Swordigo Runtime Engine (libsre.so)");
+                    ImGui::Text("Provides hooks, fixes, and mod support.");
+                    ImGui::Text("Required for mods, save editing, and custom content.");
+                    ImGui::EndTooltip();
+                }
+
+                if (g_add_use_sre) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.8f, 0.5f, 1.0f));
+                    ImGui::TextWrapped("  SRE replaces libmini.so / libGlossHook.so");
+                    ImGui::PopStyleColor();
+                }
+                ImGui::Unindent(12);
+            }
+
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::Spacing();
@@ -1667,39 +1625,88 @@ LaunchConfig show_launcher(BinarySelector& selector) {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.55f, 0.34f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.65f, 0.40f, 1.0f));
             if (ImGui::Button("Create", ImVec2(btn_w, 36))) {
+                g_add_status.clear();
                 // Validate
                 if (strlen(g_add_name) == 0) {
                     g_add_status = "Instance name is required.";
-                } else if (strlen(g_add_so_path) == 0) {
-                    g_add_status = "Please specify the libswordigo.so path.";
                 } else {
-                    // Build instance directory structure
-                    std::string arch_str = (g_add_arch == 0) ? "arm64-v8a" : "armeabi-v7a";
-                    std::string ver_str = g_add_version;
-                    std::string inst_dir = get_user_data_dir() + "/engine/v" + ver_str + "/" + arch_str;
-                    try {
-                        fs::create_directories(inst_dir);
-                        // Copy .so to instance dir
-                        std::string so_src = g_add_so_path;
-                        std::string so_dst = inst_dir + "/libswordigo.so";
-                        if (fs::exists(so_src)) {
-                            fs::copy_file(so_src, so_dst, fs::copy_options::overwrite_existing);
-                        }
-                        // If SRE enabled, copy libsre.so
-                        if (g_add_use_sre) {
-                            std::string sre_src = get_user_data_dir() + "/engine/v1.4.12/arm64-v8a/libsre.so";
-                            if (fs::exists(sre_src)) {
-                                std::string sre_dst = inst_dir + "/libsre.so";
-                                fs::copy_file(sre_src, sre_dst, fs::copy_options::overwrite_existing);
+                    // Determine assets_dir
+                    std::string assets_dir_name;
+                    if (g_add_asset_type == 0) {
+                        assets_dir_name = "assets";
+                    } else if (g_add_asset_type == 1) {
+                        assets_dir_name = "rl_assets";
+                    } else {
+                        // Custom: copy folder to inst-<name>/
+                        std::string custom_src = g_add_custom_assets;
+                        if (custom_src.empty()) {
+                            g_add_status = "Please specify the custom assets folder.";
+                        } else {
+                            assets_dir_name = std::string("inst-") + g_add_name;
+                            std::string dest = get_user_data_dir() + "/" + assets_dir_name;
+                            try {
+                                if (fs::exists(dest)) {
+                                    fs::remove_all(dest);
+                                }
+                                fs::create_directories(dest);
+                                // Copy entire assets folder
+                                fs::copy(custom_src, dest, fs::copy_options::recursive | fs::copy_options::overwrite_existing);
+                                std::cout << "[Launcher] Copied assets: " << custom_src << " -> " << dest << std::endl;
+                            } catch (const std::exception& e) {
+                                g_add_status = std::string("Error copying assets: ") + e.what();
                             }
                         }
-                        // Rescan engine directory to pick up new instance
-                        std::string engine_path = get_user_data_dir() + "/engine";
-                        selector.scan_engine_directory(engine_path);
-                        g_show_add_instance = false;
-                        ImGui::CloseCurrentPopup();
-                    } catch (const std::exception& e) {
-                        g_add_status = std::string("Error: ") + e.what();
+                    }
+
+                    if (g_add_status.empty()) {
+                        // The binary is ALWAYS v1.4.12 ARM64
+                        std::string base_so = get_user_data_dir() + "/engine/v1.4.12/arm64-v8a/libswordigo.so";
+
+                        // Use add_custom_instance which copies .so and registers
+                        if (selector.add_custom_instance(base_so, g_add_name, assets_dir_name)) {
+                            // If SRE enabled, ensure libsre.so is copied to the new instance dir
+                            if (g_add_use_sre) {
+                                std::string sre_src = get_user_data_dir() + "/engine/v1.4.12/arm64-v8a/libsre.so";
+                                std::string arch_dir = get_user_data_dir() + "/engine/custom-" + std::string(g_add_name) + "/arm64-v8a";
+                                if (fs::exists(sre_src)) {
+                                    try {
+                                        fs::copy_file(sre_src, arch_dir + "/libsre.so", fs::copy_options::overwrite_existing);
+                                    } catch (...) {}
+                                }
+
+                                // Auto-strip libmini.so and libGlossHook.so from deps
+                                auto& bins = const_cast<std::vector<BinaryInfo>&>(selector.get_binaries());
+                                if (!bins.empty()) {
+                                    auto& last = bins.back();
+                                    // Remove libmini.so and libGlossHook.so from dependencies
+                                    auto& deps = last.dependencies;
+                                    deps.erase(std::remove_if(deps.begin(), deps.end(), [](const std::string& d) {
+                                        return d == "libmini.so" || d == "libGlossHook.so";
+                                    }), deps.end());
+                                    auto& dpaths = last.dep_paths;
+                                    dpaths.erase(std::remove_if(dpaths.begin(), dpaths.end(), [](const std::string& p) {
+                                        return p.find("libmini.so") != std::string::npos ||
+                                               p.find("libGlossHook.so") != std::string::npos;
+                                    }), dpaths.end());
+                                }
+                            }
+
+                            // Save user instances for persistence
+                            std::string config_dir;
+                            const char* xdg_config = getenv("XDG_CONFIG_HOME");
+                            if (xdg_config) {
+                                config_dir = std::string(xdg_config) + "/swordigo-desktop";
+                            } else {
+                                const char* home = getenv("HOME");
+                                config_dir = std::string(home ? home : ".") + "/.config/swordigo-desktop";
+                            }
+                            selector.save_user_instances(config_dir + "/instances.json");
+
+                            g_show_add_instance = false;
+                            ImGui::CloseCurrentPopup();
+                        } else {
+                            g_add_status = "Failed to create instance.";
+                        }
                     }
                 }
             }

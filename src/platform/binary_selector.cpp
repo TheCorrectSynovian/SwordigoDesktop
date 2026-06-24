@@ -225,6 +225,24 @@ void BinarySelector::scan_arch_dir(const std::string& arch_path, const std::stri
         }
     }
 
+    // If libsre.so is present in this directory, auto-strip libmini.so and libGlossHook.so
+    // from dependencies (SRE replaces their functionality)
+    if (fs::exists(arch_path + "/libsre.so")) {
+        info.dependencies.erase(
+            std::remove_if(info.dependencies.begin(), info.dependencies.end(),
+                [](const std::string& d) {
+                    return d == "libmini.so" || d == "libGlossHook.so" || d == "libkiwi.so";
+                }), info.dependencies.end());
+        info.dep_paths.erase(
+            std::remove_if(info.dep_paths.begin(), info.dep_paths.end(),
+                [](const std::string& p) {
+                    return p.find("libmini.so") != std::string::npos ||
+                           p.find("libGlossHook.so") != std::string::npos ||
+                           p.find("libkiwi.so") != std::string::npos;
+                }), info.dep_paths.end());
+        std::cout << "[BinSel] SRE detected in " << arch_path << ", stripped modloader deps" << std::endl;
+    }
+
     // Compute hash
     std::cout << "[BinSel] Hashing " << version_dir << "/" << arch_string(arch) 
               << "/libswordigo.so..." << std::flush;
@@ -797,10 +815,11 @@ void BinarySelector::load_user_instances(const std::string& json_path) {
 
 // ── save_user_instances: Write only custom/user instances ──
 void BinarySelector::save_user_instances(const std::string& json_path) const {
-    // Filter to only custom instances (version_dir starts with "custom-")
+    // Filter to custom instances (custom prefix OR non-standard assets)
     std::vector<const BinaryInfo*> custom_bins;
     for (const auto& b : binaries) {
-        if (b.version_dir.substr(0, 7) == "custom-") {
+        if (b.version_dir.substr(0, 7) == "custom-" ||
+            (b.assets_dir != "assets" && b.assets_dir != "rl_assets" && !b.assets_dir.empty())) {
             custom_bins.push_back(&b);
         }
     }

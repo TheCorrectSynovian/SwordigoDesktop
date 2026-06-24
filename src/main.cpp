@@ -1,4 +1,4 @@
-// Swordigo Desktop v6.5 — MegineBraine
+// Force rebuild: PostFXState struct changed in fbo_scaler.h
 #ifndef _WIN32
 #include <unistd.h>
 #else
@@ -4585,12 +4585,16 @@ int main(int argc, char* argv[]) {
             LaunchConfig lconf = show_launcher(g_binary_selector);
             if (!lconf.should_launch) {
                 std::cout << "[Main] Launch cancelled by user" << std::endl;
+                // Save any instances created during this session
+                g_binary_selector.save_user_instances(user_instances_path);
                 return 0;
             }
             g_graphics_api = lconf.graphics_api;
             g_lib_name = lconf.selected_binary;
             g_assets_dir = lconf.assets_dir;
             g_binary_selector.set_loaded(g_lib_name);
+            // Persist any user instances created during this session
+            g_binary_selector.save_user_instances(user_instances_path);
             std::cout << "[Main] Launcher: " 
                       << (g_graphics_api == GraphicsAPI::VULKAN ? "Vulkan" : "OpenGL")
                       << " | Binary: " << g_lib_name
