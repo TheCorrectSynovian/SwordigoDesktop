@@ -21,6 +21,10 @@ namespace fs = std::filesystem;
 #include <unicorn/unicorn.h>
 #include "platform/emulator.h"
 #include "platform/emulator_arm64.h"
+#include "platform/i_emulator_arm64.h"
+#ifdef USE_DYNARMIC
+#include "platform/emulator_dynarmic64.h"
+#endif
 #include "platform/display.h"
 #include "android/asset_manager.h"
 #include "game/camera_override.h"
@@ -78,10 +82,11 @@ Emulator* g_emulator = nullptr;
 so_module_arm64 g_main_mod_64;
 ElfLoaderArm64* g_loader_64 = nullptr;
 JniBridge64 g_bridge_64;
-EmulatorArm64* g_emulator_64 = nullptr;
+IEmulatorArm64* g_emulator_64 = nullptr;
 
 // Architecture flag — set during boot based on selected binary
 bool g_is_arm64 = false;
+bool g_use_dynarmic = false;  // Set via --engine=dynarmic
 GuiRenderer g_gui;
 SrtOverlay g_srt_overlay;
 InputConfig g_input_config;
@@ -1818,7 +1823,16 @@ void load_and_boot_arm64() {
     std::cout << "[Loader64] Game binary ready (all symbols bridged)." << std::endl;
 
     // Initialize ARM64 Emulator AFTER memory is prepared
-    g_emulator_64 = new EmulatorArm64(g_guest_memory, GUEST_MEM_SIZE);
+    // Multi-engine backend selection
+#ifdef USE_DYNARMIC
+    if (g_use_dynarmic) {
+        g_emulator_64 = new EmulatorDynarmic64(g_guest_memory, GUEST_MEM_SIZE);
+    } else
+#endif
+    {
+        g_emulator_64 = new EmulatorArm64(g_guest_memory, GUEST_MEM_SIZE);
+    }
+    std::cout << "[Engine] Using " << g_emulator_64->engine_name() << " backend" << std::endl;
     g_emulator_64->set_bridge(&g_bridge_64);
 
     // --- Runtime binary patches (ARM64) ---
@@ -2053,26 +2067,14 @@ void load_and_boot_arm64() {
                         uint64_t crash_page = 0x2d6c000;  // 0x2d6ce4c aligned to 4KB
                         uint32_t ret_insn = 0xD65F03C0;   // ARM64 RET
                         
-                        // Try uc_mem_map first (page might not be mapped yet)
-                        uc_engine* uc = (uc_engine*)g_emulator_64->get_uc_handle();
-                        uc_err map_err = uc_mem_map(uc, crash_page, 0x1000, UC_PROT_ALL);
-                        if (map_err == UC_ERR_OK) {
-                            for (uint64_t off = 0; off < 0x1000; off += 4) {
-                                uc_mem_write(uc, crash_page + off, &ret_insn, 4);
-                            }
-                            std::cout << "[Safety] Mapped + filled RET-page at 0x" 
-                                      << std::hex << crash_page << std::dec << std::endl;
-                        } else {
-                            // Page already mapped (entire space is pre-mapped by uc_mem_map_ptr)
-                            // Write directly to the host memory buffer
-                            uint8_t* mem = g_emulator_64->get_memory_base();
-                            for (uint64_t off = 0; off < 0x1000; off += 4) {
-                                *(uint32_t*)(mem + crash_page + off) = ret_insn;
-                            }
-                            std::cout << "[Safety] Wrote RET-page at 0x" << std::hex 
-                                      << crash_page << " (page was pre-mapped)" 
-                                      << std::dec << std::endl;
+                        // Write directly to the shared guest memory buffer
+                        // (works for both Unicorn and Dynarmic backends)
+                        uint8_t* mem = g_emulator_64->get_memory_base();
+                        for (uint64_t off = 0; off < 0x1000; off += 4) {
+                            *(uint32_t*)(mem + crash_page + off) = ret_insn;
                         }
+                        std::cout << "[Safety] Wrote RET-page at 0x" << std::hex 
+                                  << crash_page << std::dec << std::endl;
                     }
                 }
 
@@ -3325,6 +3327,10 @@ void load_and_boot_arm64() {
             // Scene transitions spawn loading threads. Running them inline
             // (nested uc_emu_start) corrupts state. Run them here between frames.
             if (g_emulator_64->has_pending_threads()) {
+                if (completed_frames < 20) {
+                    std::cout << "[Diag64] Frame " << completed_frames 
+                              << " running deferred threads" << std::endl;
+                }
                 g_emulator_64->run_pending_threads();
             }
             
@@ -3541,73 +3547,105 @@ void load_and_boot_arm64() {
                 glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
                 glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
                 glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-                glColor4ub(0, 0, 0, 180);
-                glBegin(GL_QUADS);
-                glVertex2f(10, g_win_h - 10); glVertex2f(420, g_win_h - 10);
-                glVertex2f(420, g_win_h - 315); glVertex2f(10, g_win_h - 315);
-                glEnd();
-                char dbg[256];
-                snprintf(dbg, sizeof(dbg), "FPS: %.1f", fps);
-                g_gui.draw_string(dbg, 20, g_win_h - 35, 2.0f, 0, 255, 100, 255);
-                snprintf(dbg, sizeof(dbg), "Frame: %d  [ARM64]", completed_frames);
-                g_gui.draw_string(dbg, 20, g_win_h - 60, 1.4f, 200, 200, 200, 255);
-                snprintf(dbg, sizeof(dbg), "Draws: %d  TexBinds: %d", g_frame_stats.draw_calls, g_frame_stats.texture_binds);
-                g_gui.draw_string(dbg, 20, g_win_h - 80, 1.2f, 180, 180, 180, 255);
-                snprintf(dbg, sizeof(dbg), "Verts: %d  MatOps: %d", g_frame_stats.vertices_submitted, g_frame_stats.matrix_ops);
-                g_gui.draw_string(dbg, 20, g_win_h - 97, 1.2f, 180, 180, 180, 255);
-                snprintf(dbg, sizeof(dbg), "State: %d  TexUps: %d", g_frame_stats.state_changes, g_frame_stats.tex_uploads);
-                g_gui.draw_string(dbg, 20, g_win_h - 114, 1.2f, 180, 180, 180, 255);
-                snprintf(dbg, sizeof(dbg), "Render: %dx%d -> Window: %dx%d (Draw: %dx%d)", GAME_W, GAME_H, g_win_w, g_win_h, g_draw_w, g_draw_h);
-                g_gui.draw_string(dbg, 20, g_win_h - 131, 1.2f, 140, 140, 160, 255);
-                snprintf(dbg, sizeof(dbg), "Mouse: %d,%d  DT: %.4fs", mouse_x, mouse_y, dt_seconds);
-                g_gui.draw_string(dbg, 20, g_win_h - 148, 1.2f, 140, 140, 160, 255);
 
+                // ── Panel background ──
+                int panel_h = 380;
+                glColor4ub(10, 10, 18, 210);
+                glBegin(GL_QUADS);
+                glVertex2f(8, g_win_h - 8); glVertex2f(440, g_win_h - 8);
+                glVertex2f(440, g_win_h - panel_h); glVertex2f(8, g_win_h - panel_h);
+                glEnd();
+                // Accent bar (top)
+                glColor4ub(80, 200, 120, 255);
+                glBegin(GL_QUADS);
+                glVertex2f(8, g_win_h - 8); glVertex2f(440, g_win_h - 8);
+                glVertex2f(440, g_win_h - 11); glVertex2f(8, g_win_h - 11);
+                glEnd();
+
+                char dbg[256];
+                float y = g_win_h - 30;
+                float x = 20;
+                float lh = 17;  // line height
+
+                // ── Section: Performance ──
+                snprintf(dbg, sizeof(dbg), "FPS: %.1f", fps);
+                g_gui.draw_string(dbg, x, y, 2.0f, 80, 255, 120, 255); y -= 28;
+
+                snprintf(dbg, sizeof(dbg), "Frame: %d", completed_frames);
+                g_gui.draw_string(dbg, x, y, 1.3f, 200, 200, 210, 255); y -= lh;
+
+                // ── Section: Render Stats ──
+                snprintf(dbg, sizeof(dbg), "Draws: %d   Verts: %d   TexBinds: %d",
+                         g_frame_stats.draw_calls, g_frame_stats.vertices_submitted, g_frame_stats.texture_binds);
+                g_gui.draw_string(dbg, x, y, 1.1f, 160, 160, 175, 255); y -= lh;
+                snprintf(dbg, sizeof(dbg), "State: %d   MatOps: %d   TexUps: %d",
+                         g_frame_stats.state_changes, g_frame_stats.matrix_ops, g_frame_stats.tex_uploads);
+                g_gui.draw_string(dbg, x, y, 1.1f, 160, 160, 175, 255); y -= lh + 4;
+
+                // ── Section: Display ──
+                snprintf(dbg, sizeof(dbg), "Render: %dx%d  Window: %dx%d  Draw: %dx%d",
+                         GAME_W, GAME_H, g_win_w, g_win_h, g_draw_w, g_draw_h);
+                g_gui.draw_string(dbg, x, y, 1.1f, 130, 130, 155, 255); y -= lh;
+
+                snprintf(dbg, sizeof(dbg), "Mouse: %d,%d   DT: %.4fs", mouse_x, mouse_y, dt_seconds);
+                g_gui.draw_string(dbg, x, y, 1.1f, 130, 130, 155, 255); y -= lh + 4;
+
+                // ── Section: Engine & Backend ──
+                // Separator line
+                glColor4ub(60, 60, 80, 200);
+                glBegin(GL_QUADS);
+                glVertex2f(x, y + 6); glVertex2f(420, y + 6);
+                glVertex2f(420, y + 5); glVertex2f(x, y + 5);
+                glEnd();
+                y -= 4;
+
+                // CPU Engine
+                const char* engine_str = g_emulator_64 ? g_emulator_64->engine_name() : "None";
+                bool is_dynarmic = g_emulator_64 && strcmp(g_emulator_64->engine_name(), "Dynarmic") == 0;
+                snprintf(dbg, sizeof(dbg), "CPU Engine: %s", engine_str);
+                g_gui.draw_string(dbg, x, y, 1.3f,
+                    is_dynarmic ? 255 : 200,   // Dynarmic = gold, Unicorn = cyan
+                    is_dynarmic ? 200 : 220,
+                    is_dynarmic ? 60  : 255, 255);
+                y -= lh;
+
+                // Graphics API
+                const char* api_str = (g_graphics_api == GraphicsAPI::VULKAN) ? "Vulkan" : "OpenGL";
+                snprintf(dbg, sizeof(dbg), "Graphics: %s", api_str);
+                g_gui.draw_string(dbg, x, y, 1.3f, 100, 200, 255, 255); y -= lh;
+
+                // Scale mode
                 const char* fbo_mode_str = "Unknown";
                 if (g_fbo_mode == FBOScale::SHARP_BILINEAR) fbo_mode_str = "Sharp-Bilinear";
                 else if (g_fbo_mode == FBOScale::NEAREST) fbo_mode_str = "Nearest";
                 else if (g_fbo_mode == FBOScale::CRT_SCANLINE) fbo_mode_str = "CRT Scanline";
                 else if (g_fbo_mode == FBOScale::FSR) fbo_mode_str = "FSR 1.0";
-                snprintf(dbg, sizeof(dbg), "Scale Mode: %s", fbo_mode_str);
-                g_gui.draw_string(dbg, 20, g_win_h - 165, 1.2f, 255, 200, 100, 255);
+                snprintf(dbg, sizeof(dbg), "Scaler: %s", fbo_mode_str);
+                g_gui.draw_string(dbg, x, y, 1.2f, 255, 200, 100, 255); y -= lh;
 
-                snprintf(dbg, sizeof(dbg), "Speed: %s  %s", mod_speed_label(), g_game_paused ? "|| PAUSED" : "");
-                g_gui.draw_string(dbg, 20, g_win_h - 185, 1.2f, 255, 180, 50, 255);
-                snprintf(dbg, sizeof(dbg), "F1:GUI F2:Ctrl F3:Dbg F4:Scale F5:Cam F6:PostFX F7:Type F10:HUD");
-                g_gui.draw_string(dbg, 20, g_win_h - 202, 1.1f, 100, 100, 120, 200);
-                if (g_typing_mode) {
-                    g_gui.draw_string("TYPING MODE ACTIVE", 20, g_win_h - 218, 1.2f, 255, 100, 100, 255);
+                // PostFX
+                if (g_postfx.enabled) {
+                    snprintf(dbg, sizeof(dbg), "PostFX: %s", g_postfx.preset_name);
+                    g_gui.draw_string(dbg, x, y, 1.2f, 255, 160, 80, 255);
+                } else {
+                    g_gui.draw_string("PostFX: Off", x, y, 1.2f, 100, 100, 110, 200);
                 }
-                char cam_dbg[128];
-                cam_debug_string(cam_dbg, sizeof(cam_dbg));
-                g_gui.draw_string(cam_dbg, 20, g_win_h - 222, 1.1f,
-                    g_cam_active ? 0 : 120,
-                    g_cam_active ? 220 : 120,
-                    g_cam_active ? 100 : 120, 255);
+                y -= lh;
 
                 // Binary info
                 const BinaryInfo* binfo = g_binary_selector.get_loaded_info();
                 if (binfo) {
                     snprintf(dbg, sizeof(dbg), "Binary: %s (%s)", binfo->filename.c_str(), binfo->label.c_str());
-                    g_gui.draw_string(dbg, 20, g_win_h - 240, 1.2f, 100, 200, 255, 255);
                 } else {
                     snprintf(dbg, sizeof(dbg), "Binary: %s", g_lib_name.c_str());
-                    g_gui.draw_string(dbg, 20, g_win_h - 240, 1.2f, 100, 200, 255, 255);
                 }
+                g_gui.draw_string(dbg, x, y, 1.1f, 120, 180, 255, 255); y -= lh;
 
-                // PostFX info
-                if (g_postfx.enabled) {
-                    snprintf(dbg, sizeof(dbg), "PostFX: %s", g_postfx.preset_name);
-                    g_gui.draw_string(dbg, 20, g_win_h - 255, 1.2f, 255, 180, 100, 255);
-                } else {
-                    g_gui.draw_string("PostFX: Off", 20, g_win_h - 255, 1.2f, 120, 120, 120, 200);
-                }
+                // Speed
+                snprintf(dbg, sizeof(dbg), "Speed: %s  %s", mod_speed_label(), g_game_paused ? "|| PAUSED" : "");
+                g_gui.draw_string(dbg, x, y, 1.2f, 255, 180, 50, 255); y -= lh + 4;
 
-                // Graphics API
-                const char* api_str = (g_graphics_api == GraphicsAPI::VULKAN) ? "Vulkan" : "OpenGL";
-                snprintf(dbg, sizeof(dbg), "Graphics API: %s", api_str);
-                g_gui.draw_string(dbg, 20, g_win_h - 272, 1.2f, 100, 220, 255, 255);
-
-                // Player Stats (from SRE GUI hook)
+                // ── Section: Player Stats ──
                 if (sre_gui_scene_active_addr && g_guest_memory) {
                     int scene_active = *(int*)(g_guest_memory + sre_gui_scene_active_addr);
                     if (scene_active && sre_player_hp_addr) {
@@ -3619,19 +3657,39 @@ void load_and_boot_arm64() {
                         int xp     = sre_player_xp_addr ? *(int*)(g_guest_memory + sre_player_xp_addr) : 0;
                         int level  = sre_player_level_addr ? *(int*)(g_guest_memory + sre_player_level_addr) : 0;
                         int atk    = sre_player_atk_level_addr ? *(int*)(g_guest_memory + sre_player_atk_level_addr) : 0;
-                        
+
+                        // Separator
+                        glColor4ub(60, 60, 80, 200);
+                        glBegin(GL_QUADS);
+                        glVertex2f(x, y + 6); glVertex2f(420, y + 6);
+                        glVertex2f(420, y + 5); glVertex2f(x, y + 5);
+                        glEnd();
+                        y -= 4;
+
                         snprintf(dbg, sizeof(dbg), "HP: %d/%d  Mana: %d/%d  Coins: %d",
                                  hp, max_hp, mana, max_mn, coins);
-                        // Color HP based on health: green > yellow > red
                         int hp_pct = max_hp > 0 ? (hp * 100 / max_hp) : 0;
                         uint8_t hr = hp_pct > 50 ? 80 : 255;
                         uint8_t hg = hp_pct > 25 ? 255 : 80;
-                        g_gui.draw_string(dbg, 20, g_win_h - 275, 1.3f, hr, hg, 80, 255);
-                        
-                        snprintf(dbg, sizeof(dbg), "Lv.%d  XP: %d  ATK: %d",
-                                 level, xp, atk);
-                        g_gui.draw_string(dbg, 20, g_win_h - 295, 1.3f, 180, 140, 255, 255);
+                        g_gui.draw_string(dbg, x, y, 1.3f, hr, hg, 80, 255); y -= lh;
+
+                        snprintf(dbg, sizeof(dbg), "Lv.%d  XP: %d  ATK: %d", level, xp, atk);
+                        g_gui.draw_string(dbg, x, y, 1.3f, 180, 140, 255, 255); y -= lh;
                     }
+                }
+
+                // ── Hotkey legend ──
+                y -= 2;
+                g_gui.draw_string("F1:GUI F2:Ctrl F3:Debug F4:Scale F5:Cam F6:PostFX", x, y, 1.0f, 80, 80, 100, 180); y -= 14;
+                g_gui.draw_string("F7:Type F8:Pause F10:HUD F12:Fullscreen", x, y, 1.0f, 80, 80, 100, 180);
+
+                if (g_typing_mode) {
+                    g_gui.draw_string("TYPING MODE", 350, g_win_h - 30, 1.2f, 255, 80, 80, 255);
+                }
+                if (g_cam_active) {
+                    char cam_dbg[128];
+                    cam_debug_string(cam_dbg, sizeof(cam_dbg));
+                    g_gui.draw_string(cam_dbg, x, y - 14, 1.0f, 80, 200, 120, 255);
                 }
 
                 glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix();
@@ -4404,10 +4462,19 @@ void load_and_boot_arm64() {
             total_asset_opens += g_frame_stats.asset_opens;
             
             if (completed_frames == 1 || completed_frames == 10 || 
+                completed_frames <= 20 ||
                 completed_frames % 100 == 0) {
                 std::cout << "[Frame64 " << completed_frames << "] "
                           << "draws=" << g_frame_stats.draw_calls
                           << " tex_binds=" << g_frame_stats.texture_binds
+                          << " tex_ups=" << g_frame_stats.tex_uploads
+                          << " verts=" << g_frame_stats.vertices_submitted
+                          << " vtx_calls=" << g_frame_stats.vertex_pointer_calls
+                          << " texc_calls=" << g_frame_stats.texcoord_pointer_calls
+                          << " matrix=" << g_frame_stats.matrix_ops
+                          << " state=" << g_frame_stats.state_changes
+                          << " assets=" << g_frame_stats.asset_opens
+                          << " clears=" << g_frame_stats.clear_calls
                           << std::endl;
                 draw_batcher_print_stats();
             }
@@ -4480,6 +4547,12 @@ int main(int argc, char* argv[]) {
         if (strcmp(argv[i], "--headless") == 0) headless = true;
 #ifdef VULKAN_BACKEND
         if (strcmp(argv[i], "--vulkan") == 0) g_graphics_api = GraphicsAPI::VULKAN;
+#endif
+#ifdef USE_DYNARMIC
+        if (strcmp(argv[i], "--engine=dynarmic") == 0 || strcmp(argv[i], "--dynarmic") == 0) {
+            g_use_dynarmic = true;
+            std::cout << "[Main] Engine: Dynarmic JIT" << std::endl;
+        }
 #endif
         if (strcmp(argv[i], "--test-lib") == 0) {
             g_lib_name = "engine/v1.4.12/armeabi-v7a/libswordigo.so";
@@ -4606,6 +4679,9 @@ int main(int argc, char* argv[]) {
             g_graphics_api = lconf.graphics_api;
             g_lib_name = lconf.selected_binary;
             g_assets_dir = lconf.assets_dir;
+#ifdef USE_DYNARMIC
+            g_use_dynarmic = lconf.use_dynarmic;
+#endif
             // Re-initialize the asset manager with the correct assets directory
             // (asset_manager_init was called at startup with the default "assets" path)
             asset_manager_init(get_data_path(g_assets_dir).c_str());
@@ -4614,6 +4690,7 @@ int main(int argc, char* argv[]) {
             g_binary_selector.save_user_instances(user_instances_path);
             std::cout << "[Main] Launcher: " 
                       << (g_graphics_api == GraphicsAPI::VULKAN ? "Vulkan" : "OpenGL")
+                      << " | Engine: " << (g_use_dynarmic ? "Dynarmic" : "Unicorn")
                       << " | Binary: " << g_lib_name
                       << " | Assets: " << g_assets_dir << std::endl;
         }

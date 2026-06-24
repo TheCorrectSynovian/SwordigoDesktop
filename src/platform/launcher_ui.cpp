@@ -40,7 +40,7 @@ static void      DrawToolbar(bool& running, LaunchConfig& cfg, bool& show_option
 static void      DrawInstancePanel(BinarySelector& selector, int& selected, float width);
 static void      DrawDetailPanel(BinarySelector& selector, int selected,
                                  LaunchConfig& cfg, bool& running, int& api_sel,
-                                 bool& show_save_editor, float mods_width);
+                                 int& engine_sel, bool& show_save_editor, float mods_width);
 static void      DrawModsPanel(float width);
 static void      DrawStatusBar(int selected, const BinarySelector& selector);
 static void      DrawOptionsModal(bool& show_options);
@@ -580,7 +580,7 @@ static void DrawInstancePanel(BinarySelector& selector, int& selected, float wid
 
 static void DrawDetailPanel(BinarySelector& selector, int selected,
                             LaunchConfig& cfg, bool& running, int& api_sel,
-                            bool& show_save_editor, float mods_width) {
+                            int& engine_sel, bool& show_save_editor, float mods_width) {
     ImGuiViewport* vp = ImGui::GetMainViewport();
     float inst_width = 250.0f;
     ImVec2 panel_pos(vp->WorkPos.x + inst_width, vp->WorkPos.y + 50);
@@ -696,6 +696,7 @@ static void DrawDetailPanel(BinarySelector& selector, int selected,
     float launch_w = ImGui::GetContentRegionAvail().x;
     if (ImGui::Button("\xe2\x96\xb6  LAUNCH", ImVec2(launch_w, 50))) {
         cfg.graphics_api = (api_sel == 0) ? GraphicsAPI::OPENGL : GraphicsAPI::VULKAN;
+        cfg.use_dynarmic = (engine_sel == 1);
         cfg.selected_binary = b.filepath;
         cfg.assets_dir = b.assets_dir;
         cfg.game_type = b.game_type;
@@ -715,6 +716,24 @@ static void DrawDetailPanel(BinarySelector& selector, int selected,
     ImGui::RadioButton("OpenGL", &api_sel, 0);
     ImGui::SameLine();
     ImGui::RadioButton("Vulkan", &api_sel, 1);
+
+    ImGui::Spacing();
+
+    // === CPU Engine radio ===
+    ImGui::Text("CPU Engine:");
+    ImGui::SameLine();
+    ImGui::RadioButton("Unicorn (TCG)", &engine_sel, 0);
+    ImGui::SameLine();
+#ifdef USE_DYNARMIC
+    ImGui::RadioButton("Dynarmic (JIT)", &engine_sel, 1);
+#else
+    ImGui::BeginDisabled();
+    ImGui::RadioButton("Dynarmic (JIT)", &engine_sel, 1);
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Build with DYNARMIC=1 to enable");
+    }
+#endif
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -1425,6 +1444,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
     // ── Main loop ──
     bool running = true;
     int api_sel = 0;        // 0 = OpenGL, 1 = Vulkan
+    int engine_sel = 1;     // 0 = Unicorn, 1 = Dynarmic (default: JIT for performance)
     bool show_options = false;
     bool show_save_editor = false;
 
@@ -1449,6 +1469,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                         const auto& cur_bins = selector.get_binaries();
                         if (!cur_bins.empty() && bin_sel >= 0 && bin_sel < (int)cur_bins.size()) {
                             cfg.graphics_api = (api_sel == 0) ? GraphicsAPI::OPENGL : GraphicsAPI::VULKAN;
+                            cfg.use_dynarmic = (engine_sel == 1);
                             cfg.selected_binary = cur_bins[bin_sel].filepath;
                             cfg.assets_dir = cur_bins[bin_sel].assets_dir;
                             cfg.game_type = cur_bins[bin_sel].game_type;
@@ -1504,7 +1525,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
 
         DrawToolbar(running, cfg, show_options);
         DrawInstancePanel(selector, bin_sel, inst_panel_w);
-        DrawDetailPanel(selector, bin_sel, cfg, running, api_sel, show_save_editor, mods_panel_w);
+        DrawDetailPanel(selector, bin_sel, cfg, running, api_sel, engine_sel, show_save_editor, mods_panel_w);
         DrawModsPanel(mods_panel_w);
         DrawStatusBar(bin_sel, selector);
 

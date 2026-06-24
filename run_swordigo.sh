@@ -1,6 +1,6 @@
 #!/bin/bash
 # run_swordigo.sh — One-shot build, install, and run
-# Usage: ./run_swordigo.sh [--clean] [--sre-only] [--no-build]
+# Usage: ./run_swordigo.sh [--clean] [--sre-only] [--no-build] [--no-dynarmic]
 
 set -e
 cd ~/SwordigoDesktop
@@ -8,22 +8,35 @@ cd ~/SwordigoDesktop
 CLEAN=0
 SRE_ONLY=0
 NO_BUILD=0
+USE_DYNARMIC=1
 
 for arg in "$@"; do
     case $arg in
-        --clean)    CLEAN=1 ;;
-        --sre-only) SRE_ONLY=1 ;;
-        --no-build) NO_BUILD=1 ;;
+        --clean)       CLEAN=1 ;;
+        --sre-only)    SRE_ONLY=1 ;;
+        --no-build)    NO_BUILD=1 ;;
+        --no-dynarmic) USE_DYNARMIC=0 ;;
         --help)
-            echo "Usage: ./run_swordigo.sh [--clean] [--sre-only] [--no-build]"
-            echo "  --clean     Full clean rebuild"
-            echo "  --sre-only  Only rebuild libsre.so"
-            echo "  --no-build  Skip build, just install and run"
+            echo "Usage: ./run_swordigo.sh [--clean] [--sre-only] [--no-build] [--no-dynarmic]"
+            echo "  --clean        Full clean rebuild"
+            echo "  --sre-only     Only rebuild libsre.so"
+            echo "  --no-build     Skip build, just install and run"
+            echo "  --no-dynarmic  Use Unicorn interpreter instead of Dynarmic JIT"
             exit 0 ;;
     esac
 done
 
 ENGINE_DIR="$HOME/.local/share/swordigo-desktop/engine/v1.4.12/arm64-v8a"
+DYNARMIC_LIB="deps/dynarmic/build/src/dynarmic/libdynarmic.a"
+
+# ---- Build Dynarmic JIT (if needed) ----
+if [ $USE_DYNARMIC -eq 1 ] && [ $NO_BUILD -eq 0 ]; then
+    if [ ! -f "$DYNARMIC_LIB" ]; then
+        echo "=== Building Dynarmic JIT from source (first time only) ==="
+        make dynarmic-build
+        echo ""
+    fi
+fi
 
 # ---- Build ----
 if [ $NO_BUILD -eq 0 ]; then
@@ -36,10 +49,17 @@ if [ $NO_BUILD -eq 0 ]; then
         echo "=== Building libsre.so only ==="
         make libsre.so
     else
-        echo "=== Building everything ==="
-        make -j$(nproc)
-        echo "=== Building asset_viewer ==="
-        make asset_viewer
+        if [ $USE_DYNARMIC -eq 1 ]; then
+            echo "=== Building with Dynarmic JIT ==="
+            make -j$(nproc) DYNARMIC=1
+            echo "=== Building asset_viewer ==="
+            make asset_viewer
+        else
+            echo "=== Building with Unicorn ==="
+            make -j$(nproc)
+            echo "=== Building asset_viewer ==="
+            make asset_viewer
+        fi
     fi
 fi
 
@@ -54,7 +74,6 @@ if [ -f libsre.so ]; then
         fi
     done
     if [ $SRE_INSTALLED -eq 0 ]; then
-        # Fallback: ensure at least the primary engine dir gets it
         mkdir -p "$ENGINE_DIR"
         cp libsre.so "$ENGINE_DIR/libsre.so"
         echo "[OK] libsre.so -> $ENGINE_DIR/ (fallback)"
@@ -76,7 +95,11 @@ fi
 # ---- Run ----
 echo ""
 echo "=========================================="
-echo "  Launching Swordigo Desktop (ARM64)"
+if [ $USE_DYNARMIC -eq 1 ]; then
+    echo "  Launching Swordigo Desktop (Dynarmic JIT)"
+else
+    echo "  Launching Swordigo Desktop (Unicorn)"
+fi
 echo "=========================================="
 echo ""
 exec ./swordigo_boot "$@"

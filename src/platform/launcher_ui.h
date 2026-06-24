@@ -14,6 +14,7 @@ struct LaunchConfig {
     std::string assets_dir = "assets";       // "assets" for vanilla, "rl_assets" for RLSwordigo
     std::string game_type = "Swordigo";      // "Swordigo" or "RLSwordigo"
     bool should_launch = true;  // false if user closed the launcher
+    bool use_dynarmic = false;  // false = Unicorn (default), true = Dynarmic JIT
 };
 
 // Show the unified launcher window and block until user clicks Launch or closes.
