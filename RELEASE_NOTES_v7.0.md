@@ -1,4 +1,5 @@
 # Swordigo Desktop v7.0 — Release Notes
+<img width="929" height="247" alt="swordigo_desktop_text" src="https://github.com/user-attachments/assets/35a7e21c-41a3-45ae-85c0-73928260a303" />
 
 **Release Date:** June 24, 2026  
 **Codename:** *The Performance Revolution*  
@@ -25,15 +26,16 @@ The headline feature of v7.0 is a **Dynarmic Just-In-Time compiler** that replac
 - Unicorn Engine is still available via `--no-dynarmic` for debugging or compatibility
 
 ### 🎮 RLSwordigo Support
+<img width="2340" height="1319" alt="Screenshot From 2026-06-24 15-43-17 (1)" src="https://github.com/user-attachments/assets/c363e38d-e3cc-491d-b7b1-35f36b68b200" />
 
 - Play the roguelike Swordigo spinoff through custom instances
 - Fully supported via the instance management system
 
 ### 🔌 KiwiAPI Compatibility (Phase 1 & 2)
 
+- For RLSwordigo
 - SWKiwi modloader hooks for the mod ecosystem
 - Enables third-party mod loading through the KiwiAPI interface
-- Combatch mod compatibility via `io.open` + `fgets`/`fscanf` bridges (full file I/O)
 
 ### 💎 Bauble API (Phase 3.3)
 
@@ -178,7 +180,6 @@ swordigo-setup
 
 | Issue | Status | Notes |
 |-------|--------|-------|
-| **Bolt/timer misbehavior** | 🟡 Known | Enemy attack rate differences from Android due to timing misalignment in ARM64 emulation |
 | **Text input crash** | 🔴 Open | Save name entry → wild jump crash, needs investigation |
 
 ### ARM32 (armeabi-v7a)
@@ -186,6 +187,7 @@ swordigo-setup
 | Issue | Status | Notes |
 |-------|--------|-------|
 | **No SRE** | 🟡 By design | `libsre.so` is ARM64 only — ARM32 runs without engine hooks |
+| **Some event processing failiures** | 🟡 Open | Open Issue, contributors can help |
 
 ---
 
