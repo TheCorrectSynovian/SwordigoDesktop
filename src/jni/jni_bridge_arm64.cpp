@@ -2579,6 +2579,65 @@ static void bridge_ftell(void* emu_ptr) {
     }
 }
 
+// fgets(char* s, int size, FILE* stream) → char* (or NULL)
+static void bridge_fgets(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t buf_ptr = emu->get_reg(0);
+    int size = (int)emu->get_reg(1);
+    uint32_t handle = emu->get_reg(2);
+    if (g_file_handles.count(handle) && buf_ptr != 0 && size > 0) {
+        char* result = fgets((char*)(memory + buf_ptr), size, g_file_handles[handle]);
+        emu->set_reg(0, result ? buf_ptr : 0);
+    } else {
+        emu->set_reg(0, 0);
+    }
+}
+
+// fscanf(FILE* stream, const char* fmt, ...) — only supports "%lf" for SRE io.read("*n")
+static void bridge_fscanf(void* emu_ptr) {
+    EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t handle = emu->get_reg(0);
+    uint32_t fmt_ptr = emu->get_reg(1);
+    const char* fmt = (const char*)(memory + fmt_ptr);
+    
+    if (g_file_handles.count(handle) && fmt) {
+        // We only support "%lf" (read double) which is what SRE's io uses
+        if (strstr(fmt, "%lf") || strstr(fmt, "%f")) {
+            uint32_t out_ptr = emu->get_reg(2);
+            double val = 0.0;
+            int result = fscanf(g_file_handles[handle], "%lf", &val);
+            if (out_ptr != 0) {
+                *(double*)(memory + out_ptr) = val;
+            }
+            emu->set_reg(0, (uint32_t)result);
+        } else if (strstr(fmt, "%d") || strstr(fmt, "%i")) {
+            uint32_t out_ptr = emu->get_reg(2);
+            int val = 0;
+            int result = fscanf(g_file_handles[handle], "%d", &val);
+            if (out_ptr != 0) {
+                *(int*)(memory + out_ptr) = val;
+            }
+            emu->set_reg(0, (uint32_t)result);
+        } else if (strstr(fmt, "%s")) {
+            uint32_t out_ptr = emu->get_reg(2);
+            if (out_ptr != 0) {
+                int result = fscanf(g_file_handles[handle], "%255s", (char*)(memory + out_ptr));
+                emu->set_reg(0, (uint32_t)result);
+            } else {
+                emu->set_reg(0, 0);
+            }
+        } else {
+            // Unsupported format — return 0 items read
+            std::cout << "[File] fscanf: unsupported format \"" << fmt << "\"" << std::endl;
+            emu->set_reg(0, 0);
+        }
+    } else {
+        emu->set_reg(0, 0);
+    }
+}
+
 // --- Directory / System Bridges ---
 static void bridge_mkdir(void* emu_ptr) {
     EmulatorArm64* emu = (EmulatorArm64*)emu_ptr;
@@ -6136,6 +6195,8 @@ void JniBridge64::init_standard_bridges() {
     register_handler("fseek", bridge_fseek);
     register_handler("ftell", bridge_ftell);
     register_handler("fflush", bridge_fflush);
+    register_handler("fgets", bridge_fgets);
+    register_handler("fscanf", bridge_fscanf);
     register_handler("lseek", bridge_lseek);
     register_handler("gzdopen", bridge_gzdopen);
     register_handler("gzread", bridge_gzread);

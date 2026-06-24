@@ -127,6 +127,7 @@ extern pfn_lua_pushlstring g_lua_pushlstring;
 /* Convenience macros */
 #define lua_tostring(L, idx) g_lua_tolstring(L, idx, (sre_size_t*)0)
 #define lua_pop(L, n)        g_lua_settop(L, -(n)-1)
+#define lua_upvalueindex(i)  (LUA_GLOBALSINDEX - (i))
 
 /* ProgramState layout (ARM64, v1.4.12) */
 #define PS_LUA_STATE     0x00  /* lua_State* L */
