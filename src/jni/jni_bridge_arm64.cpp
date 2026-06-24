@@ -6051,6 +6051,7 @@ void JniBridge64::init_standard_bridges() {
     register_handler("_setjmp", bridge_setjmp);
     register_handler("sigsetjmp", bridge_setjmp);
     register_handler("longjmp", bridge_longjmp);
+    register_handler("_longjmp", bridge_longjmp);
     register_handler("siglongjmp", bridge_longjmp);
 
     // misc libc
