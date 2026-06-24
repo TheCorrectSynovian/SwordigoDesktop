@@ -4592,6 +4592,9 @@ int main(int argc, char* argv[]) {
             g_graphics_api = lconf.graphics_api;
             g_lib_name = lconf.selected_binary;
             g_assets_dir = lconf.assets_dir;
+            // Re-initialize the asset manager with the correct assets directory
+            // (asset_manager_init was called at startup with the default "assets" path)
+            asset_manager_init(get_data_path(g_assets_dir).c_str());
             g_binary_selector.set_loaded(g_lib_name);
             // Persist any user instances created during this session
             g_binary_selector.save_user_instances(user_instances_path);
