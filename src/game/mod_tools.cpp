@@ -5,6 +5,7 @@
 #include <cmath>
 #include <iostream>
 #include <algorithm>
+#include <GL/gl.h>
 
 // ============================================================
 //  SwordigoDesktop — Mod Tools Implementation
@@ -152,3 +153,109 @@ void mod_render_overlay(GuiRenderer& gui, int win_w, int win_h, float dt) {
         ++it;
     }
 }
+
+// ---------------------------------------------------------------
+// Achievement Popup System
+// ---------------------------------------------------------------
+
+struct AchievementPopup {
+    std::string title;
+    std::string desc;
+    float elapsed;
+    float duration;
+};
+
+static std::vector<AchievementPopup> s_achievement_queue;
+static uint64_t s_ach_pending_offset = 0;
+static uint64_t s_ach_title_offset = 0;
+static uint64_t s_ach_desc_offset = 0;
+
+void mod_achievement_poll(uint8_t* sre_base, uint64_t sre_load_addr) {
+    if (!sre_base || !sre_load_addr) return;
+
+    // Resolve symbol offsets lazily (set by main.cpp after SRE load)
+    if (s_ach_pending_offset == 0) return;
+
+    int* pending = (int*)(sre_base + s_ach_pending_offset);
+    if (*pending) {
+        char* title = (char*)(sre_base + s_ach_title_offset);
+        char* desc = (char*)(sre_base + s_ach_desc_offset);
+
+        AchievementPopup popup;
+        popup.title = title;
+        popup.desc = desc;
+        popup.elapsed = 0.0f;
+        popup.duration = 4.0f;  // 4 second display
+
+        s_achievement_queue.push_back(popup);
+
+        // Clear pending flag
+        *pending = 0;
+        title[0] = '\0';
+        desc[0] = '\0';
+
+        std::cout << "[Achievement] \xF0\x9F\x8F\x86 Unlocked: " << popup.title << std::endl;
+    }
+}
+
+void mod_achievement_set_offsets(uint64_t pending, uint64_t title, uint64_t desc) {
+    s_ach_pending_offset = pending;
+    s_ach_title_offset = title;
+    s_ach_desc_offset = desc;
+}
+
+void mod_achievement_render(GuiRenderer& gui, int win_w, int win_h, float dt) {
+    if (s_achievement_queue.empty()) return;
+
+    auto& popup = s_achievement_queue.front();
+    popup.elapsed += dt;
+
+    if (popup.elapsed >= popup.duration) {
+        s_achievement_queue.erase(s_achievement_queue.begin());
+        return;
+    }
+
+    // Animation: slide in from top (0-0.5s), hold (0.5-3.5s), fade out (3.5-4.0s)
+    float slide_t = popup.elapsed < 0.5f ? popup.elapsed / 0.5f : 1.0f;
+    int alpha = 255;
+    if (popup.elapsed > popup.duration - 0.5f) {
+        alpha = (int)(255.0f * (popup.duration - popup.elapsed) / 0.5f);
+        if (alpha < 0) alpha = 0;
+    }
+
+    // Banner dimensions
+    float banner_w = 380.0f;
+    float banner_h = 60.0f;
+    float banner_x = (win_w - banner_w) / 2.0f;
+    float target_y = win_h - 75.0f;
+    float banner_y = target_y + (1.0f - slide_t) * 80.0f;  // slide down from above
+
+    // Dark background (raw OpenGL since draw_rect is private)
+    int bg_alpha = (int)(alpha * 0.85f);
+    glColor4ub(20, 20, 30, bg_alpha);
+    glBegin(GL_QUADS);
+    glVertex2f(banner_x, banner_y);
+    glVertex2f(banner_x + banner_w, banner_y);
+    glVertex2f(banner_x + banner_w, banner_y + banner_h);
+    glVertex2f(banner_x, banner_y + banner_h);
+    glEnd();
+
+    // Gold border (2px outline)
+    glColor4ub(255, 200, 50, alpha);
+    glLineWidth(2.0f);
+    glBegin(GL_LINE_LOOP);
+    glVertex2f(banner_x, banner_y);
+    glVertex2f(banner_x + banner_w, banner_y);
+    glVertex2f(banner_x + banner_w, banner_y + banner_h);
+    glVertex2f(banner_x, banner_y + banner_h);
+    glEnd();
+
+    // Title (gold text)
+    std::string title_str = "Achievement Unlocked: " + popup.title;
+    gui.draw_string(title_str, banner_x + 12, banner_y + banner_h - 18, 1.3f, 255, 215, 0, alpha);
+
+    // Description (grey text)
+    gui.draw_string(popup.desc, banner_x + 12, banner_y + banner_h - 40, 1.0f, 200, 200, 200, alpha);
+}
+
+

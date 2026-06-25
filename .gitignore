@@ -143,3 +143,7 @@ trash/
 # Instance scripts (local only)
 instx.sh
 cache/instx.sh
+
+# -------- DYNARMIC JIT BUILD OUTPUT --------
+# Source is included, build output is rebuilt from source
+deps/dynarmic/build/

@@ -225,6 +225,24 @@ void BinarySelector::scan_arch_dir(const std::string& arch_path, const std::stri
         }
     }
 
+    // If libsre.so is present in this directory, auto-strip libmini.so and libGlossHook.so
+    // from dependencies (SRE replaces their functionality)
+    if (fs::exists(arch_path + "/libsre.so")) {
+        info.dependencies.erase(
+            std::remove_if(info.dependencies.begin(), info.dependencies.end(),
+                [](const std::string& d) {
+                    return d == "libmini.so" || d == "libGlossHook.so" || d == "libkiwi.so";
+                }), info.dependencies.end());
+        info.dep_paths.erase(
+            std::remove_if(info.dep_paths.begin(), info.dep_paths.end(),
+                [](const std::string& p) {
+                    return p.find("libmini.so") != std::string::npos ||
+                           p.find("libGlossHook.so") != std::string::npos ||
+                           p.find("libkiwi.so") != std::string::npos;
+                }), info.dep_paths.end());
+        std::cout << "[BinSel] SRE detected in " << arch_path << ", stripped modloader deps" << std::endl;
+    }
+
     // Compute hash
     std::cout << "[BinSel] Hashing " << version_dir << "/" << arch_string(arch) 
               << "/libswordigo.so..." << std::flush;
@@ -461,10 +479,33 @@ bool BinarySelector::add_custom_instance(const std::string& so_filepath, const s
     }
     elf_file.close();
 
-    // Create directory: engine/custom-NAME/<arch>/
+    // Create directory: <data_dir>/engine/custom-NAME/<arch>/
+    // Derive data dir from so_filepath (which is absolute, e.g. .../engine/v1.4.12/arm64-v8a/libswordigo.so)
     std::string version_dir = "custom-" + name;
-    std::string dest_dir = "engine/" + version_dir + "/" + arch_dir;
-    std::string dest_path = dest_dir + "/libswordigo.so";
+    std::string rel_dest = "engine/" + version_dir + "/" + arch_dir;
+    std::string rel_dest_so = rel_dest + "/libswordigo.so";
+    
+    // Extract base data directory from absolute so_filepath
+    // so_filepath = "<data_dir>/engine/<version>/<arch>/libswordigo.so"
+    std::string data_dir;
+    {
+        fs::path sp(so_filepath);
+        // Walk up to find the "engine" component
+        fs::path parent = sp.parent_path(); // <data_dir>/engine/<version>/<arch>
+        while (!parent.empty() && parent.filename() != "engine") {
+            parent = parent.parent_path();
+        }
+        if (parent.filename() == "engine") {
+            data_dir = parent.parent_path().string(); // <data_dir>
+        }
+    }
+    if (data_dir.empty()) {
+        // Fallback: use parent 4 levels up from so_filepath
+        data_dir = fs::path(so_filepath).parent_path().parent_path().parent_path().parent_path().string();
+    }
+    
+    std::string dest_dir = data_dir + "/" + rel_dest;
+    std::string dest_path = data_dir + "/" + rel_dest_so;
 
     try {
         fs::create_directories(dest_dir);
@@ -493,7 +534,7 @@ bool BinarySelector::add_custom_instance(const std::string& so_filepath, const s
     // Build BinaryInfo
     BinaryInfo info;
     info.filename = "libswordigo.so";
-    info.filepath = dest_path;
+    info.filepath = rel_dest_so;
     info.version_dir = version_dir;
     info.arch = arch;
     info.file_size = fs::file_size(dest_path);
@@ -797,10 +838,11 @@ void BinarySelector::load_user_instances(const std::string& json_path) {
 
 // ── save_user_instances: Write only custom/user instances ──
 void BinarySelector::save_user_instances(const std::string& json_path) const {
-    // Filter to only custom instances (version_dir starts with "custom-")
+    // Filter to custom instances (custom prefix OR non-standard assets)
     std::vector<const BinaryInfo*> custom_bins;
     for (const auto& b : binaries) {
-        if (b.version_dir.substr(0, 7) == "custom-") {
+        if (b.version_dir.substr(0, 7) == "custom-" ||
+            (b.assets_dir != "assets" && b.assets_dir != "rl_assets" && !b.assets_dir.empty())) {
             custom_bins.push_back(&b);
         }
     }

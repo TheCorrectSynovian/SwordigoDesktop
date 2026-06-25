@@ -2,6 +2,69 @@
 
 All notable changes to Swordigo Desktop.
 
+## [v7.0] — 2026-06-24
+
+### Added
+- **Dynarmic JIT compiler** — ARM64 code at near-native speed (60fps), replaces Unicorn as default
+- **RLSwordigo support** — roguelike spinoff playable through custom instances
+- **KiwiAPI / Combatch mod compatibility** — SWKiwi modloader hooks (Phase 1 & 2)
+- **Bauble API** — Phase 3.3 trinket/bauble system hooks
+- **Achievement System** — Phase 3.4 achievement hooks
+- **io.open + fgets/fscanf bridges** — full file I/O for Combatch mod
+- **_longjmp registration** — Lua error recovery support
+- **Instance management overhaul** — custom assets folders per instance
+
+### Changed
+- Dynarmic is the default ARM64 backend (`make DYNARMIC=1`)
+- Unicorn Engine retained as `--no-dynarmic` fallback
+- F12 fullscreen toggle preserves native display aspect ratio (16:10, etc.)
+- Launcher assets moved to `launcher/` subfolder for clean RPM/DEB installs
+- Package version bumped to 7.0.0
+
+### Fixed
+- F12 fullscreen exit forced 16:9 aspect ratio — now queries actual window size
+- Launcher icon/texture loading on packaged installs (RPM/DEB)
+
+---
+
+## [v6.5] — 2026-06-23
+
+### Added
+- **Complete modding documentation** — 22-file, 414KB `modapi/` suite
+- **Vulkan renderer backend** — full GLES 1.x fixed-function pipeline emulator
+- **Graphics API in F3 debug overlay** — shows OpenGL/Vulkan in HUD
+- **ImGui launcher enhancements** — background texture, instance icons, Add Instance button
+- **sre_mod.c** — mod config shared memory protocol at guest address 0x49000
+
+### Changed
+- Launcher version bumped to v6.5
+- Vulkan radio button no longer labeled "(WIP)"
+
+---
+
+## [v6.0] — 2026-06-22
+
+### Added
+- **Full GUI DrawRect stack** — 8 native hooks for total GUI rendering control
+- **Native GUI rendering** — GUIButton, GUILabel, GUIFrameView reimplemented in C
+- **Button text override system** — rename any button at draw time ("Offers" → "Options")
+- **Scoped button hiding** — remove IAP shop button cleanly
+- **Save Editor** — built into launcher (coins, health, mana, XP, weapon, keys)
+- **Asset Viewer** — standalone tool for browsing game textures, audio, scenes
+- **PostFX pipeline** — 6 shader presets (Cinematic, Retro, Fantasy, Noir, Ethereal, Atmospheric)
+- **SRE Lua Libraries** — custom Lua environment with Mini.*, LNI.*, Components.* tables
+- **Virtual Filesystem** — `sre_vfs.c` for future mod asset layering
+- 30+ active SRE hooks (up from 17 in v5.0)
+
+### Fixed
+- **Wastelands spinlock** — infamous ARM64 freeze in Wastelands region resolved
+- **Death freeze** — ad SDK path hang fixed, instant checkpoint respawn
+- **Death loop** — duplicate hook entry at 0x347efc removed
+- **GameSceneView::Update** — entire function body recovered from TVPG snapshot
+- **Player stats** — 13 volatile globals properly defined and populated
+
+---
+
 ## [v5.0] — 2026-06-21
 
 ### Added

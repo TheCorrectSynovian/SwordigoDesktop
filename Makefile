@@ -22,6 +22,21 @@ ALL_CFLAGS   := $(CFLAGS) $(SDL3_CFLAGS)
 LIBS := $(SDL3_LIBS) $(SDL3I_LIBS) $(VORB_LIBS) $(ZLIB_LIBS) $(OAL_LIBS) \
         -lunicorn -lGL -lpthread -lm
 
+# ========== Dynarmic JIT backend (optional) ==========
+# Build with: make DYNARMIC=1
+# Requires: deps/dynarmic/ (git clone https://github.com/lioncash/dynarmic)
+# First run: make dynarmic-build  (builds the static library)
+DYNARMIC_DIR := deps/dynarmic
+DYNARMIC_BUILD := $(DYNARMIC_DIR)/build
+ifdef DYNARMIC
+    ALL_CXXFLAGS += -DUSE_DYNARMIC -I$(DYNARMIC_DIR)/src
+    LIBS += -L$(DYNARMIC_BUILD)/src/dynarmic -ldynarmic \
+            -L$(DYNARMIC_BUILD)/externals/mcl/src -lmcl \
+            -L$(DYNARMIC_BUILD)/externals/fmt -lfmt \
+            -L$(DYNARMIC_BUILD)/externals/zydis -lZydis \
+            -L$(DYNARMIC_BUILD)/externals/zydis/zycore -lZycore
+endif
+
 # Source files
 CXX_SRCS := \
     src/main.cpp \
@@ -38,6 +53,7 @@ CXX_SRCS := \
     src/game/camera_override.cpp \
     src/game/mod_tools.cpp \
     src/game/save_editor_logic.cpp \
+    src/game/mod_config.cpp \
     src/platform/fbo_scaler.cpp \
     src/platform/pvr_loader.cpp \
     src/platform/io_thread.cpp \
@@ -52,6 +68,11 @@ CXX_SRCS := \
     src/imgui/imgui_widgets.cpp \
     src/imgui/backends/imgui_impl_sdl3.cpp \
     src/imgui/backends/imgui_impl_opengl3.cpp
+
+# Conditionally include Dynarmic backend
+ifdef DYNARMIC
+CXX_SRCS += src/platform/emulator_dynarmic64.cpp
+endif
 
 C_SRCS := \
     src/android/asset_manager.c \
@@ -129,5 +150,23 @@ build/%.o: src/%.c
 clean:
 	rm -f $(ALL_OBJS) $(DEPS) swordigo_boot libsre.so asset_viewer
 
-.PHONY: all clean install-sre asset_viewer
+.PHONY: all clean install-sre asset_viewer dynarmic-build dynarmic-clean
 
+# ========== Dynarmic Build from Source ==========
+# Run this ONCE before building with DYNARMIC=1
+dynarmic-build:
+	@echo "[DYN]  Building Dynarmic JIT from source..."
+	@mkdir -p $(DYNARMIC_BUILD)
+	@cd $(DYNARMIC_BUILD) && cmake .. \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DDYNARMIC_TESTS=OFF \
+		-DDYNARMIC_FRONTENDS=A64 \
+		-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+		-DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+		-Wno-dev
+	@cd $(DYNARMIC_BUILD) && make -j$$(nproc) dynarmic
+	@echo "[DYN]  Dynarmic built successfully!"
+	@echo "[DYN]  Now build SwordigoDesktop with: make DYNARMIC=1 swordigo_boot"
+
+dynarmic-clean:
+	rm -rf $(DYNARMIC_BUILD)

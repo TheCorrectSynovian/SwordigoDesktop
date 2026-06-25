@@ -124,6 +124,67 @@ void sre_init_lua(SreLuaAddrs* addrs) {
 
 static int g_lua_call_safe_errors = 0;
 
+/* Lua error diagnostics — host can read these */
+volatile char g_sre_last_lua_error[256] = {0};
+volatile int g_sre_lua_error_count = 0;
+
+/* File-based error logging — writes to /ExternalFiles/ (MiniPath translated) */
+typedef struct { int _dummy; } FILE;
+extern FILE* fopen(const char* path, const char* mode);
+extern int fwrite(const void* ptr, int size, int count, FILE* fp);
+extern int fclose(FILE* fp);
+extern char g_sre_vfs_path_external[512];
+
+static int sre_itoa(int val, char* buf) {
+    if (val < 0) { buf[0] = '-'; return 1 + sre_itoa(-val, buf + 1); }
+    if (val < 10) { buf[0] = '0' + val; return 1; }
+    int len = sre_itoa(val / 10, buf);
+    buf[len] = '0' + (val % 10);
+    return len + 1;
+}
+
+static void sre_log_lua_error(const char* source, const char* err_msg) {
+    static int log_counter = 0;
+    log_counter++;
+    
+    /* Build log path: <external_dir>/sre_lua_errors.log */
+    char log_path[512];
+    char line[1024];
+    int i = 0, j;
+    
+    if (!g_sre_vfs_path_external[0]) return;
+    
+    for (j = 0; i < 480 && g_sre_vfs_path_external[j]; j++)
+        log_path[i++] = g_sre_vfs_path_external[j];
+    if (i > 0 && log_path[i-1] != '/')
+        log_path[i++] = '/';
+    const char* fname = "sre_lua_errors.log";
+    for (j = 0; i < 510 && fname[j]; j++)
+        log_path[i++] = fname[j];
+    log_path[i] = '\0';
+    
+    /* Build: "[source] #N: msg\n" */
+    i = 0;
+    line[i++] = '[';
+    for (j = 0; i < 490 && source[j]; j++)
+        line[i++] = source[j];
+    line[i++] = ']'; line[i++] = ' '; line[i++] = '#';
+    i += sre_itoa(log_counter, line + i);
+    line[i++] = ':'; line[i++] = ' ';
+    if (err_msg) {
+        for (j = 0; i < 1020 && err_msg[j]; j++)
+            line[i++] = err_msg[j];
+    }
+    line[i++] = '\n';
+    line[i] = '\0';
+    
+    FILE* fp = fopen(log_path, "a");
+    if (fp) {
+        fwrite(line, 1, i, fp);
+        fclose(fp);
+    }
+}
+
 /* Recovery stack — shared with sre_cxa_throw (sre_effects.c) */
 sre_recovery_entry g_sre_recovery_stack[SRE_MAX_RECOVERY];
 int g_sre_recovery_depth = 0;
@@ -235,6 +296,8 @@ void sre_lua_call_safe(lua_State* L, int nargs, int nresults) {
          * errorJmp was already restored by sre_cxa_throw. */
         recovery_pop(my_depth);
         g_lua_call_safe_errors++;
+        /* Note: error message not available via longjmp path */
+        g_sre_lua_error_count++;
         
         /* Restore Lua stack to pre-call state (BUG 3 FIX: guard against underflow) */
         int new_top = saved_top - (nargs + 1);
@@ -257,6 +320,20 @@ void sre_lua_call_safe(lua_State* L, int nargs, int nresults) {
     
     if (result != 0) {
         g_lua_call_safe_errors++;
+        /* Log the error message before discarding */
+        if (g_lua_tolstring) {
+            unsigned long dummy;
+            const char* err = g_lua_tolstring(L, -1, &dummy);
+            if (err) {
+                /* Copy to visible error buffer for host diagnostic */
+                int i;
+                for (i = 0; i < 254 && err[i]; i++)
+                    g_sre_last_lua_error[i] = err[i];
+                g_sre_last_lua_error[i] = '\0';
+                g_sre_lua_error_count++;
+                sre_log_lua_error("lua_call", err);
+            }
+        }
         if (g_lua_settop) {
             g_lua_settop(L, -2);
         }
@@ -303,6 +380,7 @@ static void capture_lua_error(lua_State* L) {
         for (i = 0; err[i] && i < 255; i++)
             g_sre_resume_last_err[i] = err[i];
         g_sre_resume_last_err[i] = 0;
+        sre_log_lua_error("lua_resume", err);
     }
 }
 

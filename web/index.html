@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Swordigo Desktop — Native Linux Port | SRT v6.0</title>
-  <meta name="description" content="Swordigo Desktop v6.0 — a native Linux port of the classic action-adventure, powered by the Swordigo Runtime (SRT) with 30+ engine hooks replacing entire subsystems.">
+  <title>Swordigo Desktop — Native Linux Port | SRT v7.0</title>
+  <meta name="description" content="Swordigo Desktop v7.0 — a native Linux port running at 60fps through the Dynarmic JIT compiler. RLSwordigo support, KiwiAPI compatible, 30+ engine hooks.">
   <meta name="keywords" content="swordigo, desktop, linux, port, game, rpg, adventure, SRT, SRE, ARM emulation">
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="assets/icon_x11.png">
@@ -29,7 +29,7 @@
       </ul>
       <div class="navbar__cta">
         <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" class="btn btn--secondary btn--sm">GitHub</a>
-        <a href="download.html" class="btn btn--primary btn--sm">Download v6.0</a>
+        <a href="download.html" class="btn btn--primary btn--sm">Download v7.0</a>
       </div>
     </div>
   </div>
@@ -39,15 +39,15 @@
   <!-- Hero with game background -->
   <section class="hero hero--bg" style="background-image: linear-gradient(to bottom, rgba(10,14,26,0.4) 0%, rgba(10,14,26,0.85) 70%, rgba(10,14,26,1) 100%), url('assets/hero_bg0.png'); background-size: cover; background-position: center top; min-height: 80vh; display: flex; align-items: center;">
     <div class="container" style="text-align: center;">
-      <span class="badge" style="margin-bottom: 1.5rem; display: inline-block;">v6.0 — June 2026</span>
+      <span class="badge" style="margin-bottom: 1.5rem; display: inline-block;">v7.0 — June 2026</span>
       <h1 class="hero__title" style="font-size: clamp(2.5rem, 6vw, 4.5rem);">Swordigo <span class="grad">Desktop</span></h1>
       <p class="hero__subtitle">
-        The classic 2012 action-adventure — running natively on Linux through the
-        <strong>Swordigo Runtime (SRT)</strong>. 30+ engine hooks. Full GUI ownership.
-        Zero emulation compromises.
+        The classic 2012 action-adventure — running at <strong>60fps</strong> on Linux through the
+        <strong>Dynarmic JIT compiler</strong>. Near-native ARM64 execution.
+        RLSwordigo supported. KiwiAPI compatible.
       </p>
       <div style="display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap;">
-        <a href="download.html" class="btn btn--primary" style="font-size: 1.05rem; padding: 0.75rem 2rem;">⬇ Download v6.0</a>
+        <a href="download.html" class="btn btn--primary" style="font-size: 1.05rem; padding: 0.75rem 2rem;">⬇ Download v7.0</a>
         <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" class="btn btn--secondary" style="font-size: 1.05rem; padding: 0.75rem 2rem;">⭐ GitHub</a>
       </div>
     </div>
@@ -62,12 +62,12 @@
           <div class="stat__label">SRE Hooks</div>
         </div>
         <div class="stat reveal">
-          <div class="stat__number">942</div>
-          <div class="stat__label">Game Assets</div>
+          <div class="stat__number">60fps</div>
+          <div class="stat__label">Dynarmic JIT</div>
         </div>
         <div class="stat reveal">
-          <div class="stat__number">16</div>
-          <div class="stat__label">SRE Source Files</div>
+          <div class="stat__number">200+</div>
+          <div class="stat__label">Bridge Functions</div>
         </div>
         <div class="stat reveal">
           <div class="stat__number">6</div>
@@ -82,35 +82,39 @@
     <h2 style="text-align: center; border: none; margin-bottom: 2rem;">Why Swordigo Desktop?</h2>
     <div class="grid grid--3">
       <div class="card reveal">
+        <div class="card__icon">⚡</div>
+        <h3 class="card__title">Dynarmic JIT</h3>
+        <p class="card__desc">ARM64 code JIT-compiled to native x86_64. 60fps buttery smooth gameplay with instant touch response. Unicorn interpreter available as fallback.</p>
+      </div>
+      <div class="card reveal">
+        <div class="card__icon">🎮</div>
+        <h3 class="card__title">RLSwordigo + KiwiAPI</h3>
+        <p class="card__desc">RLSwordigo is a first-class supported mod. KiwiAPI (SwKiwi) modding framework works natively. Load mods as separate instances.</p>
+      </div>
+      <div class="card reveal">
         <div class="card__icon">⚔️</div>
         <h3 class="card__title">SRE Engine</h3>
-        <p class="card__desc">30+ hooks replacing GUI rendering, music, HUD, death/respawn, and Lua safety. Not patching — <em>owning</em> the subsystems.</p>
-      </div>
-      <div class="card reveal">
-        <div class="card__icon">🎨</div>
-        <h3 class="card__title">PostFX Pipeline</h3>
-        <p class="card__desc">SSAO, God Rays, Film Grain, Chromatic Aberration, Sharpen. 6 cinematic presets — Cinematic, Retro, Fantasy, Noir, Ethereal, Atmospheric.</p>
-      </div>
-      <div class="card reveal">
-        <div class="card__icon">🐧</div>
-        <h3 class="card__title">Linux Native</h3>
-        <p class="card__desc">SDL3, OpenGL, OpenAL. Full keyboard/gamepad/touch support. Wayland + X11. Minecraft-style data management.</p>
+        <p class="card__desc">30+ hooks replacing GUI, music, HUD, death/respawn, and Lua safety. Full GUI ownership with 8 DrawRect hooks. Not patching — <em>owning</em>.</p>
       </div>
     </div>
   </section>
 
-  <!-- Milestone Fixes banner -->
-  <section style="background: linear-gradient(135deg, rgba(200,170,80,0.08) 0%, rgba(46,204,113,0.08) 100%); border-top: 1px solid rgba(200,170,80,0.2); border-bottom: 1px solid rgba(200,170,80,0.2); padding: 3rem 0;">
+  <!-- v7.0 Performance Revolution banner -->
+  <section style="background: linear-gradient(135deg, rgba(255,180,0,0.08) 0%, rgba(255,100,50,0.08) 100%); border-top: 1px solid rgba(255,180,0,0.2); border-bottom: 1px solid rgba(255,180,0,0.2); padding: 3rem 0;">
     <div class="container">
-      <h2 style="text-align: center; border: none; color: var(--accent);">🎉 Two Long-Awaited Bugs — Solved</h2>
-      <div class="grid grid--2" style="margin-top: 1.5rem;">
-        <div class="card reveal" style="border-color: rgba(200,170,80,0.3);">
-          <h3 class="card__title" style="color: var(--accent);">Wastelands Spinlock</h3>
-          <p class="card__desc">The infamous freeze in the Wastelands region that forced players to use ARM32 as a workaround. <strong style="color: #2ecc71;">Fixed.</strong> ARM64 plays through normally now.</p>
+      <h2 style="text-align: center; border: none; color: var(--accent);">⚡ v7.0 — The Performance Revolution</h2>
+      <div class="grid grid--3" style="margin-top: 1.5rem;">
+        <div class="card reveal" style="border-color: rgba(255,180,0,0.3);">
+          <h3 class="card__title" style="color: var(--accent);">Dynarmic JIT</h3>
+          <p class="card__desc">ARM64 instructions JIT-compiled to native x86_64. <strong style="color: #2ecc71;">60fps</strong> buttery smooth gameplay. Near-native execution speed.</p>
         </div>
-        <div class="card reveal" style="border-color: rgba(200,170,80,0.3);">
-          <h3 class="card__title" style="color: var(--accent);">Death Freeze</h3>
-          <p class="card__desc">Dying in the game caused a permanent freeze (ad SDK path). <strong style="color: #2ecc71;">Fixed.</strong> SRE intercepts death → instant checkpoint respawn.</p>
+        <div class="card reveal" style="border-color: rgba(255,180,0,0.3);">
+          <h3 class="card__title" style="color: var(--accent);">RLSwordigo</h3>
+          <p class="card__desc">RLSwordigo is now a <strong style="color: #2ecc71;">first-class supported mod</strong>. Load as a separate instance with KiwiAPI compatibility.</p>
+        </div>
+        <div class="card reveal" style="border-color: rgba(255,180,0,0.3);">
+          <h3 class="card__title" style="color: var(--accent);">Zero Compromises</h3>
+          <p class="card__desc">Handles any mob count. Instant portal transitions. Flawless scene loading. Touch response is <strong style="color: #2ecc71;">buttery smooth</strong>.</p>
         </div>
       </div>
     </div>
@@ -118,7 +122,7 @@
 
   <!-- What's New - Feature rows with images -->
   <section class="container" style="padding: 4rem 0;">
-    <h2 style="text-align: center; border: none; margin-bottom: 3rem;">What's New in v6.0</h2>
+    <h2 style="text-align: center; border: none; margin-bottom: 3rem;">What's New in v7.0</h2>
 
     <!-- Feature 1: GUI Stack -->
     <div class="feature-row reveal" style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; align-items: center; margin-bottom: 3rem;">
@@ -163,15 +167,16 @@
       <h2 class="mt-0">Quick Start</h2>
       <p>Install the pre-built package — everything is bundled (assets, engine, music). No external downloads.</p>
       <pre><code># Fedora / RHEL
-sudo dnf install ./swordigo-desktop-6.0.0-1.x86_64.rpm
+sudo dnf install ./swordigo-desktop-7.0.0-1.x86_64.rpm
 
 # Debian / Ubuntu
-sudo apt install ./swordigo-desktop_6.0.0-1_amd64.deb
+sudo apt install ./swordigo-desktop_7.0.0-1_amd64.deb
 
-# Launch
-swordigo_boot</code></pre>
+# From source (auto-builds Dynarmic JIT)
+git clone https://github.com/TheCorrectSynovian/SwordigoDesktop.git
+cd SwordigoDesktop && ./run_swordigo.sh</code></pre>
       <div style="display: flex; gap: 1rem; margin-top: 1rem; flex-wrap: wrap;">
-        <a href="download.html" class="btn btn--primary btn--sm">Download v6.0 →</a>
+        <a href="download.html" class="btn btn--primary btn--sm">Download v7.0 →</a>
         <a href="technical.html" class="btn btn--secondary btn--sm">Read the Docs →</a>
       </div>
     </div>

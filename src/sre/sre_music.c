@@ -152,6 +152,7 @@ void sre_PlayMusicWithName(void* self, void* name_ref, int restart) {
         len = j;
     }
     
+    
     /* Check if same track already playing OR already pending (skip reload) */
     if (!restart) {
         /* Compare against currently playing track */

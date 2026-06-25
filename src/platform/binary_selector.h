@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <algorithm>
 
 // Binary version status
 enum class BinaryStatus {
@@ -86,6 +87,25 @@ public:
         if (index >= 0 && index < (int)binaries.size()) {
             binaries.erase(binaries.begin() + index);
         }
+    }
+
+    // Strip libmini.so and libGlossHook.so from an instance's dependencies
+    // (SRE replaces their functionality natively)
+    void strip_sre_conflicts(int index) {
+        if (index < 0 || index >= (int)binaries.size()) return;
+        auto& b = binaries[index];
+        b.dependencies.erase(
+            std::remove_if(b.dependencies.begin(), b.dependencies.end(),
+                [](const std::string& d) {
+                    return d == "libmini.so" || d == "libGlossHook.so" || d == "libkiwi.so";
+                }), b.dependencies.end());
+        b.dep_paths.erase(
+            std::remove_if(b.dep_paths.begin(), b.dep_paths.end(),
+                [](const std::string& p) {
+                    return p.find("libmini.so") != std::string::npos ||
+                           p.find("libGlossHook.so") != std::string::npos ||
+                           p.find("libkiwi.so") != std::string::npos;
+                }), b.dep_paths.end());
     }
 
     // Should we show the selector? (more than 1 binary found)

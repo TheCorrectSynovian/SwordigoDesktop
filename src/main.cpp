@@ -1,4 +1,4 @@
-// Swordigo Desktop v6.5 — MegineBraine
+// Force rebuild: PostFXState struct changed in fbo_scaler.h
 #ifndef _WIN32
 #include <unistd.h>
 #else
@@ -21,6 +21,10 @@ namespace fs = std::filesystem;
 #include <unicorn/unicorn.h>
 #include "platform/emulator.h"
 #include "platform/emulator_arm64.h"
+#include "platform/i_emulator_arm64.h"
+#ifdef USE_DYNARMIC
+#include "platform/emulator_dynarmic64.h"
+#endif
 #include "platform/display.h"
 #include "android/asset_manager.h"
 #include "game/camera_override.h"
@@ -78,10 +82,11 @@ Emulator* g_emulator = nullptr;
 so_module_arm64 g_main_mod_64;
 ElfLoaderArm64* g_loader_64 = nullptr;
 JniBridge64 g_bridge_64;
-EmulatorArm64* g_emulator_64 = nullptr;
+IEmulatorArm64* g_emulator_64 = nullptr;
 
 // Architecture flag — set during boot based on selected binary
 bool g_is_arm64 = false;
+bool g_use_dynarmic = false;  // Set via --engine=dynarmic
 GuiRenderer g_gui;
 SrtOverlay g_srt_overlay;
 InputConfig g_input_config;
@@ -116,6 +121,11 @@ static std::vector<std::pair<std::string,bool>> g_lua_console_history; // {text,
 static uint64_t g_sre_resume_err_count_addr = 0;
 static uint64_t g_sre_resume_last_err_addr = 0;
 static int g_sre_resume_err_last_seen = 0;  // host-side last read value
+
+// SRE lua_call_safe error monitoring — guest addresses
+static uint64_t g_sre_lua_error_buf_addr = 0;
+static uint64_t g_sre_lua_error_count_addr = 0;
+static int g_sre_lua_error_last_seen = 0;
 
 // SRE __cxa_throw caller diagnostics — guest addresses
 static uint64_t g_sre_cxa_caller_addr = 0;     // addr of g_sre_cxa_throw_caller
@@ -152,6 +162,18 @@ static uint64_t sre_music_volume_dirty_addr = 0;  // int — 1 = volume changed
 static uint64_t sre_music_looping_addr = 0;       // int — looping flag
 static uint64_t sre_music_looping_dirty_addr = 0; // int — 1 = looping changed
 
+// Host-side music ducking — triggered by 0item.wav asset loading
+// When the engine loads this SFX (boss kill, XP sack), we duck the
+// background music volume: fade down → hold low → fade back up.
+#define DUCK_FADE_DOWN_TIME  2.0f    // seconds to fade volume down
+#define DUCK_HOLD_TIME       7.0f    // seconds to hold at low volume
+#define DUCK_FADE_UP_TIME    3.0f    // seconds to fade volume back up
+#define DUCK_LOW_VOLUME      0.15f   // volume floor during ducking (15%)
+int   g_music_duck_trigger = 0;      // set to 1 by bridge — starts ducking
+static int   s_duck_phase = 0;       // 0=off, 1=fading down, 2=holding, 3=fading up
+static float s_duck_timer = 0.0f;    // time remaining in current phase
+static float s_duck_volume = 1.0f;   // current ducking multiplier (0..1)
+
 // SRE GUI — player stats (read from GameState via GameSceneView::Update hook)
 static uint64_t sre_player_hp_addr = 0;         // int — current HP
 static uint64_t sre_player_max_hp_addr = 0;     // int — max HP (computed: level*2+4)
@@ -166,6 +188,38 @@ static uint64_t sre_gamestate_ptr_addr = 0;      // uint64_t — guest ptr to Ga
 static uint64_t sre_menu_active_addr = 0;        // int — bitfield, nonzero = menu open
 static uint64_t sre_text_input_active_addr = 0;  // int — nonzero = SRE text input active
 static uint64_t sre_hardmode_addr = 0;            // int — nonzero = hard mode (no frame cap, double-tick)
+
+// SRE ButtonController — guest addresses and layout struct
+#define SRE_BTN_MAX       32
+#define SRE_BTN_ID_LEN    32
+#define SRE_BTN_LABEL_LEN 64
+
+struct SreBtnSlot {
+    char     id[SRE_BTN_ID_LEN];
+    char     label[SRE_BTN_LABEL_LEN];
+    float    x, y;
+    float    w, h;
+    float    alpha;
+    float    scale_x, scale_y;
+    int      text_color;
+    float    text_scale;
+    int      bg_alpha;
+    int      hidden;
+    int      clickable;
+    int      movable;
+    int      snapback;
+    float    home_x, home_y;
+    int      padding_l, padding_t, padding_r, padding_b;
+    int      alignment;
+    int      pressed;
+    int      dragging;
+    float    cur_x, cur_y;
+    int      active;
+    int      dirty;
+};
+
+static uint64_t sre_btn_array_addr = 0;           // SreBtnSlot[SRE_BTN_MAX]
+static uint64_t sre_btn_globally_hidden_addr = 0;  // int — 1 = all buttons hidden
 
 // PostFX auto-disable state — tracks what the user chose so we can restore
 static bool postfx_suppressed_by_menu = false;
@@ -1390,10 +1444,13 @@ void load_and_boot() {
                                 SDL_WindowFlags flags = SDL_GetWindowFlags(g_display_ptr->get_window());
                                 if (flags & SDL_WINDOW_FULLSCREEN) {
                                     SDL_SetWindowFullscreen(g_display_ptr->get_window(), false);
-                                    g_win_w = 1920;
-                                    g_win_h = 1080;
+                                    // Query actual window size — preserves native aspect ratio (16:10, etc.)
+                                    int ww, wh;
+                                    SDL_GetWindowSize(g_display_ptr->get_window(), &ww, &wh);
+                                    g_win_w = ww;
+                                    g_win_h = wh;
                                     SDL_GetWindowSizeInPixels(g_display_ptr->get_window(), &g_draw_w, &g_draw_h);
-                                    std::cout << "[Display] Windowed 1920x1080 (drawable: " << g_draw_w << "x" << g_draw_h << ")" << std::endl;
+                                    std::cout << "[Display] Windowed " << ww << "x" << wh << " (drawable: " << g_draw_w << "x" << g_draw_h << ")" << std::endl;
                                 } else {
                                     SDL_SetWindowFullscreen(g_display_ptr->get_window(), true);
                                     // Get actual fullscreen resolution (logical + physical)
@@ -1818,7 +1875,16 @@ void load_and_boot_arm64() {
     std::cout << "[Loader64] Game binary ready (all symbols bridged)." << std::endl;
 
     // Initialize ARM64 Emulator AFTER memory is prepared
-    g_emulator_64 = new EmulatorArm64(g_guest_memory, GUEST_MEM_SIZE);
+    // Multi-engine backend selection
+#ifdef USE_DYNARMIC
+    if (g_use_dynarmic) {
+        g_emulator_64 = new EmulatorDynarmic64(g_guest_memory, GUEST_MEM_SIZE);
+    } else
+#endif
+    {
+        g_emulator_64 = new EmulatorArm64(g_guest_memory, GUEST_MEM_SIZE);
+    }
+    std::cout << "[Engine] Using " << g_emulator_64->engine_name() << " backend" << std::endl;
     g_emulator_64->set_bridge(&g_bridge_64);
 
     // --- Runtime binary patches (ARM64) ---
@@ -2053,26 +2119,14 @@ void load_and_boot_arm64() {
                         uint64_t crash_page = 0x2d6c000;  // 0x2d6ce4c aligned to 4KB
                         uint32_t ret_insn = 0xD65F03C0;   // ARM64 RET
                         
-                        // Try uc_mem_map first (page might not be mapped yet)
-                        uc_engine* uc = (uc_engine*)g_emulator_64->get_uc_handle();
-                        uc_err map_err = uc_mem_map(uc, crash_page, 0x1000, UC_PROT_ALL);
-                        if (map_err == UC_ERR_OK) {
-                            for (uint64_t off = 0; off < 0x1000; off += 4) {
-                                uc_mem_write(uc, crash_page + off, &ret_insn, 4);
-                            }
-                            std::cout << "[Safety] Mapped + filled RET-page at 0x" 
-                                      << std::hex << crash_page << std::dec << std::endl;
-                        } else {
-                            // Page already mapped (entire space is pre-mapped by uc_mem_map_ptr)
-                            // Write directly to the host memory buffer
-                            uint8_t* mem = g_emulator_64->get_memory_base();
-                            for (uint64_t off = 0; off < 0x1000; off += 4) {
-                                *(uint32_t*)(mem + crash_page + off) = ret_insn;
-                            }
-                            std::cout << "[Safety] Wrote RET-page at 0x" << std::hex 
-                                      << crash_page << " (page was pre-mapped)" 
-                                      << std::dec << std::endl;
+                        // Write directly to the shared guest memory buffer
+                        // (works for both Unicorn and Dynarmic backends)
+                        uint8_t* mem = g_emulator_64->get_memory_base();
+                        for (uint64_t off = 0; off < 0x1000; off += 4) {
+                            *(uint32_t*)(mem + crash_page + off) = ret_insn;
                         }
+                        std::cout << "[Safety] Wrote RET-page at 0x" << std::hex 
+                                  << crash_page << std::dec << std::endl;
                     }
                 }
 
@@ -2511,6 +2565,28 @@ void load_and_boot_arm64() {
                               << std::dec << ")" << std::endl;
                 }
 
+                // Resolve lua_call_safe error monitoring symbols
+                g_sre_lua_error_buf_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_last_lua_error");
+                g_sre_lua_error_count_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_lua_error_count");
+                if (g_sre_lua_error_count_addr) {
+                    std::cout << "[SRE] lua_call_safe error monitoring active"
+                              << " (buf=0x" << std::hex << g_sre_lua_error_buf_addr
+                              << " count=0x" << g_sre_lua_error_count_addr
+                              << std::dec << ")" << std::endl;
+                }
+
+                // Resolve achievement popup symbols
+                {
+                    uint64_t ach_pending = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_achievement_pending");
+                    uint64_t ach_title = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_achievement_pending_title");
+                    uint64_t ach_desc = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_achievement_pending_desc");
+                    if (ach_pending && ach_title && ach_desc) {
+                        mod_achievement_set_offsets(ach_pending, ach_title, ach_desc);
+                        std::cout << "[SRE] Achievement popup active (pending=0x" << std::hex 
+                                  << ach_pending << ")" << std::dec << std::endl;
+                    }
+                }
+
                 // ========= Background Renderer Setup =========
                 // Our SRE re-implements BackgroundComponent::Draw using
                 // engine building blocks: SetMatrix, SetColor, Sprite::Draw
@@ -2906,6 +2982,41 @@ void load_and_boot_arm64() {
                 sre_hardmode_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_hardmode");
                 if (sre_hardmode_addr)
                     std::cout << "[SRE] Hardmode flag: 0x" << std::hex << sre_hardmode_addr << std::dec << std::endl;
+                
+                // ButtonController — SRE-side button array for host rendering + hit-testing
+                sre_btn_array_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_buttons");
+                sre_btn_globally_hidden_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_btn_globally_hidden");
+                if (sre_btn_array_addr)
+                    std::cout << "[SRE] ButtonController: array=0x" << std::hex << sre_btn_array_addr
+                              << " hidden=0x" << sre_btn_globally_hidden_addr << std::dec << std::endl;
+                
+                // VFS MiniPath globals — populate so SRE can translate
+                // /ExternalFiles/, /Files/, /Cache/ without calling getenv
+                {
+                    auto write_vfs_path = [&](const char* sym, const std::string& path) {
+                        uint64_t addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, sym);
+                        if (addr) {
+                            strncpy((char*)(g_guest_memory + addr), path.c_str(), 511);
+                            ((char*)(g_guest_memory + addr))[511] = '\0';
+                            std::cout << "[SRE] VFS " << sym << " = " << path << std::endl;
+                        }
+                    };
+                    std::string data_base = get_data_path("");
+                    // Remove trailing slash if present
+                    if (!data_base.empty() && data_base.back() == '/')
+                        data_base.pop_back();
+                    
+                    write_vfs_path("g_sre_vfs_path_external", data_base + "/external");
+                    write_vfs_path("g_sre_vfs_path_files",    g_save_dir);
+                    write_vfs_path("g_sre_vfs_path_cache",    g_cache_dir);
+                    write_vfs_path("g_sre_vfs_path_assets",   get_data_path(g_assets_dir));
+                    
+                    // Also create the directories if missing
+                    std::string ext_dir = data_base + "/external";
+                    mkdir(ext_dir.c_str(), 0755);
+                    mkdir(g_save_dir.c_str(), 0755);
+                    mkdir(g_cache_dir.c_str(), 0755);
+                }
                 
                 std::cout << "[SRE] GUI: hp=0x" << std::hex << sre_player_hp_addr
                           << " coins=0x" << sre_player_coins_addr
@@ -3313,6 +3424,10 @@ void load_and_boot_arm64() {
             // Scene transitions spawn loading threads. Running them inline
             // (nested uc_emu_start) corrupts state. Run them here between frames.
             if (g_emulator_64->has_pending_threads()) {
+                if (completed_frames < 20) {
+                    std::cout << "[Diag64] Frame " << completed_frames 
+                              << " running deferred threads" << std::endl;
+                }
                 g_emulator_64->run_pending_threads();
             }
             
@@ -3433,6 +3548,8 @@ void load_and_boot_arm64() {
                         int vol_dirty = *(int*)(g_guest_memory + sre_music_volume_dirty_addr);
                         if (vol_dirty) {
                             float vol = *(float*)(g_guest_memory + sre_music_volume_addr);
+                            // Apply duck multiplier on top of guest volume
+                            vol *= s_duck_volume;
                             sre_music_host_set_volume(vol);
                             int zero = 0;
                             memcpy(g_guest_memory + sre_music_volume_dirty_addr, &zero, 4);
@@ -3444,6 +3561,58 @@ void load_and_boot_arm64() {
                             sre_music_host_set_looping(looping != 0);
                             int zero = 0;
                             memcpy(g_guest_memory + sre_music_looping_dirty_addr, &zero, 4);
+                        }
+                        
+                        // === Host-side music ducking ===
+                        // Triggered by 0item.wav asset loading (boss kill / XP sack SFX).
+                        // 3-phase: fade down → hold low → fade back up.
+                        if (g_music_duck_trigger) {
+                            g_music_duck_trigger = 0;
+                            s_duck_phase = 1;
+                            s_duck_timer = DUCK_FADE_DOWN_TIME;
+                            std::cout << "[SRE-Music] Duck triggered (0item.wav detected)" << std::endl;
+                        }
+                        
+                        if (s_duck_phase > 0) {
+                            s_duck_timer -= dt_seconds;
+                            float prev_duck = s_duck_volume;
+                            
+                            if (s_duck_phase == 1) {
+                                // Phase 1: fading down
+                                float progress = 1.0f - (s_duck_timer / DUCK_FADE_DOWN_TIME);
+                                if (progress < 0.0f) progress = 0.0f;
+                                if (progress > 1.0f) progress = 1.0f;
+                                s_duck_volume = 1.0f - progress * (1.0f - DUCK_LOW_VOLUME);
+                                if (s_duck_timer <= 0.0f) {
+                                    s_duck_phase = 2;
+                                    s_duck_timer = DUCK_HOLD_TIME;
+                                    s_duck_volume = DUCK_LOW_VOLUME;
+                                }
+                            } else if (s_duck_phase == 2) {
+                                // Phase 2: holding low
+                                s_duck_volume = DUCK_LOW_VOLUME;
+                                if (s_duck_timer <= 0.0f) {
+                                    s_duck_phase = 3;
+                                    s_duck_timer = DUCK_FADE_UP_TIME;
+                                }
+                            } else if (s_duck_phase == 3) {
+                                // Phase 3: fading back up
+                                float progress = 1.0f - (s_duck_timer / DUCK_FADE_UP_TIME);
+                                if (progress < 0.0f) progress = 0.0f;
+                                if (progress > 1.0f) progress = 1.0f;
+                                s_duck_volume = DUCK_LOW_VOLUME + progress * (1.0f - DUCK_LOW_VOLUME);
+                                if (s_duck_timer <= 0.0f) {
+                                    s_duck_phase = 0;
+                                    s_duck_volume = 1.0f;
+                                    std::cout << "[SRE-Music] Duck complete — volume restored" << std::endl;
+                                }
+                            }
+                            
+                            // Apply ducked volume to OpenAL
+                            if (s_duck_volume != prev_duck && sre_music_volume_addr) {
+                                float guest_vol = *(float*)(g_guest_memory + sre_music_volume_addr);
+                                sre_music_host_set_volume(guest_vol * s_duck_volume);
+                            }
                         }
                         
                         // Music loop watchdog: if looping is enabled but source
@@ -3529,73 +3698,105 @@ void load_and_boot_arm64() {
                 glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
                 glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
                 glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-                glColor4ub(0, 0, 0, 180);
-                glBegin(GL_QUADS);
-                glVertex2f(10, g_win_h - 10); glVertex2f(420, g_win_h - 10);
-                glVertex2f(420, g_win_h - 315); glVertex2f(10, g_win_h - 315);
-                glEnd();
-                char dbg[256];
-                snprintf(dbg, sizeof(dbg), "FPS: %.1f", fps);
-                g_gui.draw_string(dbg, 20, g_win_h - 35, 2.0f, 0, 255, 100, 255);
-                snprintf(dbg, sizeof(dbg), "Frame: %d  [ARM64]", completed_frames);
-                g_gui.draw_string(dbg, 20, g_win_h - 60, 1.4f, 200, 200, 200, 255);
-                snprintf(dbg, sizeof(dbg), "Draws: %d  TexBinds: %d", g_frame_stats.draw_calls, g_frame_stats.texture_binds);
-                g_gui.draw_string(dbg, 20, g_win_h - 80, 1.2f, 180, 180, 180, 255);
-                snprintf(dbg, sizeof(dbg), "Verts: %d  MatOps: %d", g_frame_stats.vertices_submitted, g_frame_stats.matrix_ops);
-                g_gui.draw_string(dbg, 20, g_win_h - 97, 1.2f, 180, 180, 180, 255);
-                snprintf(dbg, sizeof(dbg), "State: %d  TexUps: %d", g_frame_stats.state_changes, g_frame_stats.tex_uploads);
-                g_gui.draw_string(dbg, 20, g_win_h - 114, 1.2f, 180, 180, 180, 255);
-                snprintf(dbg, sizeof(dbg), "Render: %dx%d -> Window: %dx%d (Draw: %dx%d)", GAME_W, GAME_H, g_win_w, g_win_h, g_draw_w, g_draw_h);
-                g_gui.draw_string(dbg, 20, g_win_h - 131, 1.2f, 140, 140, 160, 255);
-                snprintf(dbg, sizeof(dbg), "Mouse: %d,%d  DT: %.4fs", mouse_x, mouse_y, dt_seconds);
-                g_gui.draw_string(dbg, 20, g_win_h - 148, 1.2f, 140, 140, 160, 255);
 
+                // ── Panel background ──
+                int panel_h = 380;
+                glColor4ub(10, 10, 18, 210);
+                glBegin(GL_QUADS);
+                glVertex2f(8, g_win_h - 8); glVertex2f(440, g_win_h - 8);
+                glVertex2f(440, g_win_h - panel_h); glVertex2f(8, g_win_h - panel_h);
+                glEnd();
+                // Accent bar (top)
+                glColor4ub(80, 200, 120, 255);
+                glBegin(GL_QUADS);
+                glVertex2f(8, g_win_h - 8); glVertex2f(440, g_win_h - 8);
+                glVertex2f(440, g_win_h - 11); glVertex2f(8, g_win_h - 11);
+                glEnd();
+
+                char dbg[256];
+                float y = g_win_h - 30;
+                float x = 20;
+                float lh = 17;  // line height
+
+                // ── Section: Performance ──
+                snprintf(dbg, sizeof(dbg), "FPS: %.1f", fps);
+                g_gui.draw_string(dbg, x, y, 2.0f, 80, 255, 120, 255); y -= 28;
+
+                snprintf(dbg, sizeof(dbg), "Frame: %d", completed_frames);
+                g_gui.draw_string(dbg, x, y, 1.3f, 200, 200, 210, 255); y -= lh;
+
+                // ── Section: Render Stats ──
+                snprintf(dbg, sizeof(dbg), "Draws: %d   Verts: %d   TexBinds: %d",
+                         g_frame_stats.draw_calls, g_frame_stats.vertices_submitted, g_frame_stats.texture_binds);
+                g_gui.draw_string(dbg, x, y, 1.1f, 160, 160, 175, 255); y -= lh;
+                snprintf(dbg, sizeof(dbg), "State: %d   MatOps: %d   TexUps: %d",
+                         g_frame_stats.state_changes, g_frame_stats.matrix_ops, g_frame_stats.tex_uploads);
+                g_gui.draw_string(dbg, x, y, 1.1f, 160, 160, 175, 255); y -= lh + 4;
+
+                // ── Section: Display ──
+                snprintf(dbg, sizeof(dbg), "Render: %dx%d  Window: %dx%d  Draw: %dx%d",
+                         GAME_W, GAME_H, g_win_w, g_win_h, g_draw_w, g_draw_h);
+                g_gui.draw_string(dbg, x, y, 1.1f, 130, 130, 155, 255); y -= lh;
+
+                snprintf(dbg, sizeof(dbg), "Mouse: %d,%d   DT: %.4fs", mouse_x, mouse_y, dt_seconds);
+                g_gui.draw_string(dbg, x, y, 1.1f, 130, 130, 155, 255); y -= lh + 4;
+
+                // ── Section: Engine & Backend ──
+                // Separator line
+                glColor4ub(60, 60, 80, 200);
+                glBegin(GL_QUADS);
+                glVertex2f(x, y + 6); glVertex2f(420, y + 6);
+                glVertex2f(420, y + 5); glVertex2f(x, y + 5);
+                glEnd();
+                y -= 4;
+
+                // CPU Engine
+                const char* engine_str = g_emulator_64 ? g_emulator_64->engine_name() : "None";
+                bool is_dynarmic = g_emulator_64 && strcmp(g_emulator_64->engine_name(), "Dynarmic") == 0;
+                snprintf(dbg, sizeof(dbg), "CPU Engine: %s", engine_str);
+                g_gui.draw_string(dbg, x, y, 1.3f,
+                    is_dynarmic ? 255 : 200,   // Dynarmic = gold, Unicorn = cyan
+                    is_dynarmic ? 200 : 220,
+                    is_dynarmic ? 60  : 255, 255);
+                y -= lh;
+
+                // Graphics API
+                const char* api_str = (g_graphics_api == GraphicsAPI::VULKAN) ? "Vulkan" : "OpenGL";
+                snprintf(dbg, sizeof(dbg), "Graphics: %s", api_str);
+                g_gui.draw_string(dbg, x, y, 1.3f, 100, 200, 255, 255); y -= lh;
+
+                // Scale mode
                 const char* fbo_mode_str = "Unknown";
                 if (g_fbo_mode == FBOScale::SHARP_BILINEAR) fbo_mode_str = "Sharp-Bilinear";
                 else if (g_fbo_mode == FBOScale::NEAREST) fbo_mode_str = "Nearest";
                 else if (g_fbo_mode == FBOScale::CRT_SCANLINE) fbo_mode_str = "CRT Scanline";
                 else if (g_fbo_mode == FBOScale::FSR) fbo_mode_str = "FSR 1.0";
-                snprintf(dbg, sizeof(dbg), "Scale Mode: %s", fbo_mode_str);
-                g_gui.draw_string(dbg, 20, g_win_h - 165, 1.2f, 255, 200, 100, 255);
+                snprintf(dbg, sizeof(dbg), "Scaler: %s", fbo_mode_str);
+                g_gui.draw_string(dbg, x, y, 1.2f, 255, 200, 100, 255); y -= lh;
 
-                snprintf(dbg, sizeof(dbg), "Speed: %s  %s", mod_speed_label(), g_game_paused ? "|| PAUSED" : "");
-                g_gui.draw_string(dbg, 20, g_win_h - 185, 1.2f, 255, 180, 50, 255);
-                snprintf(dbg, sizeof(dbg), "F1:GUI F2:Ctrl F3:Dbg F4:Scale F5:Cam F6:PostFX F7:Type F10:HUD");
-                g_gui.draw_string(dbg, 20, g_win_h - 202, 1.1f, 100, 100, 120, 200);
-                if (g_typing_mode) {
-                    g_gui.draw_string("TYPING MODE ACTIVE", 20, g_win_h - 218, 1.2f, 255, 100, 100, 255);
+                // PostFX
+                if (g_postfx.enabled) {
+                    snprintf(dbg, sizeof(dbg), "PostFX: %s", g_postfx.preset_name);
+                    g_gui.draw_string(dbg, x, y, 1.2f, 255, 160, 80, 255);
+                } else {
+                    g_gui.draw_string("PostFX: Off", x, y, 1.2f, 100, 100, 110, 200);
                 }
-                char cam_dbg[128];
-                cam_debug_string(cam_dbg, sizeof(cam_dbg));
-                g_gui.draw_string(cam_dbg, 20, g_win_h - 222, 1.1f,
-                    g_cam_active ? 0 : 120,
-                    g_cam_active ? 220 : 120,
-                    g_cam_active ? 100 : 120, 255);
+                y -= lh;
 
                 // Binary info
                 const BinaryInfo* binfo = g_binary_selector.get_loaded_info();
                 if (binfo) {
                     snprintf(dbg, sizeof(dbg), "Binary: %s (%s)", binfo->filename.c_str(), binfo->label.c_str());
-                    g_gui.draw_string(dbg, 20, g_win_h - 240, 1.2f, 100, 200, 255, 255);
                 } else {
                     snprintf(dbg, sizeof(dbg), "Binary: %s", g_lib_name.c_str());
-                    g_gui.draw_string(dbg, 20, g_win_h - 240, 1.2f, 100, 200, 255, 255);
                 }
+                g_gui.draw_string(dbg, x, y, 1.1f, 120, 180, 255, 255); y -= lh;
 
-                // PostFX info
-                if (g_postfx.enabled) {
-                    snprintf(dbg, sizeof(dbg), "PostFX: %s", g_postfx.preset_name);
-                    g_gui.draw_string(dbg, 20, g_win_h - 255, 1.2f, 255, 180, 100, 255);
-                } else {
-                    g_gui.draw_string("PostFX: Off", 20, g_win_h - 255, 1.2f, 120, 120, 120, 200);
-                }
+                // Speed
+                snprintf(dbg, sizeof(dbg), "Speed: %s  %s", mod_speed_label(), g_game_paused ? "|| PAUSED" : "");
+                g_gui.draw_string(dbg, x, y, 1.2f, 255, 180, 50, 255); y -= lh + 4;
 
-                // Graphics API
-                const char* api_str = (g_graphics_api == GraphicsAPI::VULKAN) ? "Vulkan" : "OpenGL";
-                snprintf(dbg, sizeof(dbg), "Graphics API: %s", api_str);
-                g_gui.draw_string(dbg, 20, g_win_h - 272, 1.2f, 100, 220, 255, 255);
-
-                // Player Stats (from SRE GUI hook)
+                // ── Section: Player Stats ──
                 if (sre_gui_scene_active_addr && g_guest_memory) {
                     int scene_active = *(int*)(g_guest_memory + sre_gui_scene_active_addr);
                     if (scene_active && sre_player_hp_addr) {
@@ -3607,19 +3808,39 @@ void load_and_boot_arm64() {
                         int xp     = sre_player_xp_addr ? *(int*)(g_guest_memory + sre_player_xp_addr) : 0;
                         int level  = sre_player_level_addr ? *(int*)(g_guest_memory + sre_player_level_addr) : 0;
                         int atk    = sre_player_atk_level_addr ? *(int*)(g_guest_memory + sre_player_atk_level_addr) : 0;
-                        
+
+                        // Separator
+                        glColor4ub(60, 60, 80, 200);
+                        glBegin(GL_QUADS);
+                        glVertex2f(x, y + 6); glVertex2f(420, y + 6);
+                        glVertex2f(420, y + 5); glVertex2f(x, y + 5);
+                        glEnd();
+                        y -= 4;
+
                         snprintf(dbg, sizeof(dbg), "HP: %d/%d  Mana: %d/%d  Coins: %d",
                                  hp, max_hp, mana, max_mn, coins);
-                        // Color HP based on health: green > yellow > red
                         int hp_pct = max_hp > 0 ? (hp * 100 / max_hp) : 0;
                         uint8_t hr = hp_pct > 50 ? 80 : 255;
                         uint8_t hg = hp_pct > 25 ? 255 : 80;
-                        g_gui.draw_string(dbg, 20, g_win_h - 275, 1.3f, hr, hg, 80, 255);
-                        
-                        snprintf(dbg, sizeof(dbg), "Lv.%d  XP: %d  ATK: %d",
-                                 level, xp, atk);
-                        g_gui.draw_string(dbg, 20, g_win_h - 295, 1.3f, 180, 140, 255, 255);
+                        g_gui.draw_string(dbg, x, y, 1.3f, hr, hg, 80, 255); y -= lh;
+
+                        snprintf(dbg, sizeof(dbg), "Lv.%d  XP: %d  ATK: %d", level, xp, atk);
+                        g_gui.draw_string(dbg, x, y, 1.3f, 180, 140, 255, 255); y -= lh;
                     }
+                }
+
+                // ── Hotkey legend ──
+                y -= 2;
+                g_gui.draw_string("F1:GUI F2:Ctrl F3:Debug F4:Scale F5:Cam F6:PostFX", x, y, 1.0f, 80, 80, 100, 180); y -= 14;
+                g_gui.draw_string("F7:Type F8:Pause F10:HUD F12:Fullscreen", x, y, 1.0f, 80, 80, 100, 180);
+
+                if (g_typing_mode) {
+                    g_gui.draw_string("TYPING MODE", 350, g_win_h - 30, 1.2f, 255, 80, 80, 255);
+                }
+                if (g_cam_active) {
+                    char cam_dbg[128];
+                    cam_debug_string(cam_dbg, sizeof(cam_dbg));
+                    g_gui.draw_string(cam_dbg, x, y - 14, 1.0f, 80, 200, 120, 255);
                 }
 
                 glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix();
@@ -3636,6 +3857,8 @@ void load_and_boot_arm64() {
                 glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
                 glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                 mod_render_overlay(g_gui, g_win_w, g_win_h, dt_seconds);
+                mod_achievement_poll(g_guest_memory, 1);  // offsets are absolute guest VA
+                mod_achievement_render(g_gui, g_win_w, g_win_h, dt_seconds);
                 
                 // ---- Lua Console rendering ----
                 if (g_lua_console_open && g_lua_console_ready) {
@@ -3688,6 +3911,81 @@ void load_and_boot_arm64() {
                         int b = entry.second ? 100 : 150;
                         g_gui.draw_string(entry.first, 10, y, 1.0f, r, g, b, 220);
                         y += line_h;
+                    }
+                }
+                
+                // ---- ButtonController: auto-hide during menus ----
+                if (sre_btn_globally_hidden_addr && sre_menu_active_addr) {
+                    int menu_active = *(int32_t*)(g_guest_memory + sre_menu_active_addr);
+                    *(int32_t*)(g_guest_memory + sre_btn_globally_hidden_addr) = (menu_active != 0) ? 1 : 0;
+                }
+                
+                // ---- ButtonController overlay ----
+                if (sre_btn_array_addr) {
+                    int btn_globally_hidden = 0;
+                    if (sre_btn_globally_hidden_addr)
+                        btn_globally_hidden = *(int32_t*)(g_guest_memory + sre_btn_globally_hidden_addr);
+                    
+                    if (!btn_globally_hidden) {
+                        int base = std::min(g_win_w, g_win_h);
+                        
+                        for (int i = 0; i < SRE_BTN_MAX; i++) {
+                            SreBtnSlot* btn = (SreBtnSlot*)(g_guest_memory + sre_btn_array_addr + i * sizeof(SreBtnSlot));
+                            if (!btn->active || btn->hidden) continue;
+                            
+                            // Convert normalized coords to pixels
+                            int pw = (int)(base * btn->w * btn->scale_x);
+                            int ph = (int)(base * btn->h * btn->scale_y);
+                            int px = (int)(g_win_w * btn->cur_x) - pw / 2;
+                            int py_gl = (int)(g_win_h * (1.0f - btn->cur_y)) - ph / 2; // GL Y-flip
+                            
+                            float a = btn->alpha / 255.0f;
+                            int ba = (int)(btn->bg_alpha * a);
+                            
+                            // Background quad
+                            glEnable(GL_BLEND);
+                            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                            glBegin(GL_QUADS);
+                            glColor4ub(30, 50, 80, ba);  // Dark blue tint
+                            glVertex2i(px, py_gl);
+                            glVertex2i(px + pw, py_gl);
+                            glColor4ub(20, 35, 60, ba);  // Slightly darker bottom
+                            glVertex2i(px + pw, py_gl + ph);
+                            glVertex2i(px, py_gl + ph);
+                            glEnd();
+                            
+                            // Border
+                            glBegin(GL_LINE_LOOP);
+                            glColor4ub(80, 120, 180, (int)(200 * a));
+                            glVertex2i(px, py_gl);
+                            glVertex2i(px + pw, py_gl);
+                            glVertex2i(px + pw, py_gl + ph);
+                            glVertex2i(px, py_gl + ph);
+                            glEnd();
+                            
+                            // Pressed highlight
+                            if (btn->pressed) {
+                                glBegin(GL_QUADS);
+                                glColor4ub(100, 160, 255, (int)(80 * a));
+                                glVertex2i(px, py_gl);
+                                glVertex2i(px + pw, py_gl);
+                                glVertex2i(px + pw, py_gl + ph);
+                                glVertex2i(px, py_gl + ph);
+                                glEnd();
+                            }
+                            
+                            // Label text
+                            if (btn->label[0]) {
+                                int tr = (btn->text_color >> 16) & 0xFF;
+                                int tg = (btn->text_color >> 8) & 0xFF;
+                                int tb = btn->text_color & 0xFF;
+                                int ta = (int)(((btn->text_color >> 24) & 0xFF) * a);
+                                if (ta == 0) ta = (int)(255 * a); // Default opaque
+                                float ts = btn->text_scale * (ph * 0.04f);
+                                if (ts < 0.5f) ts = 0.5f;
+                                g_gui.draw_string(btn->label, px + btn->padding_l + 4, py_gl + ph / 2 - 5, ts, tr, tg, tb, ta);
+                            }
+                        }
                     }
                 }
                 
@@ -3872,14 +4170,19 @@ void load_and_boot_arm64() {
                                 SDL_WindowFlags flags = SDL_GetWindowFlags(g_display_ptr->get_window());
                                 if (flags & SDL_WINDOW_FULLSCREEN) {
                                     SDL_SetWindowFullscreen(g_display_ptr->get_window(), false);
-                                    g_win_w = 1920; g_win_h = 1080;
+                                    // Query actual window size — preserves native aspect ratio (16:10, etc.)
+                                    int ww, wh;
+                                    SDL_GetWindowSize(g_display_ptr->get_window(), &ww, &wh);
+                                    g_win_w = ww; g_win_h = wh;
                                     SDL_GetWindowSizeInPixels(g_display_ptr->get_window(), &g_draw_w, &g_draw_h);
+                                    std::cout << "[Display] Windowed " << ww << "x" << wh << " (drawable: " << g_draw_w << "x" << g_draw_h << ")" << std::endl;
                                 } else {
                                     SDL_SetWindowFullscreen(g_display_ptr->get_window(), true);
                                     int fw, fh;
                                     SDL_GetWindowSize(g_display_ptr->get_window(), &fw, &fh);
                                     g_win_w = fw; g_win_h = fh;
                                     SDL_GetWindowSizeInPixels(g_display_ptr->get_window(), &g_draw_w, &g_draw_h);
+                                    std::cout << "[Display] Fullscreen " << fw << "x" << fh << " (drawable: " << g_draw_w << "x" << g_draw_h << ")" << std::endl;
                                 }
                                 break;
                             }
@@ -4229,17 +4532,58 @@ void load_and_boot_arm64() {
                                     // Overlay is open — swallow click, don't send to game
                                     click_swallowed_by_gui = true;
                                 } else {
-                                    click_swallowed_by_gui = false;
-                                    float x = event.button.x * 960.0f / (float)g_win_w;
-                                    float y = 544.0f - (event.button.y * 544.0f / (float)g_win_h);
-                                    last_mouse_x = x; last_mouse_y = y;
-                                    call_touch_64(1, 1, accumulated_time, x, y, x, y, 1);
+                                    // ButtonController hit-test (before game touch)
+                                    bool btn_hit = false;
+                                    if (sre_btn_array_addr) {
+                                        int mx = event.button.x;
+                                        int my = event.button.y;
+                                        int base = std::min(g_win_w, g_win_h);
+                                        int globally_hidden = sre_btn_globally_hidden_addr ?
+                                            *(int32_t*)(g_guest_memory + sre_btn_globally_hidden_addr) : 0;
+                                        
+                                        if (!globally_hidden) {
+                                            for (int i = SRE_BTN_MAX - 1; i >= 0; i--) {
+                                                SreBtnSlot* btn = (SreBtnSlot*)(g_guest_memory + sre_btn_array_addr + i * sizeof(SreBtnSlot));
+                                                if (!btn->active || btn->hidden || !btn->clickable) continue;
+                                                
+                                                int pw = (int)(base * btn->w * btn->scale_x);
+                                                int ph = (int)(base * btn->h * btn->scale_y);
+                                                int bx = (int)(g_win_w * btn->cur_x) - pw / 2;
+                                                int by = (int)(g_win_h * btn->cur_y) - ph / 2;
+                                                
+                                                if (mx >= bx && mx <= bx + pw && my >= by && my <= by + ph) {
+                                                    btn->pressed = 1;
+                                                    if (btn->movable) btn->dragging = 1;
+                                                    btn_hit = true;
+                                                    break; // Top-most button wins
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (btn_hit) {
+                                        click_swallowed_by_gui = true;
+                                    } else {
+                                        click_swallowed_by_gui = false;
+                                        float x = event.button.x * 960.0f / (float)g_win_w;
+                                        float y = 544.0f - (event.button.y * 544.0f / (float)g_win_h);
+                                        last_mouse_x = x; last_mouse_y = y;
+                                        call_touch_64(1, 1, accumulated_time, x, y, x, y, 1);
+                                    }
                                 }
                             }
                             break;
                         case SDL_EVENT_MOUSE_MOTION:
                             mouse_x = event.motion.x;
                             mouse_y = g_win_h - event.motion.y;
+                            // ButtonController drag tracking
+                            if (sre_btn_array_addr) {
+                                for (int i = 0; i < SRE_BTN_MAX; i++) {
+                                    SreBtnSlot* btn = (SreBtnSlot*)(g_guest_memory + sre_btn_array_addr + i * sizeof(SreBtnSlot));
+                                    if (!btn->active || !btn->dragging) continue;
+                                    btn->cur_x = (float)event.motion.x / g_win_w;
+                                    btn->cur_y = (float)event.motion.y / g_win_h;
+                                }
+                            }
                             if (g_input_config.is_editing() && mouse_pressed) {
                                 float gx = event.motion.x * 960.0f / (float)g_win_w;
                                 float gy = 544.0f - (event.motion.y * 544.0f / (float)g_win_h);
@@ -4256,6 +4600,19 @@ void load_and_boot_arm64() {
                                 mouse_pressed = false;
                                 mouse_x = event.button.x;
                                 mouse_y = g_win_h - event.button.y;
+                                // ButtonController release + snapback
+                                if (sre_btn_array_addr) {
+                                    for (int i = 0; i < SRE_BTN_MAX; i++) {
+                                        SreBtnSlot* btn = (SreBtnSlot*)(g_guest_memory + sre_btn_array_addr + i * sizeof(SreBtnSlot));
+                                        if (!btn->active) continue;
+                                        if (btn->dragging && btn->snapback) {
+                                            btn->cur_x = btn->home_x;
+                                            btn->cur_y = btn->home_y;
+                                        }
+                                        btn->pressed = 0;
+                                        btn->dragging = 0;
+                                    }
+                                }
                                 if (g_input_config.is_editing()) {
                                     g_input_config.editor_mouse_up();
                                 } else if (!click_swallowed_by_gui && !g_srt_overlay.is_visible()) {
@@ -4390,10 +4747,19 @@ void load_and_boot_arm64() {
             total_asset_opens += g_frame_stats.asset_opens;
             
             if (completed_frames == 1 || completed_frames == 10 || 
+                completed_frames <= 20 ||
                 completed_frames % 100 == 0) {
                 std::cout << "[Frame64 " << completed_frames << "] "
                           << "draws=" << g_frame_stats.draw_calls
                           << " tex_binds=" << g_frame_stats.texture_binds
+                          << " tex_ups=" << g_frame_stats.tex_uploads
+                          << " verts=" << g_frame_stats.vertices_submitted
+                          << " vtx_calls=" << g_frame_stats.vertex_pointer_calls
+                          << " texc_calls=" << g_frame_stats.texcoord_pointer_calls
+                          << " matrix=" << g_frame_stats.matrix_ops
+                          << " state=" << g_frame_stats.state_changes
+                          << " assets=" << g_frame_stats.asset_opens
+                          << " clears=" << g_frame_stats.clear_calls
                           << std::endl;
                 draw_batcher_print_stats();
             }
@@ -4426,6 +4792,18 @@ void load_and_boot_arm64() {
                               << " (nm offset 0x" << nm_offset << ")"
                               << std::dec << std::endl;
                     g_sre_cxa_last_seen = count;
+                }
+            }
+
+            // Poll lua_call_safe errors from SRE
+            if (g_sre_lua_error_count_addr) {
+                int err_count = *(int32_t*)(g_guest_memory + g_sre_lua_error_count_addr);
+                if (err_count > g_sre_lua_error_last_seen && g_sre_lua_error_buf_addr) {
+                    const char* err_msg = (const char*)(g_guest_memory + g_sre_lua_error_buf_addr);
+                    std::cerr << "[SRE-LUA] Error #" << err_count
+                              << " (frame " << completed_frames << "): "
+                              << std::string(err_msg, strnlen(err_msg, 200)) << std::endl;
+                    g_sre_lua_error_last_seen = err_count;
                 }
             }
             
@@ -4466,6 +4844,12 @@ int main(int argc, char* argv[]) {
         if (strcmp(argv[i], "--headless") == 0) headless = true;
 #ifdef VULKAN_BACKEND
         if (strcmp(argv[i], "--vulkan") == 0) g_graphics_api = GraphicsAPI::VULKAN;
+#endif
+#ifdef USE_DYNARMIC
+        if (strcmp(argv[i], "--engine=dynarmic") == 0 || strcmp(argv[i], "--dynarmic") == 0) {
+            g_use_dynarmic = true;
+            std::cout << "[Main] Engine: Dynarmic JIT" << std::endl;
+        }
 #endif
         if (strcmp(argv[i], "--test-lib") == 0) {
             g_lib_name = "engine/v1.4.12/armeabi-v7a/libswordigo.so";
@@ -4585,14 +4969,25 @@ int main(int argc, char* argv[]) {
             LaunchConfig lconf = show_launcher(g_binary_selector);
             if (!lconf.should_launch) {
                 std::cout << "[Main] Launch cancelled by user" << std::endl;
+                // Save any instances created during this session
+                g_binary_selector.save_user_instances(user_instances_path);
                 return 0;
             }
             g_graphics_api = lconf.graphics_api;
             g_lib_name = lconf.selected_binary;
             g_assets_dir = lconf.assets_dir;
+#ifdef USE_DYNARMIC
+            g_use_dynarmic = lconf.use_dynarmic;
+#endif
+            // Re-initialize the asset manager with the correct assets directory
+            // (asset_manager_init was called at startup with the default "assets" path)
+            asset_manager_init(get_data_path(g_assets_dir).c_str());
             g_binary_selector.set_loaded(g_lib_name);
+            // Persist any user instances created during this session
+            g_binary_selector.save_user_instances(user_instances_path);
             std::cout << "[Main] Launcher: " 
                       << (g_graphics_api == GraphicsAPI::VULKAN ? "Vulkan" : "OpenGL")
+                      << " | Engine: " << (g_use_dynarmic ? "Dynarmic" : "Unicorn")
                       << " | Binary: " << g_lib_name
                       << " | Assets: " << g_assets_dir << std::endl;
         }

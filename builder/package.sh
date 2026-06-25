@@ -2,7 +2,7 @@
 set -e
 
 # ============================================================
-# Swordigo Desktop v6.5 — Vanilla Package Builder
+# Swordigo Desktop v7.0 — Vanilla Package Builder
 # ============================================================
 # Builds RPM and/or DEB with ALL runtime files included.
 # No external downloads, no tar archives — everything is
@@ -12,6 +12,7 @@ set -e
 #   ~/.local/share/swordigo-desktop/
 #     ├── assets/resources/     (game textures, models, scenes)
 #     ├── engine/               (ARM binaries + libsre.so)
+#     ├── launcher/             (launcher icons, textures, fonts)
 #     ├── res/raw/              (music files)
 #     ├── save/                 (user saves — NOT packaged)
 #     └── manifest.json         (launcher instance registry)
@@ -22,6 +23,7 @@ set -e
 #   /usr/share/swordigo-desktop/        (bundled data)
 #     ├── assets/resources/
 #     ├── engine/v1.4.*/
+#     ├── launcher/                (launcher icons, textures)
 #     ├── res/raw/
 #     └── manifest.json
 #   /usr/share/applications/            (.desktop entry)
@@ -38,7 +40,7 @@ set -e
 # ============================================================
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="6.5.0"
+VERSION="7.0.0"
 RELEASE="1"
 ARCH="x86_64"
 BUILD_DIR="/tmp/swordigo-packaging"
@@ -53,7 +55,7 @@ SHIP_VERSIONS=("v1.4.6" "v1.4.12")
 FORMAT="${1:-all}"     # rpm | deb | all
 
 echo "============================================"
-echo " Swordigo Desktop v6.5 — Package Builder"
+echo " Swordigo Desktop v7.0 — Package Builder"
 echo "============================================"
 echo "  Format: $FORMAT"
 echo "  Repo:   $ROOT_DIR"
@@ -247,9 +249,11 @@ MANIFEST
         echo "      ✓ $(find "$STAGING/usr/share/$PKG_NAME/res/raw" -type f | wc -l) music files"
     fi
 
-    # ---- Launcher assets (icons, textures) ----
-    mkdir -p "$STAGING/usr/share/$PKG_NAME/src/assets"
-    cp -r "$ROOT_DIR/src/assets/"* "$STAGING/usr/share/$PKG_NAME/src/assets/" 2>/dev/null || true
+    # ---- Launcher assets (icons, textures, logos) ----
+    # Stored in launcher/ subfolder for clean RPM/DEB access without permission issues
+    mkdir -p "$STAGING/usr/share/$PKG_NAME/launcher"
+    cp -r "$ROOT_DIR/src/assets/"* "$STAGING/usr/share/$PKG_NAME/launcher/" 2>/dev/null || true
+    echo "      ✓ $(find "$STAGING/usr/share/$PKG_NAME/launcher" -type f | wc -l) launcher assets"
 
     # ---- Icon ----
     if [ -f "$ROOT_DIR/src/assets/icon_gnome.png" ]; then
@@ -268,7 +272,7 @@ Icon=swordigo-desktop
 Terminal=false
 Type=Application
 Categories=Game;ActionGame;AdventureGame;
-Comment=Swordigo Desktop v6.5 — Native Linux runtime
+Comment=Swordigo Desktop v7.0 — Native Linux runtime with Dynarmic JIT
 Keywords=swordigo;game;rpg;adventure;
 StartupWMClass=Swordigo
 EOF
@@ -316,10 +320,10 @@ if [ -d "$SRC/res" ]; then
     echo "  ✓ Music"
 fi
 
-# Copy launcher textures
-if [ -d "$SRC/src/assets" ]; then
-    mkdir -p "$DEST/src/assets"
-    cp -rn "$SRC/src/assets/"* "$DEST/src/assets/" 2>/dev/null || true
+# Copy launcher assets to dedicated launcher/ folder (no permission issues)
+if [ -d "$SRC/launcher" ]; then
+    mkdir -p "$DEST/launcher"
+    cp -rn "$SRC/launcher/"* "$DEST/launcher/" 2>/dev/null || cp -r "$SRC/launcher/"* "$DEST/launcher/"
     echo "  ✓ Launcher assets"
 fi
 
@@ -363,7 +367,7 @@ build_rpm() {
 Name:           ${PKG_NAME}
 Version:        ${VERSION}
 Release:        ${RELEASE}
-Summary:        Swordigo Desktop v6.5 — Native Linux runtime
+Summary:        Swordigo Desktop v7.0 — Native Linux runtime with Dynarmic JIT
 License:        MIT
 Group:          Amusements/Games
 URL:            https://github.com/TheCorrectSynovian/SwordigoDesktop
@@ -371,11 +375,12 @@ AutoReq:        no
 AutoProv:       no
 
 %description
-Swordigo Desktop v6.5 — Native Linux runtime for Swordigo.
-ARM emulation via Unicorn Engine. SDL3, OpenGL/Vulkan, OpenAL.
+Swordigo Desktop v7.0 — Native Linux runtime for Swordigo.
+Dynarmic JIT compiler (default) for 60fps ARM64 emulation.
+Unicorn Engine fallback for maximum compatibility.
+SDL3, OpenGL/Vulkan, OpenAL. RLSwordigo + KiwiAPI mod support.
 34+ SRE hooks, ImGui launcher, Lua scripting API (Mini/LNI).
 PostFX pipeline, save editor, asset viewer, gamepad support.
-Complete modding API documentation (22 files, 414KB).
 Includes all game assets, engine binaries, and music.
 
 %install
@@ -390,7 +395,7 @@ fi
 %files
 /usr/bin/swordigo_boot
 /usr/bin/swordigo-setup
-/usr/bin/asset_viewer
+# asset_viewer is optional — only packaged if built
 /usr/share/${PKG_NAME}/
 /usr/share/applications/Swordigo.desktop
 /usr/share/icons/hicolor/256x256/apps/swordigo-desktop.png
@@ -398,15 +403,14 @@ fi
 
 %changelog
 * $(date +'%a %b %d %Y') QuantumCreeper <quantumcreeper@gmail.com> - ${VERSION}-${RELEASE}
-- v6.5 Release — Complete Modding API Documentation
-- NEW: modapi/ — 22-file documentation suite (414KB)
-- NEW: Vulkan renderer backend (GLES 1.x emulation)
-- NEW: Graphics API in F3 debug overlay
-- NEW: ImGui launcher with background, icons, mod management
-- NEW: sre_mod.c — mod config shared memory protocol
-- SRE: 34+ hooks, Mini/LNI Lua API, standard library extensions
-- PostFX: 8 presets, 30+ parameters
-- Asset viewer, save editor, gamepad support
+- v7.0 Release — Dynarmic JIT: The Performance Revolution
+- NEW: Dynarmic JIT compiler — ARM64 at near-native speed (60fps)
+- NEW: RLSwordigo support — play the roguelike spinoff
+- NEW: KiwiAPI / Combatch mod compatibility layer
+- NEW: Bauble API + Achievement System hooks
+- PERF: 10-15fps (Unicorn) → 60fps locked (Dynarmic)
+- Unicorn Engine retained as --no-dynarmic fallback
+- 34+ SRE hooks, ImGui launcher, PostFX pipeline
 - All assets, engine binaries, and music bundled
 SPEC
 
@@ -446,13 +450,13 @@ Section: games
 Priority: optional
 Architecture: amd64
 Maintainer: QuantumCreeper <quantumcreeper@gmail.com>
-Description: Swordigo Desktop v6.5 — Native Linux runtime
+Description: Swordigo Desktop v7.0 — Native Linux runtime with Dynarmic JIT
  Complete Swordigo Desktop with all game assets, engine binaries,
  music, and tools. Installs to ~/.local/share/swordigo-desktop/
  for full user access (Minecraft-style data management).
  .
- v6.5: Complete modding API docs, Vulkan backend, ImGui launcher,
- 34+ SRE hooks, Lua scripting, PostFX, save editor, asset viewer.
+ v7.0: Dynarmic JIT for 60fps ARM64 emulation, RLSwordigo support,
+ KiwiAPI mod compatibility, 34+ SRE hooks, PostFX, save editor.
 Homepage: https://github.com/TheCorrectSynovian/SwordigoDesktop
 CTRL
 

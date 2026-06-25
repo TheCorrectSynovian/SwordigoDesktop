@@ -2,7 +2,7 @@
 set -e
 
 # ============================================================
-# Swordigo Desktop v6.5 — AppImage Builder
+# Swordigo Desktop v7.0 — AppImage Builder
 # ============================================================
 # Bundles EVERYTHING into a single portable AppImage:
 #   - swordigo_boot + asset_viewer + libsre.so
@@ -19,7 +19,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 APPDIR="$SCRIPT_DIR/Swordigo.AppDir"
-OUTPUT="$SCRIPT_DIR/Swordigo-v6.5-x86_64.AppImage"
+OUTPUT="$SCRIPT_DIR/Swordigo-v7.0-x86_64.AppImage"
 
 # Where built binaries live (ext4)
 EXT4_DIR="$HOME/SwordigoDesktop"
@@ -30,7 +30,7 @@ USER_DATA="$HOME/.local/share/swordigo-desktop"
 SHIP_VERSIONS=("v1.4.6" "v1.4.12")
 
 echo "============================================"
-echo " Swordigo Desktop v6.5 — AppImage Builder"
+echo " Swordigo Desktop v7.0 — AppImage Builder"
 echo "============================================"
 echo "  Root:     $ROOT_DIR"
 echo "  Ext4:     $EXT4_DIR"
@@ -216,9 +216,9 @@ if [ -d "$USER_DATA/res/raw" ]; then
     echo "      ✓ $(find "$APPDIR/usr/share/swordigo-desktop/res/raw" -type f | wc -l) music files"
 fi
 
-# Launcher textures & fonts
-mkdir -p "$APPDIR/usr/share/swordigo-desktop/src/assets"
-cp -r "$ROOT_DIR/src/assets/"* "$APPDIR/usr/share/swordigo-desktop/src/assets/" 2>/dev/null || true
+# Launcher textures & fonts (stored in launcher/ for clean user access)
+mkdir -p "$APPDIR/usr/share/swordigo-desktop/launcher"
+cp -r "$ROOT_DIR/src/assets/"* "$APPDIR/usr/share/swordigo-desktop/launcher/" 2>/dev/null || true
 echo "      ✓ Launcher assets (icons, fonts, textures)"
 
 # ============================================================
@@ -265,7 +265,7 @@ Icon=swordigo-desktop
 Terminal=false
 Type=Application
 Categories=Game;ActionGame;AdventureGame;
-Comment=Swordigo Desktop v6.5 — Native Linux runtime
+Comment=Swordigo Desktop v7.0 — Native Linux runtime with Dynarmic JIT
 Keywords=swordigo;game;rpg;adventure;
 StartupWMClass=Swordigo
 DESKTOP
@@ -295,7 +295,7 @@ fi
 # ---- First-run data setup ----
 DEST="$HOME/.local/share/swordigo-desktop"
 BUNDLED="$HERE/usr/share/swordigo-desktop"
-MARKER="$DEST/.appimage-v6.5-installed"
+MARKER="$DEST/.appimage-v7.0-installed"
 
 if [ ! -f "$MARKER" ]; then
     echo "[Swordigo] First run detected — installing game data..."
@@ -327,10 +327,10 @@ if [ ! -f "$MARKER" ]; then
         echo "  ✓ Music"
     fi
 
-    # Copy launcher textures/fonts
-    if [ -d "$BUNDLED/src/assets" ]; then
-        mkdir -p "$DEST/src/assets"
-        cp -rn "$BUNDLED/src/assets/"* "$DEST/src/assets/" 2>/dev/null || true
+    # Copy launcher assets to dedicated launcher/ folder
+    if [ -d "$BUNDLED/launcher" ]; then
+        mkdir -p "$DEST/launcher"
+        cp -rn "$BUNDLED/launcher/"* "$DEST/launcher/" 2>/dev/null || true
         echo "  ✓ Launcher assets"
     fi
 
@@ -343,7 +343,7 @@ if [ ! -f "$MARKER" ]; then
     mkdir -p "$DEST/save" "$DEST/cache" "$DEST/mods"
 
     # Mark as installed for this version
-    echo "v6.5.0 installed $(date)" > "$MARKER"
+    echo "v7.0.0 installed $(date)" > "$MARKER"
     echo ""
     echo "[Swordigo] Setup complete! Launching game..."
     echo ""

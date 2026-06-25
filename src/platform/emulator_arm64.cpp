@@ -177,7 +177,7 @@ static void hook_bridge_64(uc_engine *uc, uint64_t address, uint32_t size, void 
 // --- Constructor ---
 
 EmulatorArm64::EmulatorArm64(uint8_t* guest_mem, uint64_t mem_size)
-    : memory(guest_mem), size(mem_size), bridge(nullptr), uc(nullptr) {
+    : memory(guest_mem), size(mem_size), uc(nullptr) {
     
     // Open Unicorn in AArch64 mode (no Thumb, no mode switching!)
     uc_err err = uc_open(UC_ARCH_ARM64, UC_MODE_ARM, (uc_engine**)&uc);
