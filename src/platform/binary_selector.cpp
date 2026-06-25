@@ -534,7 +534,7 @@ bool BinarySelector::add_custom_instance(const std::string& so_filepath, const s
     // Build BinaryInfo
     BinaryInfo info;
     info.filename = "libswordigo.so";
-    info.filepath = rel_dest_so;
+    info.filepath = dest_path;  // MUST be absolute — relative paths fail fs::exists() on reload and can't be launched
     info.version_dir = version_dir;
     info.arch = arch;
     info.file_size = fs::file_size(dest_path);
@@ -820,10 +820,22 @@ void BinarySelector::load_user_instances(const std::string& json_path) {
             continue;
         }
         
-        // Check for duplicates
+        // Check for duplicates and update metadata if already scanned from directory
         bool dup = false;
-        for (const auto& existing : binaries) {
-            if (existing.filepath == b.filepath) { dup = true; break; }
+        for (auto& existing : binaries) {
+            if (existing.filepath == b.filepath) {
+                existing.game_type = b.game_type;
+                existing.assets_dir = b.assets_dir;
+                existing.label = b.label;
+                existing.icon_path = b.icon_path;
+                existing.version = b.version;
+                if (!b.dependencies.empty()) {
+                    existing.dependencies = b.dependencies;
+                    existing.dep_paths = b.dep_paths;
+                }
+                dup = true;
+                break;
+            }
         }
         if (dup) continue;
         

@@ -2708,6 +2708,192 @@ void sre_register_mini_api(lua_State* L) {
 }
 
 /* =========================================================================
+ * RLSW Compatibility Stubs — Character, ItemDrop global tables
+ *
+ * RLSW's initialization scripts (db.scl, code.scl) call Character.*
+ * and ItemDrop.* before the native Caver engine's RegisterProgramLibrary
+ * has registered those globals. This causes a cascade of nil-index errors:
+ *
+ *   #1 Character.RegisterTreasure (code.scl:2200)
+ *   #2 ItemDrop.NumItems         (code.scl:2190)
+ *   #3 Character.AddItem         (code.scl:2476)
+ *   #5 DB nil (db.init crashes at Character.SetNumCoins before setting DB)
+ *   #6-10 cascading DB nil / offset errors
+ *
+ * We pre-register minimal stub tables during our SRE injection. The stubs
+ * return safe defaults (0, false, "") so that db.init() can complete and
+ * set the global DB table. Once the native engine's RegisterProgramLibrary
+ * fires and overwrites Character/ItemDrop with real implementations, all
+ * subsequent calls use the native ones.
+ *
+ * Stubs are ONLY registered if the global is currently nil — we never
+ * overwrite an already-registered native table.
+ * ========================================================================= */
+
+/* ---- Character stubs ---- */
+
+/* Character.NumCoins() → current coin count (from our player state mirror) */
+static int stub_char_num_coins(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_coins);
+    return 1;
+}
+
+/* Character.SetNumCoins(n) → update our mirror */
+static int stub_char_set_num_coins(lua_State* L) {
+    if (g_lua_isnumber(L, 1))
+        g_sre_player_coins = (int)g_lua_tonumber(L, 1);
+    return 0;
+}
+
+/* Character.GetMaxHealth() → player max HP */
+static int stub_char_get_max_health(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_max_hp);
+    return 1;
+}
+
+/* Character.GetCurrentHealth() → player current HP */
+static int stub_char_get_current_health(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_hp);
+    return 1;
+}
+
+/* Character.SetCurrentHealth(h) → update mirror */
+static int stub_char_set_current_health(lua_State* L) {
+    if (g_lua_isnumber(L, 1))
+        g_sre_player_hp = (int)g_lua_tonumber(L, 1);
+    return 0;
+}
+
+/* Character.GetMaxMana() */
+static int stub_char_get_max_mana(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_max_mana);
+    return 1;
+}
+
+/* Character.GetCurrentMana() */
+static int stub_char_get_current_mana(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_mana);
+    return 1;
+}
+
+/* Character.GetLevel() */
+static int stub_char_get_level(lua_State* L) {
+    g_lua_pushnumber(L, (double)g_sre_player_level);
+    return 1;
+}
+
+/* Character.HasFlag(name) → false (no flags known yet) */
+static int stub_char_has_flag(lua_State* L) {
+    (void)L;
+    g_lua_pushboolean(L, 0);
+    return 1;
+}
+
+/* Character.HasItem(name) → false */
+static int stub_char_has_item(lua_State* L) {
+    (void)L;
+    g_lua_pushboolean(L, 0);
+    return 1;
+}
+
+/* Character.ItemCount(name) → 0 */
+static int stub_char_item_count(lua_State* L) {
+    (void)L;
+    g_lua_pushnumber(L, 0.0);
+    return 1;
+}
+
+/* Generic no-op stub — for AddFlag, RemoveFlag, AddItem, RemoveItem,
+ * RegisterTreasure, AddSceneFlag, AddSkill, AddQuest etc. */
+static int stub_char_noop(lua_State* L) {
+    (void)L;
+    return 0;
+}
+
+/* ---- ItemDrop stubs ---- */
+
+/* ItemDrop.NumItems(obj) → 0 */
+static int stub_itemdrop_num_items(lua_State* L) {
+    (void)L;
+    g_lua_pushnumber(L, 0.0);
+    return 1;
+}
+
+/* ItemDrop.GetItem(obj, idx) → nil */
+static int stub_itemdrop_get_item(lua_State* L) {
+    (void)L;
+    g_lua_pushnil(L);
+    return 1;
+}
+
+/*
+ * sre_register_rlsw_stubs — register Character and ItemDrop stub tables
+ * into the Lua global table, but ONLY if those globals are currently nil.
+ *
+ * Called from sre_mini_ensure_injected() after Mini.* is registered.
+ */
+static void sre_register_rlsw_stubs(lua_State* L) {
+    /* ---- Character ---- */
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "Character");
+    int char_type = g_lua_type(L, -1);
+    g_lua_settop(L, -2);  /* pop */
+
+    if (char_type != LUA_TTABLE) {
+        /* Native Character not yet registered — install our stub */
+        g_lua_createtable(L, 0, 20);
+
+#define CHAR_STUB(name, fn) \
+        g_lua_pushcclosure(L, fn, 0); \
+        g_lua_setfield(L, -2, name);
+
+        CHAR_STUB("NumCoins",           stub_char_num_coins)
+        CHAR_STUB("SetNumCoins",        stub_char_set_num_coins)
+        CHAR_STUB("GetCoins",           stub_char_num_coins)       /* alias */
+        CHAR_STUB("GetMaxHealth",       stub_char_get_max_health)
+        CHAR_STUB("GetCurrentHealth",   stub_char_get_current_health)
+        CHAR_STUB("SetCurrentHealth",   stub_char_set_current_health)
+        CHAR_STUB("GetMaxMana",         stub_char_get_max_mana)
+        CHAR_STUB("GetCurrentMana",     stub_char_get_current_mana)
+        CHAR_STUB("GetLevel",           stub_char_get_level)
+        CHAR_STUB("HasFlag",            stub_char_has_flag)
+        CHAR_STUB("HasSceneFlag",       stub_char_has_flag)        /* same semantics */
+        CHAR_STUB("HasItem",            stub_char_has_item)
+        CHAR_STUB("ItemCount",          stub_char_item_count)
+        CHAR_STUB("AddFlag",            stub_char_noop)
+        CHAR_STUB("RemoveFlag",         stub_char_noop)
+        CHAR_STUB("AddSceneFlag",       stub_char_noop)
+        CHAR_STUB("AddItem",            stub_char_noop)
+        CHAR_STUB("RemoveItem",         stub_char_noop)
+        CHAR_STUB("RegisterTreasure",   stub_char_noop)
+        CHAR_STUB("AddSkill",           stub_char_noop)
+        CHAR_STUB("AddQuest",           stub_char_noop)
+#undef CHAR_STUB
+
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "Character");
+    }
+
+    /* ---- ItemDrop ---- */
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "ItemDrop");
+    int drop_type = g_lua_type(L, -1);
+    g_lua_settop(L, -2);  /* pop */
+
+    if (drop_type != LUA_TTABLE) {
+        g_lua_createtable(L, 0, 4);
+
+        g_lua_pushcclosure(L, stub_itemdrop_num_items, 0);
+        g_lua_setfield(L, -2, "NumItems");
+
+        g_lua_pushcclosure(L, stub_itemdrop_get_item, 0);
+        g_lua_setfield(L, -2, "GetItem");
+
+        g_lua_pushcclosure(L, stub_char_noop, 0);
+        g_lua_setfield(L, -2, "Drop");
+
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "ItemDrop");
+    }
+}
+
+/* =========================================================================
  * Lazy Mini.* injection — called from sre_lua_call_safe
  * =========================================================================
  * Instead of hooking RegisterProgramLibrary (which needs relay stubs that
@@ -2736,6 +2922,10 @@ void sre_mini_ensure_injected(lua_State* L) {
 
     /* Inject Mini.*, LNI.*, Components.*, Game.*, Health.*, fs tables */
     sre_register_mini_api(L);
+
+    /* Inject RLSW compat stubs (Character, ItemDrop) — prevents nil-index
+     * crashes during db.init() before native RegisterProgramLibrary fires */
+    sre_register_rlsw_stubs(L);
 
     /* Cache this state */
     if (g_injected_count < MAX_INJECTED_STATES) {

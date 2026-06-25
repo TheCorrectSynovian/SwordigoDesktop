@@ -1710,6 +1710,7 @@ const char* postfx_preset_name(PostFXPreset p) {
 
 bool fbo_is_active() { return g_fbo_ok; }
 unsigned int fbo_get_texture() { return g_fbo_tex; }
+unsigned int fbo_get_fbo() { return g_fbo; }
 
 // ======== Vanilla Portal Rendering (no FBO pipeline required) ========
 // Renders the portal effect directly into whatever framebuffer is currently bound.

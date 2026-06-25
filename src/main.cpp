@@ -22,9 +22,7 @@ namespace fs = std::filesystem;
 #include "platform/emulator.h"
 #include "platform/emulator_arm64.h"
 #include "platform/i_emulator_arm64.h"
-#ifdef USE_DYNARMIC
 #include "platform/emulator_dynarmic64.h"
-#endif
 #include "platform/display.h"
 #include "android/asset_manager.h"
 #include "game/camera_override.h"
@@ -45,6 +43,7 @@ namespace fs = std::filesystem;
 #include "platform/binary_selector.h"
 #include "platform/launcher_ui.h"
 #include "platform/srt_overlay.h"
+#include "platform/scl_parser.h"
 
 extern bool g_display_active;
 extern int g_win_w;
@@ -116,6 +115,74 @@ static bool     g_lua_console_ready = false;       // true when all addrs resolv
 static bool     g_lua_console_open = false;        // true when console UI is visible
 static std::string g_lua_console_input;            // Current input line
 static std::vector<std::pair<std::string,bool>> g_lua_console_history; // {text, is_error}
+
+// SCL Hot-reloader tracking
+static std::map<std::string, fs::file_time_type> g_scl_file_times;
+static uint32_t g_scl_last_check_time = 0;
+
+static void update_scl_hot_reload() {
+    uint32_t now = SDL_GetTicks();
+    if (now - g_scl_last_check_time < 1500) {
+        return; // Check every 1.5s
+    }
+    g_scl_last_check_time = now;
+
+    std::string mods_dir = "./scl_mods";
+    if (!fs::exists(mods_dir)) {
+        fs::create_directories(mods_dir);
+        return;
+    }
+
+    if (!g_lua_console_buf_addr || !g_lua_console_pending_addr || !g_lua_console_status_addr) {
+        return;
+    }
+
+    int32_t pending = *(int32_t*)(g_guest_memory + g_lua_console_pending_addr);
+    if (pending != 0) {
+        return;
+    }
+
+    try {
+        for (const auto& entry : fs::directory_iterator(mods_dir)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".scl") {
+                std::string path = entry.path().string();
+                auto last_write = fs::last_write_time(entry.path());
+
+                if (g_scl_file_times.find(path) == g_scl_file_times.end() || g_scl_file_times[path] < last_write) {
+                    g_scl_file_times[path] = last_write;
+                    
+                    std::cout << "[SclHotReload] Found SCL: " << entry.path().filename() << std::endl;
+                    std::string lua = scl::extract_lua(path);
+                    if (lua.empty()) {
+                        std::cerr << "[SclHotReload] Failed to parse SCL: " << path << std::endl;
+                        continue;
+                    }
+
+                    std::string home_dir = getenv("HOME") ? getenv("HOME") : ".";
+                    std::string xdg_data = getenv("XDG_DATA_HOME") ? getenv("XDG_DATA_HOME") : (home_dir + "/.local/share");
+                    std::string save_dir = xdg_data + "/swordigo-desktop/save/Documents";
+                    
+                    fs::create_directories(save_dir);
+                    std::string temp_lua_path = save_dir + "/scl_injected.lua";
+                    std::ofstream out(temp_lua_path, std::ios::binary);
+                    if (!out) continue;
+                    out.write(lua.data(), lua.size());
+                    out.close();
+
+                    char* buf = (char*)(g_guest_memory + g_lua_console_buf_addr);
+                    std::string cmd = "dofile(\"/Files/scl_injected.lua\")";
+                    memcpy(buf, cmd.c_str(), cmd.size() + 1);
+
+                    g_lua_console_history.push_back({"[Host] SCL Hot-loaded: " + entry.path().filename().string(), false});
+
+                    *(int32_t*)(g_guest_memory + g_lua_console_pending_addr) = 1;
+                    *(int32_t*)(g_guest_memory + g_lua_console_status_addr) = 0;
+                    break; 
+                }
+            }
+        }
+    } catch (...) {}
+}
 
 // SRE lua_resume error monitoring — guest addresses
 static uint64_t g_sre_resume_err_count_addr = 0;
@@ -1876,12 +1943,9 @@ void load_and_boot_arm64() {
 
     // Initialize ARM64 Emulator AFTER memory is prepared
     // Multi-engine backend selection
-#ifdef USE_DYNARMIC
     if (g_use_dynarmic) {
         g_emulator_64 = new EmulatorDynarmic64(g_guest_memory, GUEST_MEM_SIZE);
-    } else
-#endif
-    {
+    } else {
         g_emulator_64 = new EmulatorArm64(g_guest_memory, GUEST_MEM_SIZE);
     }
     std::cout << "[Engine] Using " << g_emulator_64->engine_name() << " backend" << std::endl;
@@ -3354,6 +3418,8 @@ void load_and_boot_arm64() {
             float game_dt = dt_seconds * g_game_speed;
             uint32_t dt_hex;
             memcpy(&dt_hex, &game_dt, 4);
+
+            update_scl_hot_reload();
 
             if (!g_game_paused || g_step_one_frame) {
                 // ARM64 AAPCS: float dt goes in S0, not X2
@@ -4845,12 +4911,10 @@ int main(int argc, char* argv[]) {
 #ifdef VULKAN_BACKEND
         if (strcmp(argv[i], "--vulkan") == 0) g_graphics_api = GraphicsAPI::VULKAN;
 #endif
-#ifdef USE_DYNARMIC
         if (strcmp(argv[i], "--engine=dynarmic") == 0 || strcmp(argv[i], "--dynarmic") == 0) {
             g_use_dynarmic = true;
             std::cout << "[Main] Engine: Dynarmic JIT" << std::endl;
         }
-#endif
         if (strcmp(argv[i], "--test-lib") == 0) {
             g_lib_name = "engine/v1.4.12/armeabi-v7a/libswordigo.so";
             std::cout << "[Main] Using v1.4.12 ARM32" << std::endl;
@@ -4976,9 +5040,7 @@ int main(int argc, char* argv[]) {
             g_graphics_api = lconf.graphics_api;
             g_lib_name = lconf.selected_binary;
             g_assets_dir = lconf.assets_dir;
-#ifdef USE_DYNARMIC
             g_use_dynarmic = lconf.use_dynarmic;
-#endif
             // Re-initialize the asset manager with the correct assets directory
             // (asset_manager_init was called at startup with the default "assets" path)
             asset_manager_init(get_data_path(g_assets_dir).c_str());
@@ -5107,6 +5169,13 @@ int main(int argc, char* argv[]) {
     io_thread_stop();
     
     std::cout << "[Main] Swordigo — session complete." << std::endl;
+    
+    // Clean up memory leaks on exit
+    if (g_emulator_64) { delete g_emulator_64; g_emulator_64 = nullptr; }
+    if (g_emulator) { delete g_emulator; g_emulator = nullptr; }
+    if (g_loader_64) { delete g_loader_64; g_loader_64 = nullptr; }
+    if (g_loader) { delete g_loader; g_loader = nullptr; }
+    if (g_guest_memory) { free(g_guest_memory); g_guest_memory = nullptr; }
     
     return 0;
 }

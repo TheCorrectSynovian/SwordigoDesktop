@@ -9,8 +9,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20x86__64-purple.svg)](#)
-[![Version](https://img.shields.io/badge/Version-v7.0-00e5ff.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases)
-[![Engine](https://img.shields.io/badge/Engine-SRT%20v7.0-8b3dff.svg)](#-srt-architecture)
+[![Version](https://img.shields.io/badge/Version-v7.1-00e5ff.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases)
+[![Engine](https://img.shields.io/badge/Engine-SRT%20v7.1-8b3dff.svg)](#-srt-architecture)
 
 [Website](https://thecorrectsynovian.github.io/SwordigoDesktop/web/) · [Download](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases) · [Research](https://thecorrectsynovian.github.io/SwordigoDesktop/web/research.html) · [Changelog](https://thecorrectsynovian.github.io/SwordigoDesktop/web/changelog.html)
 
@@ -131,13 +131,13 @@ v7.0 brings the **Dynarmic JIT revolution** — ARM64 code now runs through a Ju
 
 ---
 
-## 📦 Install (v7.0)
+## 📦 Install (v7.1)
 
 ### Pre-built Packages
 | Format | Platform | Command |
 |--------|----------|---------|
-| `.rpm` | Fedora x86_64 | `sudo dnf install swordigo-desktop-7.0.0-1.x86_64.rpm` |
-| `.deb` | Debian/Ubuntu x86_64 | `sudo dpkg -i swordigo-desktop_7.0.0-1_amd64.deb` |
+| `.rpm` | Fedora x86_64 | `sudo dnf install swordigo-desktop-7.1.0-1.x86_64.rpm` |
+| `.deb` | Debian/Ubuntu x86_64 | `sudo dpkg -i swordigo-desktop_7.1.0-1_amd64.deb` |
 
 ### Build from Source
 
@@ -190,10 +190,7 @@ All controls are fully remappable — press **F2** to open the Controls Editor. 
 ## ⚠️ Known Limitations
 
 ### ARM64 (arm64-v8a) — Primary Target
-| Issue | Severity | Details |
-|-------|----------|---------|
-| Bolt/timer misbehavior | 🟡 Medium | Timing misalignment causes certain bosses, bolt-shooting enemies, and bolt traps to fire at abnormal rates. Will be patched. |
-| Text input crash | 🟡 Medium | Typing into certain UI fields can crash — avoid F7 in menus |
+No major known limitations. Emulation is stable, feature-complete, and runs at locked 60 FPS.
 
 ### ARM32 (armeabi-v7a)
 | Issue | Severity | Details |

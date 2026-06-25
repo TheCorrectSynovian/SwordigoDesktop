@@ -2,6 +2,22 @@
 
 All notable changes to Swordigo Desktop.
 
+## [v7.1] — 2026-06-25
+
+### Added
+- **SRE Compatibility Check for Custom Instances** — added `custom-` path prefix check in `main.cpp`, ensuring `libsre.so` correctly loads for user-added modded instances.
+- **SRE Dependency Registration** — added automatic dependency inclusion for `libsre.so` in `launcher_ui.cpp` when importing custom instances with SRE enabled.
+
+### Changed
+- Package version bumped to 7.1.0 with nickname **hot-fix**.
+- **Config Persistence Priority** — config loaded from `instances.json` now merges and takes priority over filesystem-scanned metadata on duplicates, retaining game type and assets settings.
+
+### Fixed
+- **Custom Modded Instance Crash** — resolved startup abort crashes (empty `.POD` errors) on custom modded instances by ensuring the correct guest binary (e.g. RLSwordigo binary instead of vanilla) is copied and `libsre.so` hooks are properly initialized.
+- **Bolt/Timer misbehavior and Text input crash** — removed old known limitations from documentation as SRE hooks now fully intercept and resolve them.
+
+---
+
 ## [v7.0] — 2026-06-24
 
 ### Added

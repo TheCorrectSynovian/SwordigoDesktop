@@ -28,14 +28,12 @@ LIBS := $(SDL3_LIBS) $(SDL3I_LIBS) $(VORB_LIBS) $(ZLIB_LIBS) $(OAL_LIBS) \
 # First run: make dynarmic-build  (builds the static library)
 DYNARMIC_DIR := deps/dynarmic
 DYNARMIC_BUILD := $(DYNARMIC_DIR)/build
-ifdef DYNARMIC
-    ALL_CXXFLAGS += -DUSE_DYNARMIC -I$(DYNARMIC_DIR)/src
-    LIBS += -L$(DYNARMIC_BUILD)/src/dynarmic -ldynarmic \
-            -L$(DYNARMIC_BUILD)/externals/mcl/src -lmcl \
-            -L$(DYNARMIC_BUILD)/externals/fmt -lfmt \
-            -L$(DYNARMIC_BUILD)/externals/zydis -lZydis \
-            -L$(DYNARMIC_BUILD)/externals/zydis/zycore -lZycore
-endif
+ALL_CXXFLAGS += -DUSE_DYNARMIC -I$(DYNARMIC_DIR)/src
+LIBS += -L$(DYNARMIC_BUILD)/src/dynarmic -ldynarmic \
+        -L$(DYNARMIC_BUILD)/externals/mcl/src -lmcl \
+        -L$(DYNARMIC_BUILD)/externals/fmt -lfmt \
+        -L$(DYNARMIC_BUILD)/externals/zydis -lZydis \
+        -L$(DYNARMIC_BUILD)/externals/zydis/zycore -lZycore
 
 # Source files
 CXX_SRCS := \
@@ -69,10 +67,8 @@ CXX_SRCS := \
     src/imgui/backends/imgui_impl_sdl3.cpp \
     src/imgui/backends/imgui_impl_opengl3.cpp
 
-# Conditionally include Dynarmic backend
-ifdef DYNARMIC
+# Unconditionally include Dynarmic backend
 CXX_SRCS += src/platform/emulator_dynarmic64.cpp
-endif
 
 C_SRCS := \
     src/android/asset_manager.c \

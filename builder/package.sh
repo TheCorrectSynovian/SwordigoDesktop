@@ -40,7 +40,7 @@ set -e
 # ============================================================
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="7.0.0"
+VERSION="7.1.0"
 RELEASE="1"
 ARCH="x86_64"
 BUILD_DIR="/tmp/swordigo-packaging"
@@ -55,7 +55,7 @@ SHIP_VERSIONS=("v1.4.6" "v1.4.12")
 FORMAT="${1:-all}"     # rpm | deb | all
 
 echo "============================================"
-echo " Swordigo Desktop v7.0 — Package Builder"
+echo " Swordigo Desktop v7.1 — Package Builder"
 echo "============================================"
 echo "  Format: $FORMAT"
 echo "  Repo:   $ROOT_DIR"
@@ -272,7 +272,7 @@ Icon=swordigo-desktop
 Terminal=false
 Type=Application
 Categories=Game;ActionGame;AdventureGame;
-Comment=Swordigo Desktop v7.0 — Native Linux runtime with Dynarmic JIT
+Comment=Swordigo Desktop v7.1 — Native Linux runtime with Dynarmic JIT
 Keywords=swordigo;game;rpg;adventure;
 StartupWMClass=Swordigo
 EOF
@@ -367,7 +367,7 @@ build_rpm() {
 Name:           ${PKG_NAME}
 Version:        ${VERSION}
 Release:        ${RELEASE}
-Summary:        Swordigo Desktop v7.0 — Native Linux runtime with Dynarmic JIT
+Summary:        Swordigo Desktop v7.1 — Native Linux runtime with Dynarmic JIT
 License:        MIT
 Group:          Amusements/Games
 URL:            https://github.com/TheCorrectSynovian/SwordigoDesktop
@@ -375,7 +375,7 @@ AutoReq:        no
 AutoProv:       no
 
 %description
-Swordigo Desktop v7.0 — Native Linux runtime for Swordigo.
+Swordigo Desktop v7.1 — Native Linux runtime for Swordigo.
 Dynarmic JIT compiler (default) for 60fps ARM64 emulation.
 Unicorn Engine fallback for maximum compatibility.
 SDL3, OpenGL/Vulkan, OpenAL. RLSwordigo + KiwiAPI mod support.
@@ -403,6 +403,11 @@ fi
 
 %changelog
 * $(date +'%a %b %d %Y') QuantumCreeper <quantumcreeper@gmail.com> - ${VERSION}-${RELEASE}
+- v7.1 Release — hot-fix: Stability improvements
+- FIX: SRE compatibility check updated to include custom- instances, resolving crash on startup
+- FIX: RLSwordigo instance compatibility fixes for asset directories and launcher copying
+- FIX: Duplicate check duplicate resolution merging filesystem configuration
+* Wed Jun 24 2026 QuantumCreeper <quantumcreeper@gmail.com> - 7.0.0-1
 - v7.0 Release — Dynarmic JIT: The Performance Revolution
 - NEW: Dynarmic JIT compiler — ARM64 at near-native speed (60fps)
 - NEW: RLSwordigo support — play the roguelike spinoff
@@ -450,13 +455,13 @@ Section: games
 Priority: optional
 Architecture: amd64
 Maintainer: QuantumCreeper <quantumcreeper@gmail.com>
-Description: Swordigo Desktop v7.0 — Native Linux runtime with Dynarmic JIT
+Description: Swordigo Desktop v7.1 — Native Linux runtime with Dynarmic JIT
  Complete Swordigo Desktop with all game assets, engine binaries,
  music, and tools. Installs to ~/.local/share/swordigo-desktop/
  for full user access (Minecraft-style data management).
  .
- v7.0: Dynarmic JIT for 60fps ARM64 emulation, RLSwordigo support,
- KiwiAPI mod compatibility, 34+ SRE hooks, PostFX, save editor.
+ v7.1: hot-fix: SRE loading for custom instances, launcher and asset loading bugfixes.
+ v7.0: Dynarmic JIT for 60fps ARM64 emulation, RLSwordigo support.
 Homepage: https://github.com/TheCorrectSynovian/SwordigoDesktop
 CTRL
 

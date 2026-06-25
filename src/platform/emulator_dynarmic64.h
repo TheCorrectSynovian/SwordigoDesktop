@@ -8,7 +8,10 @@
 #include <memory>
 
 // Forward declare Dynarmic types (avoid including heavy headers in .h)
-namespace Dynarmic { namespace A64 { class Jit; } }
+namespace Dynarmic { 
+    class ExclusiveMonitor;
+    namespace A64 { class Jit; } 
+}
 
 // ============================================================================
 // EmulatorDynarmic64 — High-performance ARM64 JIT backend using Dynarmic.
@@ -94,6 +97,9 @@ private:
 
     // TPIDR_EL0 storage (Dynarmic needs a pointer to this)
     uint64_t tpidr_el0_value = 0;
+    
+    // Core monitor state
+    // std::unique_ptr<Dynarmic::ExclusiveMonitor> exclusive_monitor;
 };
 
 #endif
