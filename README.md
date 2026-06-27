@@ -233,9 +233,9 @@ No major known limitations. Emulation is stable, feature-complete, and runs at l
 |------|------|--------|
 | **Lead Developer** | TheMegineBraine | [@Mano K](https://github.com/branirayine) |
 | **Developer** | TheCorrectSynovian | [@QuantumCreeper](https://github.com/TheCorrectSynovian) |
-| **Developer** | MrSinup | [@BingsWumpus](https://github.com/MrSinup) |
+| **Developer** | MrSinup | [MrSinup](https://github.com/MrSinup) |
 | **Developer** | X Dukinja | [@Duke](https://github.com/Dukinja) |
-| **Designer** | ETPV | [@ETPV07](https://github.com/ETPV07) | 
+| **Designer** | ETPV | [@BingsWumpus](https://github.com/ETPV07) | 
 
 ### Research & Community
 
