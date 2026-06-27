@@ -231,9 +231,11 @@ No major known limitations. Emulation is stable, feature-complete, and runs at l
 
 | Role | Name | GitHub |
 |------|------|--------|
-| **Lead Developer** | TheMegineBraine | -- |
+| **Lead Developer** | TheMegineBraine | [@Mano K](https://github.com/branirayine) |
 | **Developer** | TheCorrectSynovian | [@QuantumCreeper](https://github.com/TheCorrectSynovian) |
-| **Developer** | MrSinup | -- |
+| **Developer** | MrSinup | [@BingsWumpus](https://github.com/MrSinup) |
+| **Developer** | X Dukinja | [@Duke](https://github.com/Dukinja) |
+| **Designer** | ETPV | [@ETPV07](https://github.com/ETPV07) | 
 
 ### Research & Community
 
