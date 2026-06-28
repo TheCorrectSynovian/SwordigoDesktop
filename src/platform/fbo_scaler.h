@@ -92,7 +92,7 @@ void fbo_destroy();
 void fbo_begin_game();
 void fbo_end_game_and_blit(int win_w, int win_h, FBOScale mode = FBOScale::SHARP_BILINEAR, const PostFXState* postfx = nullptr);
 unsigned int fbo_get_texture();
-unsigned int fbo_get_fbo(); // <== Added to query the main FBO ID
+unsigned int fbo_get_fbo();
 bool fbo_is_active();
 
 // Render portal effect directly into the current framebuffer (for non-PostFX / vanilla mode).

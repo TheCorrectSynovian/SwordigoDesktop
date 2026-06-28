@@ -1549,6 +1549,11 @@ void fbo_end_game_and_blit(int win_w, int win_h, FBOScale mode, const PostFXStat
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
         glBlitFramebuffer(0, 0, g_game_w, g_game_h, 0, 0, win_w, win_h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        extern int g_sre_viewport_x, g_sre_viewport_y, g_sre_viewport_w, g_sre_viewport_h;
+        g_sre_viewport_x = 0;
+        g_sre_viewport_y = 0;
+        g_sre_viewport_w = win_w;
+        g_sre_viewport_h = win_h;
         glViewport(0, 0, win_w, win_h);
         return;
     }
@@ -1562,6 +1567,11 @@ void fbo_end_game_and_blit(int win_w, int win_h, FBOScale mode, const PostFXStat
     } else {
         vw = win_w; vh = (int)(win_w / game_aspect); vx = 0; vy = (win_h - vh) / 2;
     }
+    extern int g_sre_viewport_x, g_sre_viewport_y, g_sre_viewport_w, g_sre_viewport_h;
+    g_sre_viewport_x = vx;
+    g_sre_viewport_y = vy;
+    g_sre_viewport_w = vw;
+    g_sre_viewport_h = vh;
     glViewport(vx, vy, vw, vh);
 
     glUseProgram(prog);
@@ -1710,7 +1720,6 @@ const char* postfx_preset_name(PostFXPreset p) {
 
 bool fbo_is_active() { return g_fbo_ok; }
 unsigned int fbo_get_texture() { return g_fbo_tex; }
-unsigned int fbo_get_fbo() { return g_fbo; }
 
 // ======== Vanilla Portal Rendering (no FBO pipeline required) ========
 // Renders the portal effect directly into whatever framebuffer is currently bound.
@@ -1806,4 +1815,8 @@ void fbo_draw_portal_vanilla(int viewport_w, int viewport_h) {
     if (!blend_was_on) glDisable(GL_BLEND);
     glBlendFunc(old_blend_src, old_blend_dst);
     glUseProgram(0);
+}
+
+unsigned int fbo_get_fbo() {
+    return g_fbo;
 }

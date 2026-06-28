@@ -480,15 +480,6 @@ void EmulatorDynarmic64::run(uint64_t start_pc) {
             break;
         }
 
-        // Check for Memory Abort / NoExecuteFault
-        if (Dynarmic::Has(hr, Dynarmic::HaltReason::MemoryAbort)) {
-            std::cerr << "[Dynarmic] Halt (MemoryAbort) at 0x" << std::hex << curr_pc
-                      << " — force returning" << std::dec << std::endl;
-            jit->SetPC(MAGIC_LR);
-            jit->SetSP(entry_sp);
-            break;
-        }
-
         // Check if function completed
         if (curr_pc == MAGIC_LR) break;
 

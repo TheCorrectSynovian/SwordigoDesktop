@@ -42,7 +42,7 @@ static void      DrawToolbar(bool& running, LaunchConfig& cfg, bool& show_option
 static void      DrawInstancePanel(BinarySelector& selector, int& selected, float width);
 static void      DrawDetailPanel(BinarySelector& selector, int selected,
                                  LaunchConfig& cfg, bool& running, int& api_sel,
-                                 int& engine_sel, bool& show_save_editor, float mods_width);
+                                 int& engine_sel, bool& use_sre_sel, bool& show_save_editor, float mods_width);
 static void      DrawModsPanel(float width);
 static void      DrawStatusBar(int selected, const BinarySelector& selector);
 static void      DrawOptionsModal(bool& show_options);
@@ -758,7 +758,7 @@ static void DrawInstancePanel(BinarySelector& selector, int& selected, float wid
 
 static void DrawDetailPanel(BinarySelector& selector, int selected,
                             LaunchConfig& cfg, bool& running, int& api_sel,
-                            int& engine_sel, bool& show_save_editor, float mods_width) {
+                            int& engine_sel, bool& use_sre_sel, bool& show_save_editor, float mods_width) {
     ImGuiViewport* vp = ImGui::GetMainViewport();
     float inst_width = 260.0f;
     ImVec2 panel_pos(vp->WorkPos.x + inst_width, vp->WorkPos.y + TOOLBAR_H);
@@ -845,6 +845,7 @@ static void DrawDetailPanel(BinarySelector& selector, int selected,
     if (ImGui::Button(ICON_FA_ROCKET "  LAUNCH", ImVec2(launch_w, 52))) {
         cfg.graphics_api = (api_sel == 0) ? GraphicsAPI::OPENGL : GraphicsAPI::VULKAN;
         cfg.use_dynarmic = (engine_sel == 1);
+        cfg.use_sre = use_sre_sel;
         cfg.selected_binary = b.filepath;
         cfg.assets_dir = b.assets_dir;
         cfg.game_type = b.game_type;
@@ -875,6 +876,14 @@ static void DrawDetailPanel(BinarySelector& selector, int selected,
         ImGui::RadioButton("OpenGL", &api_sel, 0);
         ImGui::SameLine();
         ImGui::RadioButton("Vulkan", &api_sel, 1);
+    }
+
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.545f, 0.580f, 0.620f, 1.0f));
+        ImGui::Text(ICON_FA_CODE "  SRE Hooks");
+        ImGui::PopStyleColor();
+        ImGui::SameLine(180);
+        ImGui::Checkbox("Enable SRE (libsre.so)", &use_sre_sel);
     }
 
     ImGui::Spacing();
@@ -1415,192 +1424,18 @@ static void DrawSaveEditor(bool& show_save_editor) {
         ImGui::Separator();
         ImGui::Spacing();
 
-        if (ImGui::BeginTabBar("SaveTabs")) {
-            if (ImGui::BeginTabItem("Stats & Attributes")) {
-                ImGui::Spacing();
-                ImGui::InputInt("Coins",  &sf.game_state.character.coins);
-                ImGui::InputInt("Health", &sf.game_state.character.health);
-                ImGui::InputInt("Mana",   &sf.game_state.character.mana);
-                ImGui::InputInt("XP",     &sf.game_state.character.xp);
-                ImGui::InputInt("Level",  &sf.game_state.character.level);
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Text("Attributes:");
-                ImGui::InputInt("Health Attr", &sf.game_state.character.health_attr);
-                ImGui::InputInt("Attack Attr", &sf.game_state.character.attack_attr);
-                ImGui::InputInt("Magic Attr",  &sf.game_state.character.magic_attr);
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Checkbox("Cheat Mode Enabled", &sf.cheat_enabled);
-                ImGui::EndTabItem();
-            }
+        ImGui::Text("Character Stats:");
+        ImGui::InputInt("Coins",  &sf.game_state.character.coins);
+        ImGui::InputInt("Health", &sf.game_state.character.health);
+        ImGui::InputInt("Mana",   &sf.game_state.character.mana);
+        ImGui::InputInt("XP",     &sf.game_state.character.xp);
+        ImGui::InputInt("Level",  &sf.game_state.character.level);
 
-            if (ImGui::BeginTabItem("Equipment")) {
-                ImGui::Spacing();
-                
-                auto draw_combo = [](const char* label, std::string& current, const std::vector<std::pair<std::string, std::string>>& items) {
-                    std::string current_display = "None";
-                    for (const auto& item : items) {
-                        if (item.first == current) {
-                            current_display = item.second;
-                            break;
-                        }
-                    }
-                    if (ImGui::BeginCombo(label, current_display.c_str())) {
-                        if (ImGui::Selectable("None", current.empty())) {
-                            current = "";
-                        }
-                        for (const auto& item : items) {
-                            bool selected = (item.first == current);
-                            if (ImGui::Selectable(item.second.c_str(), selected)) {
-                                current = item.first;
-                            }
-                        }
-                        ImGui::EndCombo();
-                    }
-                };
-
-                std::vector<std::pair<std::string, std::string>> weapons = {
-                    {"brasssword", "Brass Sword"},
-                    {"ironsword", "Iron Sword"},
-                    {"needle", "The Needle"},
-                    {"broadsword", "Broad Sword"},
-                    {"thorn", "The Thorn"},
-                    {"magicsword", "Magic Sword"},
-                    {"legendsword", "The Mageblade"}
-                };
-
-                std::vector<std::pair<std::string, std::string>> armor = {
-                    {"platearmor", "Plate Armor"},
-                    {"magicarmor", "Magic Armor"}
-                };
-
-                std::vector<std::pair<std::string, std::string>> trinkets = {
-                    {"firetrinket", "Trinket of Fire"},
-                    {"icetrinket", "Trinket of Ice"},
-                    {"shadowtrinket", "Trinket of Shadow"}
-                };
-
-                std::vector<std::pair<std::string, std::string>> spells = {
-                    {"bolt", "Magic Bolt"},
-                    {"bomb", "Magic Bomb"},
-                    {"hookshot", "Dragon's Grasp"},
-                    {"dimension", "Dimension Rift"}
-                };
-
-                draw_combo("Equipped Weapon", sf.game_state.character.equipped_weapon, weapons);
-                draw_combo("Profile Equipped Weapon", sf.equipped_weapon_name, weapons);
-                ImGui::Spacing();
-                draw_combo("Equipped Armor", sf.game_state.character.equipped_armor, armor);
-                draw_combo("Profile Equipped Armor", sf.equipped_armor_name, armor);
-                ImGui::Spacing();
-                draw_combo("Current Spell", sf.game_state.character.current_skill, spells);
-                ImGui::Spacing();
-                draw_combo("Weapon Trinket", sf.game_state.character.weapon_trinket, trinkets);
-                draw_combo("Armor Trinket", sf.game_state.character.armor_trinket, trinkets);
-                draw_combo("Skill Trinket", sf.game_state.character.skill_trinket, trinkets);
-
-                ImGui::EndTabItem();
-            }
-
-            if (ImGui::BeginTabItem("Spells Unlocked")) {
-                ImGui::Spacing();
-                ImGui::Text("Spells / Skills:");
-                
-                auto draw_skill_check = [&](const char* label, const std::string& skill_id) {
-                    auto& list = sf.game_state.character.skills;
-                    bool has_it = (std::find(list.begin(), list.end(), skill_id) != list.end());
-                    bool check = has_it;
-                    if (ImGui::Checkbox(label, &check)) {
-                        if (check && !has_it) {
-                            list.push_back(skill_id);
-                        } else if (!check && has_it) {
-                            list.erase(std::remove(list.begin(), list.end(), skill_id), list.end());
-                        }
-                    }
-                };
-
-                draw_skill_check("Magic Bolt", "bolt");
-                draw_skill_check("Magic Bomb", "bomb");
-                draw_skill_check("Dragon's Grasp (Hookshot)", "hookshot");
-                draw_skill_check("Dimension Rift", "dimension");
-
-                ImGui::EndTabItem();
-            }
-
-            if (ImGui::BeginTabItem("Inventory")) {
-                ImGui::Spacing();
-                
-                if (ImGui::BeginTable("EditItemsTable", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersInnerH)) {
-                    ImGui::TableSetupColumn("Item ID", ImGuiTableColumnFlags_WidthStretch);
-                    ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed, 100.0f);
-                    ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 80.0f);
-                    ImGui::TableHeadersRow();
-
-                    auto& items_list = sf.game_state.character.items;
-                    for (int i = 0; i < (int)items_list.size(); i++) {
-                        ImGui::TableNextRow();
-                        ImGui::PushID(i);
-
-                        ImGui::TableNextColumn();
-                        ImGui::Text("%s", items_list[i].name.c_str());
-
-                        ImGui::TableNextColumn();
-                        ImGui::SetNextItemWidth(-1);
-                        ImGui::InputInt("##count", &items_list[i].count);
-
-                        ImGui::TableNextColumn();
-                        if (ImGui::Button("Delete")) {
-                            items_list.erase(items_list.begin() + i);
-                            i--;
-                        }
-
-                        ImGui::PopID();
-                    }
-                    ImGui::EndTable();
-                }
-
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-                ImGui::Text("Add Item:");
-
-                static char new_item_buf[128] = "";
-                static int new_item_count = 1;
-                
-                std::vector<std::pair<std::string, std::string>> presets = {
-                    {"key_yellow", "A Key"},
-                    {"healingpotion", "Healing Potion"},
-                    {"experiencesack", "Sack of Experience"},
-                    {"ankh", "Ankh of Resurrection"},
-                    {"iselon_shard_1", "Mageblade Shard 1"},
-                    {"iselon_shard_2", "Mageblade Shard 2"},
-                    {"iselon_shard_3", "Mageblade Shard 3"},
-                    {"iselon_shard_4", "Mageblade Shard 4"}
-                };
-
-                if (ImGui::BeginCombo("Select Preset", "Custom ID...")) {
-                    for (const auto& p : presets) {
-                        if (ImGui::Selectable(p.second.c_str(), false)) {
-                            snprintf(new_item_buf, sizeof(new_item_buf), "%s", p.first.c_str());
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-
-                ImGui::InputText("Custom Item ID", new_item_buf, sizeof(new_item_buf));
-                ImGui::InputInt("Quantity", &new_item_count);
-                if (ImGui::Button("Add to Inventory") && new_item_buf[0]) {
-                    SaveItem new_item = {new_item_buf, new_item_count};
-                    sf.game_state.character.items.push_back(new_item);
-                    new_item_buf[0] = 0;
-                    new_item_count = 1;
-                }
-
-                ImGui::EndTabItem();
-            }
-            ImGui::EndTabBar();
-        }
+        ImGui::Spacing();
+        ImGui::Text("Attributes:");
+        ImGui::InputInt("Health Attr", &sf.game_state.character.health_attr);
+        ImGui::InputInt("Attack Attr", &sf.game_state.character.attack_attr);
+        ImGui::InputInt("Magic Attr",  &sf.game_state.character.magic_attr);
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -1942,6 +1777,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
     bool running = true;
     int api_sel = 0;        // 0 = OpenGL, 1 = Vulkan
     int engine_sel = 1;     // 0 = Unicorn, 1 = Dynarmic (default: JIT for performance)
+    bool use_sre_sel = true; // whether to load libsre.so (user choice)
     bool show_options = false;
     bool show_save_editor = false;
 
@@ -1967,6 +1803,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                         if (!cur_bins.empty() && bin_sel >= 0 && bin_sel < (int)cur_bins.size()) {
                             cfg.graphics_api = (api_sel == 0) ? GraphicsAPI::OPENGL : GraphicsAPI::VULKAN;
                             cfg.use_dynarmic = (engine_sel == 1);
+                            cfg.use_sre = use_sre_sel;
                             cfg.selected_binary = cur_bins[bin_sel].filepath;
                             cfg.assets_dir = cur_bins[bin_sel].assets_dir;
                             cfg.game_type = cur_bins[bin_sel].game_type;
@@ -2024,7 +1861,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
 
         DrawToolbar(running, cfg, show_options);
         DrawInstancePanel(selector, bin_sel, inst_panel_w);
-        DrawDetailPanel(selector, bin_sel, cfg, running, api_sel, engine_sel, show_save_editor, mods_panel_w);
+        DrawDetailPanel(selector, bin_sel, cfg, running, api_sel, engine_sel, use_sre_sel, show_save_editor, mods_panel_w);
         DrawModsPanel(mods_panel_w);
         DrawStatusBar(bin_sel, selector);
 
@@ -2161,7 +1998,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                     } else if (g_add_asset_type == 1) {
                         assets_dir_name = "rl_assets";
                     } else {
-                        // Custom: copy base assets first, then overlay custom folder to inst-<name>/
+                        // Custom: copy folder to inst-<name>/
                         std::string custom_src = g_add_custom_assets;
                         if (custom_src.empty()) {
                             g_add_status = "Please specify the custom assets folder.";
@@ -2173,20 +2010,8 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                                     fs::remove_all(dest);
                                 }
                                 fs::create_directories(dest);
-                                
-                                // Determine base assets based on game type
-                                std::string base_assets = (gt_sel == 1) ? "rl_assets" : "assets";
-                                std::string base_src = get_user_data_dir() + "/" + base_assets;
-                                
-                                // Copy base assets first
-                                if (fs::exists(base_src)) {
-                                    fs::copy(base_src, dest, fs::copy_options::recursive | fs::copy_options::overwrite_existing);
-                                    std::cout << "[Launcher] Copied base assets: " << base_src << " -> " << dest << std::endl;
-                                }
-                                
-                                // Overlay custom folder on top
                                 fs::copy(custom_src, dest, fs::copy_options::recursive | fs::copy_options::overwrite_existing);
-                                std::cout << "[Launcher] Copied custom assets: " << custom_src << " -> " << dest << std::endl;
+                                std::cout << "[Launcher] Copied assets: " << custom_src << " -> " << dest << std::endl;
                             } catch (const std::exception& e) {
                                 g_add_status = std::string("Error copying assets: ") + e.what();
                             }
@@ -2194,88 +2019,11 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                     }
 
                     if (g_add_status.empty()) {
-                        std::string base_so;
-                        bool should_copy_binary = (g_add_asset_type == 2); // Only copy binary if custom folder selected
-                        
-                        if (gt_sel == 1) { // RLSwordigo
-                            for (const auto& b : selector.get_binaries()) {
-                                if (b.game_type == "RLSwordigo" && b.arch == BinaryArch::ARM64 && b.version_dir.find("custom-") != 0) {
-                                    base_so = b.filepath;
-                                    break;
-                                }
-                            }
-                            if (base_so.empty()) {
-                                // No ARM64 RLSwordigo binary exists - fall back to vanilla Swordigo ARM64
-                                // User will use rl_assets with vanilla binary (common workaround)
-                                for (const auto& b : selector.get_binaries()) {
-                                    if (b.game_type == "Swordigo" && b.arch == BinaryArch::ARM64 && b.version_dir.find("custom-") != 0) {
-                                        base_so = b.filepath;
-                                        break;
-                                    }
-                                }
-                                if (base_so.empty()) {
-                                    base_so = get_user_data_dir() + "/engine/v1.4.12/arm64-v8a/libswordigo.so";
-                                }
-                            }
-                        } else { // Swordigo / Custom / etc.
-                            for (const auto& b : selector.get_binaries()) {
-                                if (b.game_type == "Swordigo" && b.arch == BinaryArch::ARM64 && b.version_dir.find("custom-") != 0) {
-                                    base_so = b.filepath;
-                                    break;
-                                }
-                            }
-                            if (base_so.empty()) {
-                                base_so = get_user_data_dir() + "/engine/v1.4.12/arm64-v8a/libswordigo.so";
-                            }
-                        }
+                        std::string base_so = get_user_data_dir() + "/engine/v1.4.12/arm64-v8a/libswordigo.so";
 
-                        // For Vanilla/RL assets (not custom folder), create a reference instance without copying binary
-                        if (!should_copy_binary) {
-                            // Find the existing BinaryInfo for this binary
-                            BinaryInfo* existing = nullptr;
-                            auto& bins_mut = const_cast<std::vector<BinaryInfo>&>(selector.get_binaries());
-                            for (auto& b : bins_mut) {
-                                if (b.filepath == base_so) {
-                                    existing = &b;
-                                    break;
-                                }
-                            }
-                            if (existing) {
-                                // Create a new instance referencing the same binary but with custom assets_dir
-                                BinaryInfo new_inst = *existing;
-                                new_inst.label = (gt_sel == 1) ? "[RL] [Custom] " + std::string(g_add_name) + " [ARM64] (Unknown)" : "[Custom] " + std::string(g_add_name) + " [ARM64] (Unknown)";
-                                new_inst.version_dir = "custom-" + std::string(g_add_name);
-                                new_inst.assets_dir = assets_dir_name;
-                                new_inst.is_default = false;
-                                new_inst.version = g_add_name;
-                                new_inst.status = BinaryStatus::UNKNOWN;
-                                bins_mut.push_back(new_inst);
-                                std::cout << "[Launcher] Created reference instance: " << new_inst.label << " -> " << new_inst.filepath << std::endl;
-                                
-                                // Handle SRE for reference instances
-                                if (g_add_use_sre) {
-                                    auto& last = bins_mut.back();
-                                    auto& deps = last.dependencies;
-                                    auto& dpaths = last.dep_paths;
-                                    
-                                    // Add libsre.so as dependency from the base binary's directory
-                                    std::string sre_path = fs::path(base_so).parent_path().string() + "/libsre.so";
-                                    if (fs::exists(sre_path)) {
-                                        if (std::find(deps.begin(), deps.end(), "libsre.so") == deps.end()) {
-                                            deps.push_back("libsre.so");
-                                            dpaths.push_back(sre_path);
-                                        }
-                                    }
-                                }
-                            } else {
-                                g_add_status = "Could not find base binary to reference.";
-                            }
-                        } else if (selector.add_custom_instance(base_so, g_add_name, assets_dir_name)) {
+                        if (selector.add_custom_instance(base_so, g_add_name, assets_dir_name)) {
                             if (g_add_use_sre) {
-                                std::string sre_src = fs::path(base_so).parent_path().string() + "/libsre.so";
-                                if (!fs::exists(sre_src)) {
-                                    sre_src = get_user_data_dir() + "/engine/v1.4.12/arm64-v8a/libsre.so";
-                                }
+                                std::string sre_src = get_user_data_dir() + "/engine/v1.4.12/arm64-v8a/libsre.so";
                                 std::string arch_dir = get_user_data_dir() + "/engine/custom-" + std::string(g_add_name) + "/arm64-v8a";
                                 if (fs::exists(sre_src)) {
                                     try {
@@ -2295,18 +2043,9 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                                         return p.find("libmini.so") != std::string::npos ||
                                                p.find("libGlossHook.so") != std::string::npos;
                                     }), dpaths.end());
-
-                                    // Add libsre.so as a dependency so it is loaded by the emulator
-                                    if (std::find(deps.begin(), deps.end(), "libsre.so") == deps.end()) {
-                                        deps.push_back("libsre.so");
-                                        dpaths.push_back(arch_dir + "/libsre.so");
-                                    }
                                 }
                             }
-                        }
 
-                        // Save user instances for both reference and copied instances
-                        if (g_add_status.empty()) {
                             std::string config_dir;
                             const char* xdg_config = getenv("XDG_CONFIG_HOME");
                             if (xdg_config) {

@@ -185,104 +185,13 @@ void JniBridge::call_handler(uint32_t address, void* emu_ptr) {
 // --- Memory Allocator Bridges ---
 static uint32_t g_guest_heap_ptr = 0x20000000; // Start heap at 512MB
 static std::unordered_map<uint32_t, uint32_t> g_guest_allocs;
-static std::map<uint32_t, uint32_t> g_free_by_addr;
-static std::multimap<uint32_t, uint32_t> g_free_by_size;
-static std::recursive_mutex g_allocator_mutex;
-
-static uint32_t alloc_guest_mem(uint32_t size) {
-    size = (size + 7) & ~7;
-    if (size == 0) return 0;
-    
-    std::lock_guard<std::recursive_mutex> lock(g_allocator_mutex);
-    // Find first block of size >= requested size
-    auto it = g_free_by_size.lower_bound(size);
-    if (it != g_free_by_size.end()) {
-        uint32_t block_size = it->first;
-        uint32_t addr = it->second;
-        
-        // Remove from both maps
-        g_free_by_size.erase(it);
-        g_free_by_addr.erase(addr);
-        
-        // Split block if it's larger than needed
-        if (block_size > size) {
-            uint32_t new_addr = addr + size;
-            uint32_t new_size = block_size - size;
-            g_free_by_addr[new_addr] = new_size;
-            g_free_by_size.insert({new_size, new_addr});
-        }
-        
-        g_guest_allocs[addr] = size;
-        return addr;
-    }
-    
-    // Bump allocator if no free block of suitable size
-    uint32_t addr = g_guest_heap_ptr;
-    g_guest_heap_ptr += size;
-    g_guest_allocs[addr] = size;
-    return addr;
-}
-
-static void free_guest_mem(uint32_t addr) {
-    if (addr == 0) return;
-    std::lock_guard<std::recursive_mutex> lock(g_allocator_mutex);
-    auto it = g_guest_allocs.find(addr);
-    if (it != g_guest_allocs.end()) {
-        uint32_t size = it->second;
-        g_guest_allocs.erase(it);
-        
-        uint32_t merged_addr = addr;
-        uint32_t merged_size = size;
-        
-        // Check next block: does a free block start at addr + size?
-        auto next_it = g_free_by_addr.find(addr + size);
-        if (next_it != g_free_by_addr.end()) {
-            uint32_t next_size = next_it->second;
-            merged_size += next_size;
-            
-            // Remove next block from both maps
-            auto size_range = g_free_by_size.equal_range(next_size);
-            for (auto sit = size_range.first; sit != size_range.second; ++sit) {
-                if (sit->second == addr + size) {
-                    g_free_by_size.erase(sit);
-                    break;
-                }
-            }
-            g_free_by_addr.erase(next_it);
-        }
-        
-        // Check prev block: find the predecessor in g_free_by_addr
-        auto prev_it = g_free_by_addr.lower_bound(addr);
-        if (prev_it != g_free_by_addr.begin()) {
-            prev_it = std::prev(prev_it);
-            if (prev_it->first + prev_it->second == addr) {
-                uint32_t prev_addr = prev_it->first;
-                uint32_t prev_size = prev_it->second;
-                merged_addr = prev_addr;
-                merged_size += prev_size;
-                
-                // Remove prev block from both maps
-                auto size_range = g_free_by_size.equal_range(prev_size);
-                for (auto sit = size_range.first; sit != size_range.second; ++sit) {
-                    if (sit->second == prev_addr) {
-                        g_free_by_size.erase(sit);
-                        break;
-                    }
-                }
-                g_free_by_addr.erase(prev_it);
-            }
-        }
-        
-        // Insert merged block into both maps
-        g_free_by_addr[merged_addr] = merged_size;
-        g_free_by_size.insert({merged_size, merged_addr});
-    }
-}
 
 void bridge_malloc(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     uint32_t size = emu->get_reg(0);
-    uint32_t addr = alloc_guest_mem(size);
+    uint32_t addr = g_guest_heap_ptr;
+    g_guest_heap_ptr += (size + 7) & ~7;
+    g_guest_allocs[addr] = size;
     emu->set_reg(0, addr);
 }
 
@@ -291,10 +200,10 @@ void bridge_calloc(void* emu_ptr) {
     uint32_t num = emu->get_reg(0);
     uint32_t size = emu->get_reg(1);
     uint32_t total = num * size;
-    uint32_t addr = alloc_guest_mem(total);
-    if (addr != 0) {
-        std::memset(emu->get_memory_base() + addr, 0, (total + 7) & ~7);
-    }
+    uint32_t addr = g_guest_heap_ptr;
+    g_guest_heap_ptr += (total + 7) & ~7;
+    g_guest_allocs[addr] = total;
+    std::memset(emu->get_memory_base() + addr, 0, total);
     emu->set_reg(0, addr);
 }
 
@@ -302,8 +211,6 @@ void bridge_realloc(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     uint32_t ptr = emu->get_reg(0);
     uint32_t size = emu->get_reg(1);
-    std::lock_guard<std::recursive_mutex> lock(g_allocator_mutex);
-    
     if (ptr != 0 && g_guest_allocs.count(ptr) == 0) {
         static int realloc_warn_count = 0;
         if (realloc_warn_count < 5) {
@@ -315,39 +222,27 @@ void bridge_realloc(void* emu_ptr) {
             realloc_warn_count++;
         }
     }
-    
     if (ptr == 0) {
-        uint32_t addr = alloc_guest_mem(size);
+        uint32_t addr = g_guest_heap_ptr;
+        g_guest_heap_ptr += (size + 7) & ~7;
+        g_guest_allocs[addr] = size;
         emu->set_reg(0, addr);
         return;
     }
     if (size == 0) {
-        free_guest_mem(ptr);
         emu->set_reg(0, 0);
         return;
     }
-    
-    uint32_t old_size = size;
-    auto it = g_guest_allocs.find(ptr);
-    if (it != g_guest_allocs.end()) {
-        old_size = it->second;
+    uint32_t old_size = 0;
+    if (g_guest_allocs.count(ptr)) {
+        old_size = g_guest_allocs[ptr];
     }
-    
-    uint32_t addr = alloc_guest_mem(size);
-    if (addr != 0) {
-        uint32_t copy_size = (old_size < size) ? old_size : size;
-        if (copy_size > 0) {
-            uint32_t max_copy = 0;
-            if (ptr < 0xD0000000) {
-                max_copy = 0xD0000000 - ptr;
-                if (copy_size > max_copy) copy_size = max_copy;
-                std::memcpy(emu->get_memory_base() + addr, emu->get_memory_base() + ptr, copy_size);
-            }
-        }
-    }
-    
-    if (it != g_guest_allocs.end()) {
-        free_guest_mem(ptr);
+    uint32_t addr = g_guest_heap_ptr;
+    g_guest_heap_ptr += (size + 7) & ~7;
+    g_guest_allocs[addr] = size;
+    uint32_t copy_size = (old_size < size) ? old_size : size;
+    if (copy_size > 0) {
+        std::memcpy(emu->get_memory_base() + addr, emu->get_memory_base() + ptr, copy_size);
     }
     emu->set_reg(0, addr);
 }
@@ -355,7 +250,9 @@ void bridge_realloc(void* emu_ptr) {
 void bridge_free(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     uint32_t ptr = emu->get_reg(0);
-    free_guest_mem(ptr);
+    if (ptr) {
+        g_guest_allocs.erase(ptr);
+    }
 }
 
 // --- Standard C Memory & String Bridges ---
@@ -993,7 +890,8 @@ void bridge_GetStringUTFChars(void* emu_ptr) {
         emu->set_reg(0, jstr);
     } else if (g_jstrings.count(jstr) > 0) {
         std::string str = g_jstrings[jstr];
-        uint32_t addr = alloc_guest_mem(str.length() + 8);
+        uint32_t addr = g_guest_heap_ptr;
+        g_guest_heap_ptr += (str.length() + 8) & ~7;
         std::strcpy((char*)(memory + addr), str.c_str());
         emu->set_reg(0, addr);
     } else if (jstr > 0x1000 && jstr < 0x40000000) {
@@ -1120,19 +1018,9 @@ void bridge_PopLocalFrame(void* emu_ptr) {
 }
 
 void bridge_DeleteLocalRef(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t obj = emu->get_reg(1);
-    if (obj != 0) {
-        g_jstrings.erase(obj);
-    }
 }
 
 void bridge_DeleteGlobalRef(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t obj = emu->get_reg(1);
-    if (obj != 0) {
-        g_jstrings.erase(obj);
-    }
 }
 
 void bridge_NewObjectV(void* emu_ptr) {
@@ -1719,10 +1607,6 @@ void bridge_GetStringUTFLength(void* emu_ptr) {
 }
 
 void bridge_ReleaseStringUTFChars(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    uint32_t jstr = emu->get_reg(1);
-    uint32_t addr = emu->get_reg(2);
-    free_guest_mem(addr);
 }
 
 void bridge_GetArrayLength(void* emu_ptr) {
@@ -2482,7 +2366,8 @@ void bridge_opendir(void* emu_ptr) {
     }
     
     GuestDir* gd = new GuestDir();
-    gd->guest_dirent_addr = alloc_guest_mem(280); // allocate 280 bytes in guest heap for dirent struct
+    gd->guest_dirent_addr = g_guest_heap_ptr;
+    g_guest_heap_ptr += (280 + 7) & ~7; // allocate 280 bytes in guest heap for dirent struct
     
     for (const auto& entry : fs::directory_iterator(path)) {
         std::string name = entry.path().filename().string();

@@ -18,8 +18,6 @@
 #include <cstdlib>
 #include <cstdio>
 #include <unordered_map>
-#include <map>
-#include <set>
 #include <unordered_set>
 #include <mutex>
 #include <sys/stat.h>
@@ -107,7 +105,6 @@ struct Arm64VaList {
     }
 };
 
-
 // ============================================================================
 // JniBridge64 Class Methods
 // ============================================================================
@@ -147,7 +144,6 @@ void JniBridge64::register_handler(const std::string& name, BridgeHandler64 hand
 void JniBridge64::call_handler(uint64_t address, void* emu_ptr) {
     if (addr_to_func.count(address)) {
         BridgeFunction64& func = addr_to_func[address];
-        // std::cout << "[DEBUG] Bridge call: " << func.name << " (0x" << std::hex << address << ")" << std::dec << std::endl;
         IEmulatorArm64* emu = (IEmulatorArm64*)emu_ptr;
         if (!emu->quiet_mode) {
             static const std::unordered_map<std::string, bool> quiet_funcs = {
@@ -259,40 +255,9 @@ static uint32_t float_to_uint(float f) {
 static uint32_t g_guest_heap_ptr = 0x20000000; // Start heap at 512MB
 static std::unordered_map<uint32_t, uint32_t> g_guest_allocs;
 
-// --- MEM LEAK FIX (COMMENTED OUT FOR RESEARCH - may cause slowdown or changed behaviour) ---
-// static std::map<uint32_t, uint32_t> g_free_by_addr;
-// static std::multimap<uint32_t, uint32_t> g_free_by_size;
-//
-// static uint32_t alloc_guest_mem(uint32_t size) { ... free-list impl ... }
-// static void free_guest_mem(uint32_t addr) { ... coalesceing free ... }
-//
-// See full commented code in git history / previous version.
-
-static std::mutex g_allocator_mutex;
-
-// Stub alloc_guest_mem / free_guest_mem: simple bump-allocator wrappers.
-// All callers in this file (GetStringUTFChars, strerror, opendir, etc.) use
-// these. The free-list implementation is commented out above for research.
-static uint32_t alloc_guest_mem(uint32_t size) {
-    size = (size + 7) & ~7;
-    if (size == 0) return 0;
-    std::lock_guard<std::mutex> lock(g_allocator_mutex);
-    uint32_t addr = g_guest_heap_ptr;
-    g_guest_heap_ptr += size;
-    g_guest_allocs[addr] = size;
-    return addr;
-}
-
-static void free_guest_mem(uint32_t addr) {
-    // No-op in bump-allocator mode — memory is never reclaimed
-    (void)addr;
-}
-
-
 static void bridge_malloc(void* emu_ptr) {
     IEmulatorArm64* emu = (IEmulatorArm64*)emu_ptr;
     uint32_t size = emu->get_reg(0);
-    std::lock_guard<std::mutex> lock(g_allocator_mutex);
     uint32_t addr = g_guest_heap_ptr;
     g_guest_heap_ptr += (size + 7) & ~7;
     g_guest_allocs[addr] = size;
@@ -304,7 +269,6 @@ static void bridge_calloc(void* emu_ptr) {
     uint32_t num = emu->get_reg(0);
     uint32_t size = emu->get_reg(1);
     uint32_t total = num * size;
-    std::lock_guard<std::mutex> lock(g_allocator_mutex);
     uint32_t addr = g_guest_heap_ptr;
     g_guest_heap_ptr += (total + 7) & ~7;
     g_guest_allocs[addr] = total;
@@ -316,7 +280,6 @@ static void bridge_realloc(void* emu_ptr) {
     IEmulatorArm64* emu = (IEmulatorArm64*)emu_ptr;
     uint32_t ptr = emu->get_reg(0);
     uint32_t size = emu->get_reg(1);
-    std::lock_guard<std::mutex> lock(g_allocator_mutex);
     if (ptr == 0) {
         // realloc(NULL, size) == malloc(size)
         uint32_t addr = g_guest_heap_ptr;
@@ -337,6 +300,8 @@ static void bridge_realloc(void* emu_ptr) {
     if (g_guest_allocs.count(ptr)) {
         old_size = g_guest_allocs[ptr];
     } else {
+        // Unregistered pointer — use requested size as old_size estimate
+        // (we'll copy at most 'size' bytes, which is safe)
         old_size = size;
     }
     uint32_t addr = g_guest_heap_ptr;
@@ -354,7 +319,6 @@ static void bridge_free(void* emu_ptr) {
     IEmulatorArm64* emu = (IEmulatorArm64*)emu_ptr;
     uint32_t ptr = emu->get_reg(0);
     if (ptr) {
-        std::lock_guard<std::mutex> lock(g_allocator_mutex);
         g_guest_allocs.erase(ptr);
     }
 }
@@ -736,7 +700,8 @@ static void bridge_GetStringUTFChars(void* emu_ptr) {
         emu->set_reg(0, jstr);
     } else if (g_jstrings.count(jstr) > 0) {
         std::string str = g_jstrings[jstr];
-        uint32_t addr = alloc_guest_mem(str.length() + 8);
+        uint32_t addr = g_guest_heap_ptr;
+        g_guest_heap_ptr += (str.length() + 8) & ~7;
         std::strcpy((char*)(memory + addr), str.c_str());
         emu->set_reg(0, addr);
     } else if (jstr > 0x1000 && jstr < 0x40000000) {
@@ -869,17 +834,9 @@ static void bridge_PopLocalFrame(void* emu_ptr) {
 }
 
 static void bridge_DeleteLocalRef(void* emu_ptr) {
-    // MEM LEAK FIX (COMMENTED OUT FOR RESEARCH):
-    // IEmulatorArm64* emu = (IEmulatorArm64*)emu_ptr;
-    // uint32_t obj = emu->get_reg(1);
-    // if (obj != 0) { g_jstrings.erase(obj); }
 }
 
 static void bridge_DeleteGlobalRef(void* emu_ptr) {
-    // MEM LEAK FIX (COMMENTED OUT FOR RESEARCH):
-    // IEmulatorArm64* emu = (IEmulatorArm64*)emu_ptr;
-    // uint32_t obj = emu->get_reg(1);
-    // if (obj != 0) { g_jstrings.erase(obj); }
 }
 
 static void bridge_NewObjectV(void* emu_ptr) {
@@ -1516,11 +1473,6 @@ static void bridge_GetStringUTFLength(void* emu_ptr) {
 }
 
 static void bridge_ReleaseStringUTFChars(void* emu_ptr) {
-    // MEM LEAK FIX (COMMENTED OUT FOR RESEARCH):
-    // IEmulatorArm64* emu = (IEmulatorArm64*)emu_ptr;
-    // uint32_t jstr = emu->get_reg(1);
-    // uint32_t addr = emu->get_reg(2);
-    // free_guest_mem(addr);  // free_guest_mem removed when allocator reverted
 }
 
 static void bridge_GetArrayLength(void* emu_ptr) {
@@ -2043,7 +1995,8 @@ static void bridge_strerror(void* emu_ptr) {
     // Return a pointer to a static "unknown error" string in guest memory
     static uint32_t err_addr = 0;
     if (err_addr == 0) {
-        err_addr = alloc_guest_mem(32);
+        err_addr = g_guest_heap_ptr;
+        g_guest_heap_ptr += 32;
         const char* msg = "unknown error";
         memcpy(emu->get_memory_base() + err_addr, msg, strlen(msg) + 1);
     }
@@ -2250,7 +2203,8 @@ static uint32_t g_sF_addr = 0;
 static void bridge__sF(void* emu_ptr) {
     IEmulatorArm64* emu = (IEmulatorArm64*)emu_ptr;
     if (g_sF_addr == 0) {
-        g_sF_addr = alloc_guest_mem(512); // 3 fake FILE structs
+        g_sF_addr = g_guest_heap_ptr;
+        g_guest_heap_ptr += 512; // 3 fake FILE structs
         memset(emu->get_memory_base() + g_sF_addr, 0, 512);
     }
     emu->set_reg(0, g_sF_addr);
@@ -2261,7 +2215,8 @@ static uint32_t g_errno_addr = 0;
 static void bridge__errno(void* emu_ptr) {
     IEmulatorArm64* emu = (IEmulatorArm64*)emu_ptr;
     if (g_errno_addr == 0) {
-        g_errno_addr = alloc_guest_mem(8);
+        g_errno_addr = g_guest_heap_ptr;
+        g_guest_heap_ptr += 8;
         *(int*)(emu->get_memory_base() + g_errno_addr) = 0;
     }
     emu->set_reg(0, g_errno_addr);
@@ -2279,7 +2234,8 @@ static void bridge_setlocale(void* emu_ptr) {
     // Return a pointer to "C" locale string in guest memory
     static uint32_t locale_addr = 0;
     if (locale_addr == 0) {
-        locale_addr = alloc_guest_mem(8);
+        locale_addr = g_guest_heap_ptr;
+        g_guest_heap_ptr += 8;
         memcpy(emu->get_memory_base() + locale_addr, "C\0", 2);
     }
     emu->set_reg(0, locale_addr);
@@ -3023,7 +2979,8 @@ static void bridge_opendir(void* emu_ptr) {
     }
     
     GuestDir* gd = new GuestDir();
-    gd->guest_dirent_addr = alloc_guest_mem(280); // allocate 280 bytes in guest heap for dirent struct
+    gd->guest_dirent_addr = g_guest_heap_ptr;
+    g_guest_heap_ptr += (280 + 7) & ~7; // allocate 280 bytes in guest heap for dirent struct
     
     for (const auto& entry : fs::directory_iterator(path)) {
         std::string name = entry.path().filename().string();
@@ -5676,8 +5633,8 @@ static void bridge_gl_finish(void* emu_ptr) {
 // We need to track guest FBO IDs and map them to host FBOs, while being
 // careful not to conflict with the host's own FBO (from fbo_scaler).
 
-// The FBO ID from fbo_scaler.cpp (via fbo_get_fbo)
-extern unsigned int fbo_get_fbo(); // defined in fbo_scaler.cpp
+// Track the host FBO that fbo_scaler is using, so we can restore it
+extern GLuint g_game_fbo;  // from fbo_scaler.cpp
 
 static void bridge_gl_gen_framebuffers(void* emu_ptr) {
     IEmulatorArm64* emu = (IEmulatorArm64*)emu_ptr;
@@ -5710,7 +5667,7 @@ static void bridge_gl_bind_framebuffer(void* emu_ptr) {
     
     if (framebuffer == 0) {
         // Game unbinding FBO → bind back to host's game FBO (not FBO 0!)
-        glBindFramebuffer(target, fbo_get_fbo());
+        glBindFramebuffer(target, g_game_fbo);
     } else {
         glBindFramebuffer(target, framebuffer);
     }
@@ -6525,28 +6482,11 @@ void JniBridge64::init_standard_bridges() {
     register_handler("glBufferSubData", bridge_gl_noop);
     register_handler("glDeleteTextures", bridge_gl_delete_textures);
     register_handler("glDeleteBuffers", bridge_gl_delete_buffers);
-    register_handler("glBindFramebuffer", bridge_gl_bind_framebuffer);
-    register_handler("glBindFramebufferOES", bridge_gl_bind_framebuffer);
-    register_handler("glGenFramebuffers", bridge_gl_gen_framebuffers);
-    register_handler("glGenFramebuffersOES", bridge_gl_gen_framebuffers);
-    register_handler("glDeleteFramebuffers", bridge_gl_delete_framebuffers);
-    register_handler("glDeleteFramebuffersOES", bridge_gl_delete_framebuffers);
-    register_handler("glFramebufferTexture2D", bridge_gl_framebuffer_texture2d);
-    register_handler("glFramebufferTexture2DOES", bridge_gl_framebuffer_texture2d);
+    register_handler("glBindFramebuffer", bridge_gl_noop);
+    register_handler("glGenFramebuffers", bridge_glGenBuffers);
+    register_handler("glDeleteFramebuffers", bridge_gl_noop);
+    register_handler("glFramebufferTexture2D", bridge_gl_noop);
     register_handler("glCheckFramebufferStatus", bridge_gl_framebuffer_status);
-    register_handler("glCheckFramebufferStatusOES", bridge_gl_framebuffer_status);
-    
-    register_handler("glBindRenderbuffer", bridge_gl_bind_renderbuffer);
-    register_handler("glBindRenderbufferOES", bridge_gl_bind_renderbuffer);
-    register_handler("glGenRenderbuffers", bridge_gl_gen_renderbuffers);
-    register_handler("glGenRenderbuffersOES", bridge_gl_gen_renderbuffers);
-    register_handler("glDeleteRenderbuffers", bridge_gl_noop);
-    register_handler("glDeleteRenderbuffersOES", bridge_gl_noop);
-    register_handler("glRenderbufferStorage", bridge_gl_renderbuffer_storage);
-    register_handler("glRenderbufferStorageOES", bridge_gl_renderbuffer_storage);
-    register_handler("glFramebufferRenderbuffer", bridge_gl_framebuffer_renderbuffer);
-    register_handler("glFramebufferRenderbufferOES", bridge_gl_framebuffer_renderbuffer);
-
     register_handler("glGenTextures", bridge_glGenTextures);
     register_handler("glGenBuffers", bridge_glGenBuffers);
     register_handler("glGetError", bridge_glGetError);
