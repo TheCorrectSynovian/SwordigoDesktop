@@ -23,7 +23,7 @@
 v7.0 brings the **Dynarmic JIT revolution** — ARM64 code now runs through a Just-In-Time compiler at near-native speed, delivering **60fps buttery smooth gameplay** with instant touch response. 
 
 ---
--> Capataible with **KiwiAPI**
+-> Compatible with **KiwiAPI**
 ---
 
 ## ⚡ SRT Architecture
