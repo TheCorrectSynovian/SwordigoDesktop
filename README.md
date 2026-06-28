@@ -20,8 +20,10 @@
 
 **Swordigo Desktop** is a native Linux port of the beloved mobile action-adventure platformer by Touch Foo. Rather than running through Android emulation layers, this project uses the **Swordigo Runtime (SRT)** — a layered runtime architecture that treats `libswordigo.so` as a gameplay kernel while progressively replacing subsystems with clean, native reimplementations.
 
-v7.0 brings the **Dynarmic JIT revolution** — ARM64 code now runs through a Just-In-Time compiler at near-native speed, delivering **60fps buttery smooth gameplay** with instant touch response. Combined with **RLSwordigo support** and **KiwiAPI compatibility**, this is the biggest performance update ever.
+v7.0 brings the **Dynarmic JIT revolution** — ARM64 code now runs through a Just-In-Time compiler at near-native speed, delivering **60fps buttery smooth gameplay** with instant touch response. 
 
+---
+-> Capataible with **KiwiAPI**
 ---
 
 ## ⚡ SRT Architecture
