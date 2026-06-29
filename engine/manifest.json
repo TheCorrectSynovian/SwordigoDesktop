@@ -2,90 +2,21 @@
   "default": "engine/v1.4.12/armeabi-v7a/libswordigo.so",
   "instances": [
     {
-      "name": "[RL] v6.6-rl [ARM32] (Stable)",
-      "filename": "libswordigo.so",
-      "filepath": "engine/rl-v6.6/armeabi-v7a/libswordigo.so",
-      "sha256": "a7c00ff6f3ed0d5b3221158d6e214bba03288c1e6782be3dc2c736ae80eb19df",
-      "version": "6.6-rl",
-      "version_dir": "rl-v6.6",
-      "arch": "ARM32",
-      "file_size": 4603040,
-      "is_default": true,
-      "status": "tested",
-      "game_type": "RLSwordigo",
-      "assets_dir": "rl_assets",
-      "dependencies": ["libmini.so", "libGlossHook.so"],
-      "dep_paths": ["engine/rl-v6.6/armeabi-v7a/libmini.so", "engine/rl-v6.6/armeabi-v7a/libGlossHook.so"]
-    }
-,
-    {
-      "name": "[RL] v6.6-rl [ARM64] (Placeholder)",
+      "name": "[RL] v6.6-rl [ARM64] (Stable)",
       "filename": "libswordigo.so",
       "filepath": "engine/rl-v6.6/arm64-v8a/libswordigo.so",
-      "sha256": "",
+      "sha256": "f847814d1b6f81268567ed5ec2473fea4d4ee3b75d2c6fec7057227225e989f8",
       "version": "6.6-rl",
       "version_dir": "rl-v6.6",
       "arch": "ARM64",
-      "file_size": 0,
+      "file_size": 7230152,
       "is_default": false,
-      "status": "placeholder",
+      "status": "tested",
       "game_type": "RLSwordigo",
       "assets_dir": "rl_assets",
       "dependencies": ["libsre.so", "libmini.so", "libGlossHook.so"],
       "dep_paths": ["engine/rl-v6.6/arm64-v8a/libsre.so", "engine/rl-v6.6/arm64-v8a/libmini.so", "engine/rl-v6.6/arm64-v8a/libGlossHook.so"]
-    }
-,
-    {
-      "name": "[3D] [ARM64] (Unknown)",
-      "filename": "libswordigo.so",
-      "filepath": "engine/sw3d/arm64-v8a/libswordigo.so",
-      "sha256": "b02907dad262b892bdf61de7b0d0061d9f79201594de58061d5a327db79d88ff",
-      "version": "sw3d",
-      "version_dir": "sw3d",
-      "arch": "ARM64",
-      "file_size": 7230152,
-      "is_default": false,
-      "status": "unknown",
-      "game_type": "Swordigo",
-      "assets_dir": "assets",
-      "dependencies": ["libsre.so", "libmini.so", "libGlossHook.so"],
-      "dep_paths": ["engine/sw3d/arm64-v8a/libsre.so", "engine/sw3d/arm64-v8a/libmini.so", "engine/sw3d/arm64-v8a/libGlossHook.so"]
-    }
-,
-    {
-      "name": "[3D] [ARM32] (Unknown)",
-      "filename": "libswordigo.so",
-      "filepath": "engine/sw3d/armeabi-v7a/libswordigo.so",
-      "sha256": "274e6b2d096e014e50ed54532db4c88403a3d34cd0179878aafdfeb21b58d38a",
-      "version": "sw3d",
-      "version_dir": "sw3d",
-      "arch": "ARM32",
-      "file_size": 4607136,
-      "is_default": false,
-      "status": "unknown",
-      "game_type": "Swordigo",
-      "assets_dir": "assets",
-      "dependencies": ["libmini.so", "libGlossHook.so"],
-      "dep_paths": ["engine/sw3d/armeabi-v7a/libmini.so", "engine/sw3d/armeabi-v7a/libGlossHook.so"]
-    }
-,
-    {
-      "name": "v1.1 [ARM32] (Unknown)",
-      "filename": "libswordigo.so",
-      "filepath": "engine/v1.1/armeabi-v7a/libswordigo.so",
-      "sha256": "78d25368c05ba9684c14ce6795aceebc1ba7c7ad0f09380daa80126209321c5b",
-      "version": "1.1",
-      "version_dir": "v1.1",
-      "arch": "ARM32",
-      "file_size": 3831956,
-      "is_default": false,
-      "status": "unknown",
-      "game_type": "Swordigo",
-      "assets_dir": "assets",
-      "dependencies": [],
-      "dep_paths": []
-    }
-,
+    },
     {
       "name": "v1.4.12 [ARM64] (Tested)",
       "filename": "libswordigo.so",
@@ -101,25 +32,7 @@
       "assets_dir": "assets",
       "dependencies": ["libsre.so"],
       "dep_paths": ["engine/v1.4.12/arm64-v8a/libsre.so"]
-    }
-,
-    {
-      "name": "v1.4.12 [ARM32] (Stable)",
-      "filename": "libswordigo.so",
-      "filepath": "engine/v1.4.12/armeabi-v7a/libswordigo.so",
-      "sha256": "08d49dd6f7f8639a4c59f290ff2bb79254accf710f530bf53c2fce1659191c9e",
-      "version": "1.4.12",
-      "version_dir": "v1.4.12",
-      "arch": "ARM32",
-      "file_size": 4607136,
-      "is_default": true,
-      "status": "tested",
-      "game_type": "Swordigo",
-      "assets_dir": "assets",
-      "dependencies": [],
-      "dep_paths": []
-    }
-,
+    },
     {
       "name": "v1.4.6 [ARM64] (Unknown)",
       "filename": "libswordigo.so",
@@ -135,25 +48,23 @@
       "assets_dir": "assets",
       "dependencies": ["libsre.so"],
       "dep_paths": ["engine/v1.4.6/arm64-v8a/libsre.so"]
-    }
-,
+    },
     {
-      "name": "v1.4.6 [ARM32] (Stable)",
+      "name": "v1.4.12 [ARM32] (Stable)",
       "filename": "libswordigo.so",
-      "filepath": "engine/v1.4.6/armeabi-v7a/libswordigo.so",
-      "sha256": "cee15dd2730746269ce5db97d150371ebbad1f41371c6a728f1bb7d045632138",
-      "version": "1.4.6",
-      "version_dir": "v1.4.6",
+      "filepath": "engine/v1.4.12/armeabi-v7a/libswordigo.so",
+      "sha256": "08d49dd6f7f8639a4c59f290ff2bb79254accf710f530bf53c2fce1659191c9e",
+      "version": "1.4.12",
+      "version_dir": "v1.4.12",
       "arch": "ARM32",
-      "file_size": 4603040,
-      "is_default": false,
+      "file_size": 4607136,
+      "is_default": true,
       "status": "tested",
       "game_type": "Swordigo",
       "assets_dir": "assets",
       "dependencies": [],
       "dep_paths": []
-    }
-,
+    },
     {
       "name": "[Manson Mod] vManson [ARM64] (Unknown)",
       "filename": "libswordigo.so",
@@ -166,27 +77,9 @@
       "is_default": false,
       "status": "unknown",
       "game_type": "Swordigo",
-      "assets_dir": "assets",
+      "assets_dir": "inst-Manson_mod",
       "dependencies": ["libsre.so", "libmini.so", "libGlossHook.so", "libopenal-soft.so"],
       "dep_paths": ["engine/vManson/arm64-v8a/libsre.so", "engine/vManson/arm64-v8a/libmini.so", "engine/vManson/arm64-v8a/libGlossHook.so", "engine/vManson/arm64-v8a/libopenal-soft.so"]
     }
-,
-    {
-      "name": "[Manson Mod] vManson [ARM32] (Unknown)",
-      "filename": "libswordigo.so",
-      "filepath": "engine/vManson/armeabi-v7a/libswordigo.so",
-      "sha256": "",
-      "version": "vManson",
-      "version_dir": "vManson",
-      "arch": "ARM32",
-      "file_size": 4603040,
-      "is_default": false,
-      "status": "unknown",
-      "game_type": "Swordigo",
-      "assets_dir": "assets",
-      "dependencies": ["libmini.so", "libGlossHook.so", "libopenal-soft.so"],
-      "dep_paths": ["engine/vManson/armeabi-v7a/libmini.so", "engine/vManson/armeabi-v7a/libGlossHook.so", "engine/vManson/armeabi-v7a/libopenal-soft.so"]
-    }
-
   ]
 }

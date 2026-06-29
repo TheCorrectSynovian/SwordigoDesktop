@@ -170,14 +170,14 @@ cp -r swordigo_extracted/assets/* ~/.local/share/swordigo-desktop/assets/
 ```bash
 cd builder/rpm
 ./build_rpm.sh
-# Output: ~/rpmbuild/RPMS/x86_64/swordigo-desktop-7.0.0-1.x86_64.rpm
+# Output: ~/rpmbuild/RPMS/x86_64/swordigo-desktop-7.1.0-1.x86_64.rpm
 ```
 
 ### DEB (Ubuntu/Debian)
 ```bash
 cd builder/deb
 ./build_deb.sh
-# Output: swordigo-desktop_7.0.0-1_amd64.deb
+# Output: swordigo-desktop_7.1.0-1_amd64.deb
 ```
 
 ### AppImage

@@ -77,6 +77,10 @@ typedef struct {
     sre_u64 getSpeedMultiplier;
 } SreLuaAddrs;
 
+extern void sre_mini_ensure_injected(lua_State* L);
+static void sre_log_lua_error(const char* source, const char* err_msg);
+extern lua_State* g_sre_last_lua_state;
+
 void sre_init_lua(SreLuaAddrs* addrs) {
     g_lua_pcall       = (pfn_lua_pcall)addrs->lua_pcall;
     g_lua_resume      = (pfn_lua_resume)addrs->lua_resume;
@@ -100,6 +104,16 @@ void sre_init_lua(SreLuaAddrs* addrs) {
     g_lua_pushlightuserdata = (pfn_lua_pushlightuserdata)addrs->lua_pushlightuserdata;
     g_lua_error       = (pfn_lua_error)addrs->lua_error;
     g_getSpeedMultiplier = (pfn_getSpeedMultiplier)addrs->getSpeedMultiplier;
+
+    /* Diagnostic: log that libsre initialized Lua function pointers */
+    sre_log_lua_error("sre_init_lua", "sre_init_lua called — function pointers installed");
+
+    /* If we already have a lua_State captured, attempt an early injection */
+    /* Disabled early injection — can cause native init ordering issues. */
+    /* if (g_sre_last_lua_state) {
+        sre_log_lua_error("sre_init_lua", "Attempting early injection for existing lua_State");
+        sre_mini_ensure_injected(g_sre_last_lua_state);
+    } */
 }
 
 /* ========== sre_lua_call_safe — GLOBAL lua_call replacement ==========
@@ -172,9 +186,24 @@ static void sre_log_lua_error(const char* source, const char* err_msg) {
     i += sre_itoa(log_counter, line + i);
     line[i++] = ':'; line[i++] = ' ';
     if (err_msg) {
-        for (j = 0; i < 1020 && err_msg[j]; j++)
+        for (j = 0; i < 900 && err_msg[j]; j++)
             line[i++] = err_msg[j];
     }
+    /* Append state pointer for correlation if available */
+    line[i++] = ' ';
+    line[i++] = '{';
+    line[i++] = 's'; line[i++] = 't'; line[i++] = 'a'; line[i++] = 't'; line[i++] = 'e'; line[i++] = '=';
+    /* hex pointer */
+    unsigned long val = (unsigned long)g_sre_last_lua_state;
+    char hex[32]; int hx = 0; hex[hx++] = '0'; hex[hx++] = 'x';
+    int started = 0;
+    for (int shift = (int)(sizeof(val)*8 - 4); shift >= 0 && hx < (int)sizeof(hex)-1; shift -= 4) {
+        int nib = (int)((val >> shift) & 0xF);
+        if (nib || started || shift == 0) { started = 1; char c = (nib < 10) ? ('0' + nib) : ('a' + (nib - 10)); hex[hx++] = c; }
+    }
+    hex[hx] = '\0';
+    for (j = 0; j < hx && i < 1018; j++) line[i++] = hex[j];
+    line[i++] = '}';
     line[i++] = '\n';
     line[i] = '\0';
     
@@ -558,7 +587,6 @@ void sre_ProgramState_Execute(void* self, int stackIndex) {
     /* Lazy Mini.* injection — ensure mod API exists before script runs */
     extern void sre_mini_ensure_injected(lua_State* L);
     sre_mini_ensure_injected(L);
-    
     /* Check for pending console command */
     if (g_lua_console_pending && L) {
         g_lua_console_pending = 0;

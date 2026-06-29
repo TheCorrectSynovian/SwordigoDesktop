@@ -119,9 +119,19 @@ void sre_BackgroundComponent_Draw(void* self, void* ctx, void* camera) {
     }
     
     /* Read camera data */
+    float cam_x    = *(float*)((char*)camera + 0x10);
+    float cam_y    = *(float*)((char*)camera + 0x14);
     float cam_z    = *(float*)((char*)camera + 0x18);
     float cam_fov  = *(float*)((char*)camera + 0xf4);  /* radians */
     float cam_aspect = *(float*)((char*)camera + 0xf0);
+
+    /* Synchronize global camera coordinates */
+    extern volatile float g_sre_cam_x;
+    extern volatile float g_sre_cam_y;
+    extern volatile float g_sre_cam_z;
+    g_sre_cam_x = cam_x;
+    g_sre_cam_y = cam_y;
+    g_sre_cam_z = cam_z;
     
     /* Read sprite dimensions */
     float spr_w = *(float*)((char*)sprite + 0x10);

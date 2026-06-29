@@ -42,7 +42,7 @@ static void      DrawToolbar(bool& running, LaunchConfig& cfg, bool& show_option
 static void      DrawInstancePanel(BinarySelector& selector, int& selected, float width);
 static void      DrawDetailPanel(BinarySelector& selector, int selected,
                                  LaunchConfig& cfg, bool& running, int& api_sel,
-                                 int& engine_sel, bool& show_save_editor, float mods_width);
+                                 int& engine_sel, bool& use_sre_sel, bool& show_save_editor, float mods_width);
 static void      DrawModsPanel(float width);
 static void      DrawStatusBar(int selected, const BinarySelector& selector);
 static void      DrawOptionsModal(bool& show_options);
@@ -73,6 +73,9 @@ static GLuint g_tex_icon_swmini = 0;
 static GLuint g_tex_icon_rlswordigo = 0;
 static GLuint g_tex_icon_app = 0;
 static int    g_icon_w = 0, g_icon_h = 0; // reusable
+
+// Per-instance custom icon cache (keyed by icon_path)
+static std::map<std::string, GLuint> g_custom_icon_cache;
 
 // SDL window pointer (for borderless drag)
 static SDL_Window* g_sdl_window = nullptr;
@@ -437,6 +440,35 @@ static void DrawToolbar(bool& running, LaunchConfig& cfg, bool& show_options) {
 // =============================================================================
 
 static GLuint GetIconForInstance(const BinaryInfo& b) {
+    // Priority 1: custom icon_path from manifest (lazy load + cache)
+    if (!b.icon_path.empty()) {
+        auto it = g_custom_icon_cache.find(b.icon_path);
+        if (it != g_custom_icon_cache.end()) {
+            if (it->second) return it->second;
+            // Cached as 0 = failed to load, fall through to defaults
+        } else {
+            // Try loading from multiple search paths
+            int w = 0, h = 0;
+            GLuint tex = 0;
+            std::string paths[] = {
+                b.icon_path,  // as-is (absolute or relative)
+                get_user_data_dir() + "/launcher/icons/" + b.icon_path,
+                get_user_data_dir() + "/launcher/" + b.icon_path,
+                std::string("src/assets/icons/") + b.icon_path,
+                std::string("src/assets/") + b.icon_path,
+            };
+            for (auto& p : paths) {
+                tex = LoadTextureFromFile(p.c_str(), &w, &h);
+                if (tex) {
+                    std::cout << "[Launcher] Custom icon loaded: " << p << std::endl;
+                    break;
+                }
+            }
+            g_custom_icon_cache[b.icon_path] = tex;  // cache (0 if failed)
+            if (tex) return tex;
+        }
+    }
+    // Priority 2: game_type defaults
     if (b.game_type == "RLSwordigo" && g_tex_icon_rlswordigo) return g_tex_icon_rlswordigo;
     if (b.game_type == "SwordigoMini" && g_tex_icon_swmini) return g_tex_icon_swmini;
     if (g_tex_icon_swordigo) return g_tex_icon_swordigo;
@@ -726,7 +758,7 @@ static void DrawInstancePanel(BinarySelector& selector, int& selected, float wid
 
 static void DrawDetailPanel(BinarySelector& selector, int selected,
                             LaunchConfig& cfg, bool& running, int& api_sel,
-                            int& engine_sel, bool& show_save_editor, float mods_width) {
+                            int& engine_sel, bool& use_sre_sel, bool& show_save_editor, float mods_width) {
     ImGuiViewport* vp = ImGui::GetMainViewport();
     float inst_width = 260.0f;
     ImVec2 panel_pos(vp->WorkPos.x + inst_width, vp->WorkPos.y + TOOLBAR_H);
@@ -813,6 +845,7 @@ static void DrawDetailPanel(BinarySelector& selector, int selected,
     if (ImGui::Button(ICON_FA_ROCKET "  LAUNCH", ImVec2(launch_w, 52))) {
         cfg.graphics_api = (api_sel == 0) ? GraphicsAPI::OPENGL : GraphicsAPI::VULKAN;
         cfg.use_dynarmic = (engine_sel == 1);
+        cfg.use_sre = use_sre_sel;
         cfg.selected_binary = b.filepath;
         cfg.assets_dir = b.assets_dir;
         cfg.game_type = b.game_type;
@@ -832,16 +865,7 @@ static void DrawDetailPanel(BinarySelector& selector, int selected,
         ImGui::SameLine(180);
         ImGui::RadioButton("Unicorn (TCG)", &engine_sel, 0);
         ImGui::SameLine();
-#ifdef USE_DYNARMIC
         ImGui::RadioButton("Dynarmic (JIT)", &engine_sel, 1);
-#else
-        ImGui::BeginDisabled();
-        ImGui::RadioButton("Dynarmic (JIT)", &engine_sel, 1);
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("Build with DYNARMIC=1 to enable");
-        }
-#endif
     }
 
     {
@@ -852,6 +876,14 @@ static void DrawDetailPanel(BinarySelector& selector, int selected,
         ImGui::RadioButton("OpenGL", &api_sel, 0);
         ImGui::SameLine();
         ImGui::RadioButton("Vulkan", &api_sel, 1);
+    }
+
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.545f, 0.580f, 0.620f, 1.0f));
+        ImGui::Text(ICON_FA_CODE "  SRE Hooks");
+        ImGui::PopStyleColor();
+        ImGui::SameLine(180);
+        ImGui::Checkbox("Enable SRE (libsre.so)", &use_sre_sel);
     }
 
     ImGui::Spacing();
@@ -1745,6 +1777,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
     bool running = true;
     int api_sel = 0;        // 0 = OpenGL, 1 = Vulkan
     int engine_sel = 1;     // 0 = Unicorn, 1 = Dynarmic (default: JIT for performance)
+    bool use_sre_sel = true; // whether to load libsre.so (user choice)
     bool show_options = false;
     bool show_save_editor = false;
 
@@ -1770,6 +1803,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                         if (!cur_bins.empty() && bin_sel >= 0 && bin_sel < (int)cur_bins.size()) {
                             cfg.graphics_api = (api_sel == 0) ? GraphicsAPI::OPENGL : GraphicsAPI::VULKAN;
                             cfg.use_dynarmic = (engine_sel == 1);
+                            cfg.use_sre = use_sre_sel;
                             cfg.selected_binary = cur_bins[bin_sel].filepath;
                             cfg.assets_dir = cur_bins[bin_sel].assets_dir;
                             cfg.game_type = cur_bins[bin_sel].game_type;
@@ -1827,7 +1861,7 @@ LaunchConfig show_launcher(BinarySelector& selector) {
 
         DrawToolbar(running, cfg, show_options);
         DrawInstancePanel(selector, bin_sel, inst_panel_w);
-        DrawDetailPanel(selector, bin_sel, cfg, running, api_sel, engine_sel, show_save_editor, mods_panel_w);
+        DrawDetailPanel(selector, bin_sel, cfg, running, api_sel, engine_sel, use_sre_sel, show_save_editor, mods_panel_w);
         DrawModsPanel(mods_panel_w);
         DrawStatusBar(bin_sel, selector);
 

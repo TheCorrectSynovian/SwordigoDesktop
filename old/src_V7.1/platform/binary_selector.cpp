@@ -1,0 +1,921 @@
+#include "platform/binary_selector.h"
+#include <cstdint>
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <filesystem>
+#include <cstring>
+#include <iomanip>
+#include <algorithm>
+
+namespace fs = std::filesystem;
+
+// ============================================================================
+// Minimal SHA-256 implementation (no OpenSSL dependency)
+// ============================================================================
+
+static const uint32_t SHA256_K[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+};
+
+static inline uint32_t rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+
+static void sha256_transform(uint32_t state[8], const uint8_t block[64]) {
+    uint32_t w[64];
+    for (int i = 0; i < 16; i++)
+        w[i] = ((uint32_t)block[i*4] << 24) | ((uint32_t)block[i*4+1] << 16) |
+               ((uint32_t)block[i*4+2] << 8) | (uint32_t)block[i*4+3];
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = rotr(w[i-15], 7) ^ rotr(w[i-15], 18) ^ (w[i-15] >> 3);
+        uint32_t s1 = rotr(w[i-2], 17) ^ rotr(w[i-2], 19) ^ (w[i-2] >> 10);
+        w[i] = w[i-16] + s0 + w[i-7] + s1;
+    }
+    uint32_t a=state[0], b=state[1], c=state[2], d=state[3];
+    uint32_t e=state[4], f=state[5], g=state[6], h=state[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        uint32_t ch = (e & f) ^ (~e & g);
+        uint32_t temp1 = h + S1 + ch + SHA256_K[i] + w[i];
+        uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t temp2 = S0 + maj;
+        h=g; g=f; f=e; e=d+temp1; d=c; c=b; b=a; a=temp1+temp2;
+    }
+    state[0]+=a; state[1]+=b; state[2]+=c; state[3]+=d;
+    state[4]+=e; state[5]+=f; state[6]+=g; state[7]+=h;
+}
+
+std::string BinarySelector::compute_sha256(const std::string& filepath) {
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file) return "";
+
+    uint32_t state[8] = {
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    };
+
+    uint8_t block[64];
+    uint64_t total_bits = 0;
+
+    while (file) {
+        file.read((char*)block, 64);
+        size_t bytes_read = file.gcount();
+        total_bits += bytes_read * 8;
+
+        if (bytes_read == 64) {
+            sha256_transform(state, block);
+        } else {
+            block[bytes_read] = 0x80;
+            for (size_t i = bytes_read + 1; i < 64; i++) block[i] = 0;
+
+            if (bytes_read >= 56) {
+                sha256_transform(state, block);
+                memset(block, 0, 64);
+            }
+
+            for (int i = 7; i >= 0; i--)
+                block[56 + (7 - i)] = (uint8_t)(total_bits >> (i * 8));
+
+            sha256_transform(state, block);
+        }
+    }
+
+    std::ostringstream oss;
+    for (int i = 0; i < 8; i++)
+        oss << std::hex << std::setw(8) << std::setfill('0') << state[i];
+    return oss.str();
+}
+
+// ============================================================================
+// Known binary hashes
+// ============================================================================
+
+const std::map<std::string, std::pair<std::string, BinaryStatus>> BinarySelector::KNOWN_HASHES = {
+    // Vanilla ARM32
+    {"cee15dd2730746269ce5db97d150371ebbad1f41371c6a728f1bb7d045632138",
+        {"1.4.6", BinaryStatus::TESTED}},
+    {"08d49dd6f7f8639a4c59f290ff2bb79254accf710f530bf53c2fce1659191c9e",
+        {"1.4.12", BinaryStatus::TESTED}},
+    // RLSwordigo ARM32
+    {"a7c00ff6f3ed0d5b3221158d6e214bba03288c1e6782be3dc2c736ae80eb19df",
+        {"6.6-rl", BinaryStatus::TESTED}},
+};
+
+// ============================================================================
+// Constructor
+// ============================================================================
+
+BinarySelector::BinarySelector() : default_binary("engine/v1.4.12/armeabi-v7a/libswordigo.so") {}
+
+// ============================================================================
+// Scan engine/ directory structure
+//
+//   engine/
+//     v1.4.6/
+//       armeabi-v7a/
+//         libswordigo.so
+//       arm64-v8a/
+//         libswordigo.so
+//     v1.4.12/
+//       ...
+//     rl-v6.1/
+//       armeabi-v7a/
+//         libswordigo.so
+//         libmini.so
+//         libGlossHook.so
+// ============================================================================
+
+void BinarySelector::scan_engine_directory(const std::string& engine_path) {
+    binaries.clear();
+
+    if (!fs::exists(engine_path) || !fs::is_directory(engine_path)) {
+        std::cerr << "[BinSel] engine/ directory not found: " << engine_path << std::endl;
+        return;
+    }
+
+    // Iterate version directories (v1.4.6, v1.4.12, rl-v6.1, etc.)
+    for (const auto& ver_entry : fs::directory_iterator(engine_path)) {
+        if (!ver_entry.is_directory()) continue;
+        std::string ver_dir = ver_entry.path().filename().string();
+        scan_version_dir(engine_path, ver_dir);
+    }
+
+    // Sort: default first, then by status (TESTED > TESTING > UNKNOWN), then by version
+    std::sort(binaries.begin(), binaries.end(), [](const BinaryInfo& a, const BinaryInfo& b) {
+        if (a.is_default != b.is_default) return a.is_default;
+        if (a.status != b.status) return (int)a.status < (int)b.status;
+        // ARM32 before ARM64 within same version
+        if (a.version_dir == b.version_dir && a.arch != b.arch)
+            return a.arch == BinaryArch::ARM32;
+        return a.version_dir > b.version_dir; // Newer versions first
+    });
+
+    std::cout << "[BinSel] Found " << binaries.size() << " game binaries in engine/" << std::endl;
+    for (const auto& b : binaries) {
+        std::cout << "  " << b.label << " → " << b.filepath << std::endl;
+    }
+}
+
+void BinarySelector::scan_version_dir(const std::string& engine_path, const std::string& version_dir) {
+    std::string ver_path = engine_path + "/" + version_dir;
+
+    // Check for armeabi-v7a/ and arm64-v8a/ subdirectories
+    std::string arm32_path = ver_path + "/armeabi-v7a";
+    std::string arm64_path = ver_path + "/arm64-v8a";
+
+    if (fs::exists(arm32_path) && fs::is_directory(arm32_path)) {
+        scan_arch_dir(arm32_path, version_dir, BinaryArch::ARM32);
+    }
+    if (fs::exists(arm64_path) && fs::is_directory(arm64_path)) {
+        scan_arch_dir(arm64_path, version_dir, BinaryArch::ARM64);
+    }
+}
+
+void BinarySelector::scan_arch_dir(const std::string& arch_path, const std::string& version_dir, BinaryArch arch) {
+
+    // Find the main libswordigo.so
+    std::string main_so = arch_path + "/libswordigo.so";
+    if (!fs::exists(main_so)) {
+        // No game binary in this arch dir
+        return;
+    }
+
+    BinaryInfo info;
+    info.filename = "libswordigo.so";
+    info.filepath = main_so;
+    info.version_dir = version_dir;
+    info.arch = arch;
+    info.file_size = fs::file_size(main_so);
+    info.is_default = (info.filepath == default_binary);
+
+    // Determine game type from version dir name
+    // - "rl-*" directories → RLSwordigo mod, uses rl_assets
+    // - "sw3d"  → 3D camera mod, uses vanilla assets
+    // - "v*"    → vanilla Swordigo, uses vanilla assets
+    bool is_rl = (version_dir.find("rl-") == 0);
+    bool is_vanilla = (version_dir[0] == 'v');  // v1.4.6, v1.4.12, v1.1
+    bool is_mod = !is_vanilla;                   // Any non-vanilla has companion .so files
+
+    if (is_rl) {
+        info.game_type = "RLSwordigo";
+        info.assets_dir = "rl_assets";
+    } else {
+        info.game_type = "Swordigo";
+        info.assets_dir = "assets";
+    }
+    
+    // Scan for companion .so files in ALL mod directories (rl-, sw3d, etc.)
+    if (is_mod) {
+        for (const auto& entry : fs::directory_iterator(arch_path)) {
+            if (!entry.is_regular_file()) continue;
+            std::string dep_name = entry.path().filename().string();
+            // Skip the main game binary and non-.so files
+            if (dep_name != "libswordigo.so" && dep_name.length() > 3 &&
+                dep_name.substr(dep_name.length() - 3) == ".so") {
+                info.dependencies.push_back(dep_name);
+                info.dep_paths.push_back(entry.path().string());
+            }
+        }
+    }
+
+    // If libsre.so is present in this directory, auto-strip libmini.so and libGlossHook.so
+    // from dependencies (SRE replaces their functionality)
+    if (fs::exists(arch_path + "/libsre.so")) {
+        info.dependencies.erase(
+            std::remove_if(info.dependencies.begin(), info.dependencies.end(),
+                [](const std::string& d) {
+                    return d == "libmini.so" || d == "libGlossHook.so" || d == "libkiwi.so";
+                }), info.dependencies.end());
+        info.dep_paths.erase(
+            std::remove_if(info.dep_paths.begin(), info.dep_paths.end(),
+                [](const std::string& p) {
+                    return p.find("libmini.so") != std::string::npos ||
+                           p.find("libGlossHook.so") != std::string::npos ||
+                           p.find("libkiwi.so") != std::string::npos;
+                }), info.dep_paths.end());
+        std::cout << "[BinSel] SRE detected in " << arch_path << ", stripped modloader deps" << std::endl;
+    }
+
+    // Compute hash
+    std::cout << "[BinSel] Hashing " << version_dir << "/" << arch_string(arch) 
+              << "/libswordigo.so..." << std::flush;
+    info.sha256 = compute_sha256(main_so);
+    std::cout << " " << info.sha256.substr(0, 16) << "..." << std::endl;
+
+    // Look up in known hashes
+    auto it = KNOWN_HASHES.find(info.sha256);
+    if (it != KNOWN_HASHES.end()) {
+        info.version = it->second.first;
+        info.status = it->second.second;
+    } else {
+        // Extract version from directory name
+        std::string ver = version_dir;
+        if (ver.substr(0, 1) == "v") {
+            ver = ver.substr(1);  // v1.4.6 → 1.4.6
+        } else if (ver.substr(0, 3) == "rl-") {
+            ver = ver.substr(3);  // rl-v6.6 → v6.6
+            if (ver.substr(0, 1) == "v") ver = ver.substr(1);  // → 6.6
+            ver += "-rl";  // → 6.6-rl
+        }
+        // sw3d stays as "sw3d"
+        info.version = ver;
+        info.status = BinaryStatus::UNKNOWN;
+    }
+
+    // Build display label
+    const char* status_str = (info.status == BinaryStatus::TESTED) ? "Stable" :
+                             (info.status == BinaryStatus::TESTING) ? "Testing" : "Unknown";
+    std::string arch_badge = std::string("[") + arch_string(arch) + "]";
+    
+    if (is_rl) {
+        info.label = "[RL] v" + info.version + " " + arch_badge + " (" + status_str + ")";
+    } else if (version_dir == "sw3d") {
+        info.label = "[3D] " + arch_badge + " (" + status_str + ")";
+    } else {
+        info.label = "v" + info.version + " " + arch_badge + " (" + status_str + ")";
+    }
+    
+    // Mark latest tested vanilla version
+    if (!is_rl && info.status == BinaryStatus::TESTED && info.version == "1.4.12") {
+        info.label += " [Latest]";
+    }
+
+    binaries.push_back(info);
+}
+
+// ============================================================================
+// Legacy flat directory scan (backward compat — scans project root for *.so)
+// ============================================================================
+
+void BinarySelector::scan_directory(const std::string& dir_path) {
+    // Check if engine/ directory exists — if so, use the new method
+    std::string engine_path = dir_path + "/engine";
+    if (fs::exists(engine_path) && fs::is_directory(engine_path)) {
+        scan_engine_directory(engine_path);
+        return;
+    }
+
+    // Fallback: legacy flat scan (for backward compat)
+    std::cerr << "[BinSel] No engine/ directory found, falling back to legacy scan" << std::endl;
+    
+    binaries.clear();
+    if (!fs::exists(dir_path) || !fs::is_directory(dir_path)) return;
+
+    for (const auto& entry : fs::directory_iterator(dir_path)) {
+        if (!entry.is_regular_file()) continue;
+        std::string name = entry.path().filename().string();
+
+        if (name.find("libswordigo") == 0 && name.length() > 3 &&
+            name.substr(name.length() - 3) == ".so") {
+            
+            if (name.find("64") != std::string::npos) continue; // Skip arm64 in legacy mode
+
+            BinaryInfo info;
+            info.filename = name;
+            info.filepath = entry.path().string();
+            info.arch = BinaryArch::ARM32;
+            info.file_size = fs::file_size(entry.path());
+            info.game_type = "Swordigo";
+            info.assets_dir = "assets";
+            info.is_default = false;
+
+            info.sha256 = compute_sha256(info.filepath);
+            auto it = KNOWN_HASHES.find(info.sha256);
+            if (it != KNOWN_HASHES.end()) {
+                info.version = it->second.first;
+                info.status = it->second.second;
+            } else {
+                info.version = "Unknown";
+                info.status = BinaryStatus::UNKNOWN;
+            }
+
+            const char* status_str = (info.status == BinaryStatus::TESTED) ? "Stable" :
+                                     (info.status == BinaryStatus::TESTING) ? "Testing" : "Unknown";
+            info.label = "v" + info.version + " [ARM32] (" + status_str + ")";
+            binaries.push_back(info);
+        }
+    }
+
+    std::cout << "[BinSel] Legacy scan: found " << binaries.size() << " binaries" << std::endl;
+}
+
+// ============================================================================
+// JSON Registry
+// ============================================================================
+
+void BinarySelector::load_registry(const std::string& json_path) {
+    std::ifstream f(json_path);
+    if (!f) {
+        std::cout << "[BinSel] No registry found at " << json_path << " (will create on save)" << std::endl;
+        return;
+    }
+
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+
+    auto find_value = [&](const std::string& key) -> std::string {
+        std::string search = "\"" + key + "\"";
+        size_t pos = content.find(search);
+        if (pos == std::string::npos) return "";
+        pos = content.find("\"", pos + search.length() + 1);
+        if (pos == std::string::npos) return "";
+        size_t end = content.find("\"", pos + 1);
+        if (end == std::string::npos) return "";
+        return content.substr(pos + 1, end - pos - 1);
+    };
+
+    std::string def = find_value("default");
+    if (!def.empty()) {
+        default_binary = def;
+        std::cout << "[BinSel] Default binary: " << default_binary << std::endl;
+    }
+
+    for (auto& b : binaries) {
+        b.is_default = (b.filepath == default_binary);
+    }
+}
+
+void BinarySelector::save_registry(const std::string& json_path) {
+    std::ofstream f(json_path);
+    if (!f) {
+        std::cerr << "[BinSel] Cannot write registry to " << json_path << std::endl;
+        return;
+    }
+
+    f << "{\n";
+    f << "  \"default\": \"" << default_binary << "\",\n";
+    f << "  \"known_binaries\": {\n";
+    for (size_t i = 0; i < binaries.size(); i++) {
+        const auto& b = binaries[i];
+        const char* status_str = (b.status == BinaryStatus::TESTED) ? "tested" :
+                                 (b.status == BinaryStatus::TESTING) ? "testing" : "unknown";
+        f << "    \"" << b.sha256 << "\": {\n";
+        f << "      \"filepath\": \"" << b.filepath << "\",\n";
+        f << "      \"version\": \"" << b.version << "\",\n";
+        f << "      \"arch\": \"" << arch_string(b.arch) << "\",\n";
+        f << "      \"game_type\": \"" << b.game_type << "\",\n";
+        f << "      \"status\": \"" << status_str << "\",\n";
+        f << "      \"label\": \"" << b.label << "\"\n";
+        f << "    }" << (i + 1 < binaries.size() ? "," : "") << "\n";
+    }
+    f << "  }\n";
+    f << "}\n";
+
+    std::cout << "[BinSel] Registry saved to " << json_path << std::endl;
+}
+
+// ============================================================================
+// Selection helpers
+// ============================================================================
+
+void BinarySelector::set_default(const std::string& filepath) {
+    default_binary = filepath;
+    for (auto& b : binaries) {
+        b.is_default = (b.filepath == filepath);
+    }
+}
+
+const BinaryInfo* BinarySelector::get_loaded_info() const {
+    for (const auto& b : binaries) {
+        if (b.filepath == loaded_binary) return &b;
+    }
+    return nullptr;
+}
+
+void BinarySelector::set_loaded(const std::string& filepath) {
+    loaded_binary = filepath;
+}
+
+// ============================================================================
+// Add a custom binary instance from a .so file
+// ============================================================================
+
+bool BinarySelector::add_custom_instance(const std::string& so_filepath, const std::string& name, const std::string& assets_dir) {
+    // Validate source file exists
+    if (!fs::exists(so_filepath) || !fs::is_regular_file(so_filepath)) {
+        std::cerr << "[BinSel] Custom .so not found: " << so_filepath << std::endl;
+        return false;
+    }
+
+    // Read ELF header to detect architecture
+    // Byte 4 (e_ident[EI_CLASS]): 1 = ELFCLASS32 (ARM32), 2 = ELFCLASS64 (ARM64)
+    std::ifstream elf_file(so_filepath, std::ios::binary);
+    if (!elf_file) {
+        std::cerr << "[BinSel] Cannot open .so file: " << so_filepath << std::endl;
+        return false;
+    }
+
+    uint8_t ei_ident[5];
+    elf_file.read(reinterpret_cast<char*>(ei_ident), 5);
+    if (elf_file.gcount() < 5) {
+        std::cerr << "[BinSel] File too small to be an ELF: " << so_filepath << std::endl;
+        return false;
+    }
+
+    // Verify ELF magic: 0x7f 'E' 'L' 'F'
+    if (ei_ident[0] != 0x7f || ei_ident[1] != 'E' || ei_ident[2] != 'L' || ei_ident[3] != 'F') {
+        std::cerr << "[BinSel] Not a valid ELF file: " << so_filepath << std::endl;
+        return false;
+    }
+
+    BinaryArch arch;
+    std::string arch_dir;
+    if (ei_ident[4] == 1) {
+        arch = BinaryArch::ARM32;
+        arch_dir = "armeabi-v7a";
+    } else if (ei_ident[4] == 2) {
+        arch = BinaryArch::ARM64;
+        arch_dir = "arm64-v8a";
+    } else {
+        std::cerr << "[BinSel] Unknown ELF class: " << (int)ei_ident[4] << std::endl;
+        return false;
+    }
+    elf_file.close();
+
+    // Create directory: <data_dir>/engine/custom-NAME/<arch>/
+    // Derive data dir from so_filepath (which is absolute, e.g. .../engine/v1.4.12/arm64-v8a/libswordigo.so)
+    std::string version_dir = "custom-" + name;
+    std::string rel_dest = "engine/" + version_dir + "/" + arch_dir;
+    std::string rel_dest_so = rel_dest + "/libswordigo.so";
+    
+    // Extract base data directory from absolute so_filepath
+    // so_filepath = "<data_dir>/engine/<version>/<arch>/libswordigo.so"
+    std::string data_dir;
+    {
+        fs::path sp(so_filepath);
+        // Walk up to find the "engine" component
+        fs::path parent = sp.parent_path(); // <data_dir>/engine/<version>/<arch>
+        while (!parent.empty() && parent.filename() != "engine") {
+            parent = parent.parent_path();
+        }
+        if (parent.filename() == "engine") {
+            data_dir = parent.parent_path().string(); // <data_dir>
+        }
+    }
+    if (data_dir.empty()) {
+        // Fallback: use parent 4 levels up from so_filepath
+        data_dir = fs::path(so_filepath).parent_path().parent_path().parent_path().parent_path().string();
+    }
+    
+    std::string dest_dir = data_dir + "/" + rel_dest;
+    std::string dest_path = data_dir + "/" + rel_dest_so;
+
+    try {
+        fs::create_directories(dest_dir);
+    } catch (const fs::filesystem_error& e) {
+        std::cerr << "[BinSel] Failed to create directory " << dest_dir << ": " << e.what() << std::endl;
+        return false;
+    }
+
+    // Copy the .so file
+    try {
+        fs::copy_file(so_filepath, dest_path, fs::copy_options::overwrite_existing);
+    } catch (const fs::filesystem_error& e) {
+        std::cerr << "[BinSel] Failed to copy .so to " << dest_path << ": " << e.what() << std::endl;
+        return false;
+    }
+
+    std::cout << "[BinSel] Copied custom binary to " << dest_path << std::endl;
+
+    // Compute SHA256 of the copied file
+    std::string sha = compute_sha256(dest_path);
+    if (sha.empty()) {
+        std::cerr << "[BinSel] Failed to compute SHA256 for " << dest_path << std::endl;
+        return false;
+    }
+
+    // Build BinaryInfo
+    BinaryInfo info;
+    info.filename = "libswordigo.so";
+    info.filepath = dest_path;  // MUST be absolute — relative paths fail fs::exists() on reload and can't be launched
+    info.version_dir = version_dir;
+    info.arch = arch;
+    info.file_size = fs::file_size(dest_path);
+    info.sha256 = sha;
+    info.is_default = false;
+
+    // Determine game type from assets_dir
+    if (assets_dir == "rl_assets") {
+        info.game_type = "RLSwordigo";
+    } else {
+        info.game_type = "Swordigo";
+    }
+    info.assets_dir = assets_dir;
+
+    // Look up hash in known hashes for status
+    auto it = KNOWN_HASHES.find(info.sha256);
+    if (it != KNOWN_HASHES.end()) {
+        info.version = it->second.first;
+        info.status = it->second.second;
+    } else {
+        info.version = name;
+        info.status = BinaryStatus::UNKNOWN;
+    }
+
+    // Build display label
+    const char* status_str = (info.status == BinaryStatus::TESTED) ? "Stable" :
+                             (info.status == BinaryStatus::TESTING) ? "Testing" : "Unknown";
+    std::string arch_badge = std::string("[") + arch_string(arch) + "]";
+
+    if (info.game_type == "RLSwordigo") {
+        info.label = "[RL] [Custom] " + name + " " + arch_badge + " (" + status_str + ")";
+    } else {
+        info.label = "[Custom] " + name + " " + arch_badge + " (" + status_str + ")";
+    }
+
+    binaries.push_back(info);
+
+    std::cout << "[BinSel] Added custom instance: " << info.label << " → " << info.filepath << std::endl;
+    return true;
+}
+
+// ============================================================================
+// JSON Manifest System — Hand-rolled JSON (no external dependency)
+// ============================================================================
+
+// Serialize a single BinaryInfo to JSON object string
+std::string BinarySelector::instance_to_json(const BinaryInfo& b, int indent) {
+    std::string pad(indent, ' ');
+    std::string pad2(indent + 2, ' ');
+    std::ostringstream ss;
+    
+    ss << pad << "{\n";
+    ss << pad2 << "\"name\": \"" << b.label << "\",\n";
+    ss << pad2 << "\"filename\": \"" << b.filename << "\",\n";
+    ss << pad2 << "\"filepath\": \"" << b.filepath << "\",\n";
+    ss << pad2 << "\"sha256\": \"" << b.sha256 << "\",\n";
+    ss << pad2 << "\"version\": \"" << b.version << "\",\n";
+    ss << pad2 << "\"version_dir\": \"" << b.version_dir << "\",\n";
+    ss << pad2 << "\"arch\": \"" << arch_string(b.arch) << "\",\n";
+    ss << pad2 << "\"file_size\": " << b.file_size << ",\n";
+    ss << pad2 << "\"is_default\": " << (b.is_default ? "true" : "false") << ",\n";
+    
+    const char* st = (b.status == BinaryStatus::TESTED) ? "tested" :
+                     (b.status == BinaryStatus::TESTING) ? "testing" : "unknown";
+    ss << pad2 << "\"status\": \"" << st << "\",\n";
+    ss << pad2 << "\"game_type\": \"" << b.game_type << "\",\n";
+    ss << pad2 << "\"assets_dir\": \"" << b.assets_dir << "\",\n";
+    ss << pad2 << "\"icon_path\": \"" << b.icon_path << "\",\n";
+    
+    // Dependencies array
+    ss << pad2 << "\"dependencies\": [";
+    for (size_t i = 0; i < b.dependencies.size(); i++) {
+        if (i > 0) ss << ", ";
+        ss << "\"" << b.dependencies[i] << "\"";
+    }
+    ss << "],\n";
+    
+    // Dep paths array
+    ss << pad2 << "\"dep_paths\": [";
+    for (size_t i = 0; i < b.dep_paths.size(); i++) {
+        if (i > 0) ss << ", ";
+        ss << "\"" << b.dep_paths[i] << "\"";
+    }
+    ss << "]\n";
+    
+    ss << pad << "}";
+    return ss.str();
+}
+
+// Simple JSON string value extractor — finds "key": "value" in a JSON block
+static std::string json_str(const std::string& json, const std::string& key) {
+    std::string needle = "\"" + key + "\": \"";
+    auto pos = json.find(needle);
+    if (pos == std::string::npos) return "";
+    pos += needle.size();
+    auto end = json.find('"', pos);
+    if (end == std::string::npos) return "";
+    return json.substr(pos, end - pos);
+}
+
+// Simple JSON integer extractor — finds "key": 12345
+static size_t json_int(const std::string& json, const std::string& key) {
+    std::string needle = "\"" + key + "\": ";
+    auto pos = json.find(needle);
+    if (pos == std::string::npos) return 0;
+    pos += needle.size();
+    // Skip non-digits
+    while (pos < json.size() && json[pos] == ' ') pos++;
+    size_t val = 0;
+    while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9') {
+        val = val * 10 + (json[pos] - '0');
+        pos++;
+    }
+    return val;
+}
+
+// Simple JSON bool extractor
+static bool json_bool(const std::string& json, const std::string& key) {
+    std::string needle = "\"" + key + "\": ";
+    auto pos = json.find(needle);
+    if (pos == std::string::npos) return false;
+    pos += needle.size();
+    return json.substr(pos, 4) == "true";
+}
+
+// Extract a simple string array: "key": ["a", "b"]
+static std::vector<std::string> json_str_array(const std::string& json, const std::string& key) {
+    std::vector<std::string> result;
+    std::string needle = "\"" + key + "\": [";
+    auto pos = json.find(needle);
+    if (pos == std::string::npos) return result;
+    pos += needle.size();
+    auto end = json.find(']', pos);
+    if (end == std::string::npos) return result;
+    std::string arr = json.substr(pos, end - pos);
+    // Parse quoted strings
+    size_t p = 0;
+    while (p < arr.size()) {
+        auto q1 = arr.find('"', p);
+        if (q1 == std::string::npos) break;
+        auto q2 = arr.find('"', q1 + 1);
+        if (q2 == std::string::npos) break;
+        result.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
+        p = q2 + 1;
+    }
+    return result;
+}
+
+// Parse a single JSON object block into BinaryInfo
+BinaryInfo BinarySelector::parse_instance_json(const std::string& json) {
+    BinaryInfo b;
+    b.label = json_str(json, "name");
+    b.filename = json_str(json, "filename");
+    b.filepath = json_str(json, "filepath");
+    b.sha256 = json_str(json, "sha256");
+    b.version = json_str(json, "version");
+    b.version_dir = json_str(json, "version_dir");
+    b.file_size = json_int(json, "file_size");
+    b.is_default = json_bool(json, "is_default");
+    b.game_type = json_str(json, "game_type");
+    b.assets_dir = json_str(json, "assets_dir");
+    b.icon_path = json_str(json, "icon_path");
+    b.dependencies = json_str_array(json, "dependencies");
+    b.dep_paths = json_str_array(json, "dep_paths");
+    
+    std::string arch_s = json_str(json, "arch");
+    b.arch = (arch_s == "ARM64") ? BinaryArch::ARM64 : BinaryArch::ARM32;
+    
+    std::string status_s = json_str(json, "status");
+    b.status = (status_s == "tested") ? BinaryStatus::TESTED :
+               (status_s == "testing") ? BinaryStatus::TESTING : BinaryStatus::UNKNOWN;
+    
+    return b;
+}
+
+// Split a JSON array of objects into individual object blocks
+static std::vector<std::string> split_json_objects(const std::string& content) {
+    std::vector<std::string> objects;
+    int depth = 0;
+    size_t start = 0;
+    bool in_array = false;
+    
+    for (size_t i = 0; i < content.size(); i++) {
+        char c = content[i];
+        if (!in_array && c == '[') { in_array = true; continue; }
+        if (!in_array) continue;
+        
+        if (c == '{') {
+            if (depth == 0) start = i;
+            depth++;
+        } else if (c == '}') {
+            depth--;
+            if (depth == 0) {
+                objects.push_back(content.substr(start, i - start + 1));
+            }
+        }
+    }
+    return objects;
+}
+
+// ── load_manifest: Read system manifest.json ──
+void BinarySelector::load_manifest(const std::string& manifest_path) {
+    std::ifstream f(manifest_path);
+    if (!f) {
+        std::cout << "[BinSel] No system manifest at: " << manifest_path << std::endl;
+        return;
+    }
+    
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+    f.close();
+    
+    // Resolve base directory: manifest is at <data_dir>/engine/manifest.json
+    // so base = parent of parent = <data_dir>/
+    fs::path manifest_base = fs::path(manifest_path).parent_path().parent_path();
+    std::string base_str = manifest_base.string();
+    if (!base_str.empty() && base_str.back() != '/') base_str += "/";
+    
+    // Extract "default" field
+    default_binary = json_str(content, "default");
+    
+    // Find "instances" array and parse each object
+    auto objects = split_json_objects(content);
+    int loaded = 0;
+    for (const auto& obj : objects) {
+        BinaryInfo b = parse_instance_json(obj);
+        if (b.filepath.empty()) continue;
+        
+        // Resolve relative paths against manifest base directory
+        if (!b.filepath.empty() && b.filepath[0] != '/') {
+            b.filepath = base_str + b.filepath;
+        }
+        // Also resolve dep_paths
+        for (auto& dp : b.dep_paths) {
+            if (!dp.empty() && dp[0] != '/') {
+                dp = base_str + dp;
+            }
+        }
+        
+        // Verify the file still exists at this path
+        if (!fs::exists(b.filepath)) {
+            std::cout << "[BinSel] Manifest entry skipped (file missing): " << b.filepath << std::endl;
+            continue;
+        }
+        
+        // Check for duplicates
+        bool dup = false;
+        for (const auto& existing : binaries) {
+            if (existing.filepath == b.filepath) { dup = true; break; }
+        }
+        if (dup) continue;
+        
+        // Apply default
+        b.is_default = (b.filepath == default_binary || b.filepath == (base_str + default_binary));
+        
+        binaries.push_back(b);
+        loaded++;
+    }
+    
+    std::cout << "[BinSel] Loaded " << loaded << " instances from manifest: " << manifest_path << std::endl;
+}
+
+// ── load_user_instances: Read user-added instances ──
+void BinarySelector::load_user_instances(const std::string& json_path) {
+    std::ifstream f(json_path);
+    if (!f) {
+        // No user instances yet — that's fine
+        return;
+    }
+    
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+    f.close();
+    
+    auto objects = split_json_objects(content);
+    int loaded = 0;
+    for (const auto& obj : objects) {
+        BinaryInfo b = parse_instance_json(obj);
+        if (b.filepath.empty()) continue;
+        
+        if (!fs::exists(b.filepath)) {
+            std::cout << "[BinSel] User instance skipped (file missing): " << b.filepath << std::endl;
+            continue;
+        }
+        
+        // Check for duplicates and update metadata if already scanned from directory
+        bool dup = false;
+        for (auto& existing : binaries) {
+            if (existing.filepath == b.filepath) {
+                existing.game_type = b.game_type;
+                existing.assets_dir = b.assets_dir;
+                existing.label = b.label;
+                existing.icon_path = b.icon_path;
+                existing.version = b.version;
+                if (!b.dependencies.empty()) {
+                    existing.dependencies = b.dependencies;
+                    existing.dep_paths = b.dep_paths;
+                }
+                dup = true;
+                break;
+            }
+        }
+        if (dup) continue;
+        
+        binaries.push_back(b);
+        loaded++;
+    }
+    
+    if (loaded > 0) {
+        std::cout << "[BinSel] Loaded " << loaded << " user instances from: " << json_path << std::endl;
+    }
+}
+
+// ── save_user_instances: Write only custom/user instances ──
+void BinarySelector::save_user_instances(const std::string& json_path) const {
+    // Filter to custom instances (custom prefix OR non-standard assets)
+    std::vector<const BinaryInfo*> custom_bins;
+    for (const auto& b : binaries) {
+        if (b.version_dir.substr(0, 7) == "custom-" ||
+            (b.assets_dir != "assets" && b.assets_dir != "rl_assets" && !b.assets_dir.empty())) {
+            custom_bins.push_back(&b);
+        }
+    }
+    
+    if (custom_bins.empty()) return;  // Don't write empty file
+    
+    // Ensure parent directory exists
+    fs::path parent = fs::path(json_path).parent_path();
+    if (!parent.empty()) {
+        fs::create_directories(parent);
+    }
+    
+    std::ofstream f(json_path);
+    if (!f) {
+        std::cerr << "[BinSel] Cannot write user instances to: " << json_path << std::endl;
+        return;
+    }
+    
+    f << "{\n";
+    f << "  \"instances\": [\n";
+    for (size_t i = 0; i < custom_bins.size(); i++) {
+        f << instance_to_json(*custom_bins[i], 4);
+        if (i + 1 < custom_bins.size()) f << ",";
+        f << "\n";
+    }
+    f << "  ]\n";
+    f << "}\n";
+    
+    std::cout << "[BinSel] Saved " << custom_bins.size() << " user instances to: " << json_path << std::endl;
+}
+
+// ── generate_manifest: Scan engine/ dir and write manifest.json ──
+// This is called by the packaging scriptlet, NOT at runtime!
+void BinarySelector::generate_manifest(const std::string& engine_path, const std::string& output_path) {
+    // Clear and do a fresh scan
+    binaries.clear();
+    scan_engine_directory(engine_path);
+    
+    if (binaries.empty()) {
+        std::cerr << "[BinSel] No binaries found in " << engine_path << " — no manifest written." << std::endl;
+        return;
+    }
+    
+    // Write the manifest
+    std::ofstream f(output_path);
+    if (!f) {
+        std::cerr << "[BinSel] Cannot write manifest to: " << output_path << std::endl;
+        return;
+    }
+    
+    f << "{\n";
+    f << "  \"default\": \"" << default_binary << "\",\n";
+    f << "  \"instances\": [\n";
+    for (size_t i = 0; i < binaries.size(); i++) {
+        f << instance_to_json(binaries[i], 4);
+        if (i + 1 < binaries.size()) f << ",";
+        f << "\n";
+    }
+    f << "  ]\n";
+    f << "}\n";
+    
+    std::cout << "[BinSel] Generated manifest with " << binaries.size()
+              << " instances → " << output_path << std::endl;
+}

@@ -22,9 +22,7 @@ namespace fs = std::filesystem;
 #include "platform/emulator.h"
 #include "platform/emulator_arm64.h"
 #include "platform/i_emulator_arm64.h"
-#ifdef USE_DYNARMIC
 #include "platform/emulator_dynarmic64.h"
-#endif
 #include "platform/display.h"
 #include "android/asset_manager.h"
 #include "game/camera_override.h"
@@ -87,6 +85,7 @@ IEmulatorArm64* g_emulator_64 = nullptr;
 // Architecture flag — set during boot based on selected binary
 bool g_is_arm64 = false;
 bool g_use_dynarmic = false;  // Set via --engine=dynarmic
+bool g_use_sre = true;        // Set via launcher or --no-sre
 GuiRenderer g_gui;
 SrtOverlay g_srt_overlay;
 InputConfig g_input_config;
@@ -220,6 +219,11 @@ struct SreBtnSlot {
 
 static uint64_t sre_btn_array_addr = 0;           // SreBtnSlot[SRE_BTN_MAX]
 static uint64_t sre_btn_globally_hidden_addr = 0;  // int — 1 = all buttons hidden
+
+int g_sre_viewport_x = 0;
+int g_sre_viewport_y = 0;
+int g_sre_viewport_w = 960;
+int g_sre_viewport_h = 544;
 
 // PostFX auto-disable state — tracks what the user chose so we can restore
 static bool postfx_suppressed_by_menu = false;
@@ -1876,12 +1880,9 @@ void load_and_boot_arm64() {
 
     // Initialize ARM64 Emulator AFTER memory is prepared
     // Multi-engine backend selection
-#ifdef USE_DYNARMIC
     if (g_use_dynarmic) {
         g_emulator_64 = new EmulatorDynarmic64(g_guest_memory, GUEST_MEM_SIZE);
-    } else
-#endif
-    {
+    } else {
         g_emulator_64 = new EmulatorArm64(g_guest_memory, GUEST_MEM_SIZE);
     }
     std::cout << "[Engine] Using " << g_emulator_64->engine_name() << " backend" << std::endl;
@@ -2031,13 +2032,15 @@ void load_and_boot_arm64() {
     // IMPORTANT: SRE hooks use hardcoded function offsets that are ONLY valid
     // for v1.4.12 ARM64. Loading SRE for other versions would crash.
     {
-        bool sre_compatible = (g_lib_name.find("arm64") != std::string::npos &&
-                               (g_lib_name.find("v1.4.12") != std::string::npos ||
-                                g_lib_name.find("rl-") != std::string::npos));
+        bool sre_compatible = g_use_sre && g_is_arm64;
         
         if (!sre_compatible) {
             std::cerr << "\n============================================" << std::endl;
-            std::cerr << "  [SRE] Skipped — SRE only supports v1.4.12 ARM64" << std::endl;
+            if (!g_use_sre) {
+                std::cerr << "  [SRE] Skipped — SRE disabled by user choice" << std::endl;
+            } else {
+                std::cerr << "  [SRE] Skipped — SRE only supports ARM64 instances" << std::endl;
+            }
             std::cerr << "  Current binary: " << g_lib_name << std::endl;
             std::cerr << "============================================\n" << std::endl;
         } else {
@@ -2208,10 +2211,11 @@ void load_and_boot_arm64() {
                         {"lua_pushinteger", "_Z15lua_pushintegerP9lua_Statel"},
                         {"lua_concat",      "_Z10lua_concatP9lua_Statei"},
                         {"lua_pushlstring", "_Z15lua_pushlstringP9lua_StatePKcm"},
+                        {"lua_setmetatable","_Z17lua_setmetatableP9lua_Statei"},
                     };
                     const int NUM_LUA_EXT_SYMS = sizeof(lua_ext_syms) / sizeof(lua_ext_syms[0]);
 
-                    // SreLuaExtAddrs: 19 × uint64_t = 152 bytes
+                    // SreLuaExtAddrs: 20 × uint64_t = 160 bytes
                     uint64_t lua_ext_addrs_guest = 0x48200;  // after lua_addrs
                     uint64_t* lua_ext_addrs = (uint64_t*)(g_guest_memory + lua_ext_addrs_guest);
 
@@ -3927,63 +3931,86 @@ void load_and_boot_arm64() {
                         btn_globally_hidden = *(int32_t*)(g_guest_memory + sre_btn_globally_hidden_addr);
                     
                     if (!btn_globally_hidden) {
-                        int base = std::min(g_win_w, g_win_h);
-                        
+                        // ---- Compute game viewport in LOGICAL pixels (matching this glOrtho) ----
+                        // The glOrtho above is (0, g_win_w, 0, g_win_h) with Y=0 at BOTTOM.
+                        // g_sre_viewport_* is in draw/physical pixels — do NOT use it here.
+                        // Re-derive the letterbox bounds in logical pixels directly.
+                        extern int GAME_W, GAME_H;
+                        float game_asp = (float)GAME_W / (float)GAME_H;
+                        float win_asp  = (float)g_win_w / (float)g_win_h;
+                        int vp_x, vp_y_gl, vp_w, vp_h; // vp_y_gl = GL bottom of viewport
+                        if (win_asp > game_asp) {
+                            // Pillarbox: black bars left/right
+                            vp_h = g_win_h;
+                            vp_w = (int)(g_win_h * game_asp);
+                            vp_x = (g_win_w - vp_w) / 2;
+                            vp_y_gl = 0;
+                        } else {
+                            // Letterbox: black bars top/bottom
+                            vp_w = g_win_w;
+                            vp_h = (int)(g_win_w / game_asp);
+                            vp_x = 0;
+                            vp_y_gl = (g_win_h - vp_h) / 2; // GL-space bottom of viewport
+                        }
+                        int base = std::min(vp_w, vp_h);
+
                         for (int i = 0; i < SRE_BTN_MAX; i++) {
                             SreBtnSlot* btn = (SreBtnSlot*)(g_guest_memory + sre_btn_array_addr + i * sizeof(SreBtnSlot));
                             if (!btn->active || btn->hidden) continue;
-                            
-                            // Convert normalized coords to pixels
+
+                            // cur_x, cur_y are 0..1 fractions within the game viewport.
+                            // cur_y=0 → top of game area, cur_y=1 → bottom.
+                            // In this glOrtho Y=0-bottom space:
+                            //   GL_y_of_top    = vp_y_gl + vp_h
+                            //   GL_y_of_bottom = vp_y_gl
+                            // So GL_y = vp_y_gl + vp_h * (1 - cur_y)  (cur_y=0 → top GL = vp_y_gl+vp_h)
                             int pw = (int)(base * btn->w * btn->scale_x);
                             int ph = (int)(base * btn->h * btn->scale_y);
-                            int px = (int)(g_win_w * btn->cur_x) - pw / 2;
-                            int py_gl = (int)(g_win_h * (1.0f - btn->cur_y)) - ph / 2; // GL Y-flip
-                            
-                            float a = btn->alpha / 255.0f;
-                            int ba = (int)(btn->bg_alpha * a);
-                            
-                            // Background quad
+                            int px = vp_x   + (int)(vp_w * btn->cur_x) - pw / 2;
+                            int py = vp_y_gl + (int)(vp_h * (1.0f - btn->cur_y)) - ph / 2;
+
+                            float a  = btn->alpha / 255.0f;
+                            int   ba = (int)(btn->bg_alpha * a);
+
                             glEnable(GL_BLEND);
                             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                             glBegin(GL_QUADS);
-                            glColor4ub(30, 50, 80, ba);  // Dark blue tint
-                            glVertex2i(px, py_gl);
-                            glVertex2i(px + pw, py_gl);
-                            glColor4ub(20, 35, 60, ba);  // Slightly darker bottom
-                            glVertex2i(px + pw, py_gl + ph);
-                            glVertex2i(px, py_gl + ph);
+                            glColor4ub(30, 50, 80, ba);
+                            glVertex2i(px,      py);
+                            glVertex2i(px + pw, py);
+                            glColor4ub(20, 35, 60, ba);
+                            glVertex2i(px + pw, py + ph);
+                            glVertex2i(px,      py + ph);
                             glEnd();
-                            
-                            // Border
+
                             glBegin(GL_LINE_LOOP);
                             glColor4ub(80, 120, 180, (int)(200 * a));
-                            glVertex2i(px, py_gl);
-                            glVertex2i(px + pw, py_gl);
-                            glVertex2i(px + pw, py_gl + ph);
-                            glVertex2i(px, py_gl + ph);
+                            glVertex2i(px,      py);
+                            glVertex2i(px + pw, py);
+                            glVertex2i(px + pw, py + ph);
+                            glVertex2i(px,      py + ph);
                             glEnd();
-                            
-                            // Pressed highlight
+
                             if (btn->pressed) {
                                 glBegin(GL_QUADS);
                                 glColor4ub(100, 160, 255, (int)(80 * a));
-                                glVertex2i(px, py_gl);
-                                glVertex2i(px + pw, py_gl);
-                                glVertex2i(px + pw, py_gl + ph);
-                                glVertex2i(px, py_gl + ph);
+                                glVertex2i(px,      py);
+                                glVertex2i(px + pw, py);
+                                glVertex2i(px + pw, py + ph);
+                                glVertex2i(px,      py + ph);
                                 glEnd();
                             }
-                            
-                            // Label text
+
                             if (btn->label[0]) {
                                 int tr = (btn->text_color >> 16) & 0xFF;
-                                int tg = (btn->text_color >> 8) & 0xFF;
-                                int tb = btn->text_color & 0xFF;
+                                int tg = (btn->text_color >> 8)  & 0xFF;
+                                int tb =  btn->text_color        & 0xFF;
                                 int ta = (int)(((btn->text_color >> 24) & 0xFF) * a);
-                                if (ta == 0) ta = (int)(255 * a); // Default opaque
+                                if (ta == 0) ta = (int)(255 * a);
                                 float ts = btn->text_scale * (ph * 0.04f);
                                 if (ts < 0.5f) ts = 0.5f;
-                                g_gui.draw_string(btn->label, px + btn->padding_l + 4, py_gl + ph / 2 - 5, ts, tr, tg, tb, ta);
+                                g_gui.draw_string(btn->label, px + btn->padding_l + 4,
+                                                  py + ph / 2 - 5, ts, tr, tg, tb, ta);
                             }
                         }
                     }
@@ -4537,20 +4564,37 @@ void load_and_boot_arm64() {
                                     if (sre_btn_array_addr) {
                                         int mx = event.button.x;
                                         int my = event.button.y;
-                                        int base = std::min(g_win_w, g_win_h);
                                         int globally_hidden = sre_btn_globally_hidden_addr ?
                                             *(int32_t*)(g_guest_memory + sre_btn_globally_hidden_addr) : 0;
                                         
                                         if (!globally_hidden) {
+                                            extern int GAME_W, GAME_H;
+                                            float game_asp = (float)GAME_W / (float)GAME_H;
+                                            float win_asp  = (float)g_win_w / (float)g_win_h;
+                                            int vp_x, vp_y_gl, vp_w, vp_h;
+                                            if (win_asp > game_asp) {
+                                                vp_h = g_win_h;
+                                                vp_w = (int)(g_win_h * game_asp);
+                                                vp_x = (g_win_w - vp_w) / 2;
+                                                vp_y_gl = 0;
+                                            } else {
+                                                vp_w = g_win_w;
+                                                vp_h = (int)(g_win_w / game_asp);
+                                                vp_x = 0;
+                                                vp_y_gl = (g_win_h - vp_h) / 2;
+                                            }
+                                            int base = std::min(vp_w, vp_h);
+                                            int vp_top_sdl = g_win_h - vp_y_gl - vp_h;
+
                                             for (int i = SRE_BTN_MAX - 1; i >= 0; i--) {
                                                 SreBtnSlot* btn = (SreBtnSlot*)(g_guest_memory + sre_btn_array_addr + i * sizeof(SreBtnSlot));
                                                 if (!btn->active || btn->hidden || !btn->clickable) continue;
                                                 
                                                 int pw = (int)(base * btn->w * btn->scale_x);
                                                 int ph = (int)(base * btn->h * btn->scale_y);
-                                                int bx = (int)(g_win_w * btn->cur_x) - pw / 2;
-                                                int by = (int)(g_win_h * btn->cur_y) - ph / 2;
-                                                
+                                                int bx = vp_x + (int)(vp_w * btn->cur_x) - pw / 2;
+                                                int by = vp_top_sdl + (int)(vp_h * btn->cur_y) - ph / 2;
+
                                                 if (mx >= bx && mx <= bx + pw && my >= by && my <= by + ph) {
                                                     btn->pressed = 1;
                                                     if (btn->movable) btn->dragging = 1;
@@ -4577,11 +4621,28 @@ void load_and_boot_arm64() {
                             mouse_y = g_win_h - event.motion.y;
                             // ButtonController drag tracking
                             if (sre_btn_array_addr) {
+                                extern int GAME_W, GAME_H;
+                                float game_asp = (float)GAME_W / (float)GAME_H;
+                                float win_asp  = (float)g_win_w / (float)g_win_h;
+                                int vp_x, vp_y_gl, vp_w, vp_h;
+                                if (win_asp > game_asp) {
+                                    vp_h = g_win_h;
+                                    vp_w = (int)(g_win_h * game_asp);
+                                    vp_x = (g_win_w - vp_w) / 2;
+                                    vp_y_gl = 0;
+                                } else {
+                                    vp_w = g_win_w;
+                                    vp_h = (int)(g_win_w / game_asp);
+                                    vp_x = 0;
+                                    vp_y_gl = (g_win_h - vp_h) / 2;
+                                }
+                                int vp_top_sdl = g_win_h - vp_y_gl - vp_h;
+
                                 for (int i = 0; i < SRE_BTN_MAX; i++) {
                                     SreBtnSlot* btn = (SreBtnSlot*)(g_guest_memory + sre_btn_array_addr + i * sizeof(SreBtnSlot));
                                     if (!btn->active || !btn->dragging) continue;
-                                    btn->cur_x = (float)event.motion.x / g_win_w;
-                                    btn->cur_y = (float)event.motion.y / g_win_h;
+                                    btn->cur_x = (float)(event.motion.x - vp_x) / vp_w;
+                                    btn->cur_y = (float)(event.motion.y - vp_top_sdl) / vp_h;
                                 }
                             }
                             if (g_input_config.is_editing() && mouse_pressed) {
@@ -4845,12 +4906,18 @@ int main(int argc, char* argv[]) {
 #ifdef VULKAN_BACKEND
         if (strcmp(argv[i], "--vulkan") == 0) g_graphics_api = GraphicsAPI::VULKAN;
 #endif
-#ifdef USE_DYNARMIC
         if (strcmp(argv[i], "--engine=dynarmic") == 0 || strcmp(argv[i], "--dynarmic") == 0) {
             g_use_dynarmic = true;
             std::cout << "[Main] Engine: Dynarmic JIT" << std::endl;
         }
-#endif
+        if (strcmp(argv[i], "--sre") == 0) {
+            g_use_sre = true;
+            std::cout << "[Main] SRE: Enabled" << std::endl;
+        }
+        if (strcmp(argv[i], "--no-sre") == 0) {
+            g_use_sre = false;
+            std::cout << "[Main] SRE: Disabled" << std::endl;
+        }
         if (strcmp(argv[i], "--test-lib") == 0) {
             g_lib_name = "engine/v1.4.12/armeabi-v7a/libswordigo.so";
             std::cout << "[Main] Using v1.4.12 ARM32" << std::endl;
@@ -4976,9 +5043,8 @@ int main(int argc, char* argv[]) {
             g_graphics_api = lconf.graphics_api;
             g_lib_name = lconf.selected_binary;
             g_assets_dir = lconf.assets_dir;
-#ifdef USE_DYNARMIC
             g_use_dynarmic = lconf.use_dynarmic;
-#endif
+            g_use_sre = lconf.use_sre;
             // Re-initialize the asset manager with the correct assets directory
             // (asset_manager_init was called at startup with the default "assets" path)
             asset_manager_init(get_data_path(g_assets_dir).c_str());
