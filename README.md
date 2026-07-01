@@ -316,15 +316,19 @@ All controls are fully remappable — press **F2** to open the Controls Editor. 
 
 ---
 
+
 ## 👥 Credits
 
-### Core Team
+### Contributors
 
 | Role | Name | GitHub |
 |------|------|--------|
-| **Lead Developer** | TheMegineBraine | -- |
-| **Developer / Project Creator** | TheCorrectSynovian | [@QuantumCreeper](https://github.com/TheCorrectSynovian) |
-| **Developer** | MrSinup | -- |
+| **Lead Developer** | TheMegineBraine | [@Mano K](https://github.com/branirayine) |
+| **Developer** | TheCorrectSynovian | [@QuantumCreeper](https://github.com/TheCorrectSynovian) |
+| **Developer** | MrSinup | [@BingsWumpus](https://github.com/MrSinup) |
+| **Developer** | X Dukinja | [@Duke](https://github.com/Dukinja) |
+| **Designer** | ETPV | [@ETPV07](https://github.com/ETPV07) | 
+
 
 ### v7.2 Contributors
 
