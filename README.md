@@ -166,20 +166,18 @@ v7.2 Hotfix II brings **I/O optimization, decentralized per-instance configurati
 Swordigo Desktop supports **two parallel modding approaches:**
 
 #### 1️⃣ **KiwiAPI / Mini API (Primary — Active Development)**
-- **Status:** Beta (actively developed, primary focus for new mods)
-- **Framework:** SwKiwi/SwMini modloader hooks into SRE
-- **Capabilities:** Full game hooks, custom entities, audio, GUI, saves
-- **Examples:** RLSwordigo, Phonkdigo, KiwiAPI button mods
-- **Recommendation:** Use this for new mods — it's the future of Swordigo modding
+- **Status:** Beta (actively developed, thanks to the SWMini Team)
+- **Framework:** SRE acts as modloader capaitable with libmini.so mods.
+- **Capabilities:** Full game hooks, custom entities, audio, GUI, saves.
+- **Examples:** RLSwordigo, Phonkdigo, Mason mod.
+- **Recommendation:** Android targetted mods just work mostly, but still capaitablity in heavily uncertain.
 
 #### 2️⃣ **SDMOD (Lightweight Custom — Maintained, Not Expanded)**
 - **Status:** Early beta (lightweight, not actively expanded)
-- **Framework:** Direct binary patching + simple Lua tweaks
-- **Capabilities:** Cosmetics, lightweight behavior changes, simple tweaks
-- **Limitations:** Fragile, no advanced hooks, breaks on game updates
+- **Framework:** Direct tweaks + assets swaps
+- **Capabilities:** Cosmetics, lightweight "visual" changes, simple tweaks
+- **Limitations:** Fragile
 - **Note:** Useful for quick tweaks, but superseded by KiwiAPI for complex work
-
-**Bottom line:** Use **KiwiAPI** for serious modding. Use **SDMOD** only for lightweight adjustments.
 
 ---
 
@@ -275,7 +273,6 @@ All controls are fully remappable — press **F2** to open the Controls Editor. 
 ### ARM64 (arm64-v8a) — Primary Target
 | Issue | Severity | Details |
 |-------|----------|---------|
-| Bolt/timer misbehavior | 🟡 Medium | Timing misalignment causes certain bosses, bolt-shooting enemies, and bolt traps to fire at abnormal rates. Will be patched. |
 | Text input crash | 🟡 Medium | Typing into certain UI fields can crash — avoid F7 in menus |
 
 ### ARM32 (armeabi-v7a) — Deprecated
