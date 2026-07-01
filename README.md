@@ -226,7 +226,7 @@ cd SwordigoDesktop
 |----------|--------|--------|
 | **Combatch v3** | Works, unstable | Partially functional; crashes on certain mod combinations |
 | **ARM32 instances** | Deprecated | No SRE support, not actively maintained (ARM64 is the future) |
-| **Other custom mods** | As-is | Use KiwiAPI framework for new mod development |
+| **Other custom mods** | As-is | NOT SUPPORTED |
 
 ### How to Report Bugs
 
