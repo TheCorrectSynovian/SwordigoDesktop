@@ -330,16 +330,6 @@ All controls are fully remappable — press **F2** to open the Controls Editor. 
 | **Designer** | ETPV | [@ETPV07](https://github.com/ETPV07) | 
 
 
-### v7.2 Contributors
-
-| Contribution | Name |
-|-------------|------|
-| **MP3 Playback & Direct libmpg123 Integration** | MrSinup |
-| **KiwiAPI Buttons & Touchables** | Mano K |
-| **Music System Improvements** | Mano K |
-| **I/O Optimization & Build Script Refactoring** | QuantumCreeper |
-| **Launcher & Configuration Architecture** | QuantumCreeper |
-
 ### Research & Community
 
 | Contribution | Name | GitHub |
