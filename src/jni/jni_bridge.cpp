@@ -2024,9 +2024,9 @@ void bridge_fopen(void* emu_ptr) {
     // Always log write-mode opens for save debugging
     bool is_write = (strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+'));
     if (is_write) {
-        std::cout << "[File] fopen(\"" << path << "\", \"" << mode << "\") [WRITE]" << std::endl;
+        // std::cout << "[File] fopen(\"" << path << "\", \"" << mode << "\") [WRITE]" << std::endl;
     } else if (!emu->quiet_mode) {
-        std::cout << "[File] fopen(\"" << path << "\", \"" << mode << "\")" << std::endl;
+        // std::cout << "[File] fopen(\"" << path << "\", \"" << mode << "\")" << std::endl;
     }
     
     FILE* f = fopen(path, mode);
@@ -2035,12 +2035,12 @@ void bridge_fopen(void* emu_ptr) {
         g_file_handles[handle] = f;
         emu->set_reg(0, handle);
         if (is_write) {
-            std::cout << "[File]   -> OK (handle=" << handle << ")" << std::endl;
+            // std::cout << "[File]   -> OK (handle=" << handle << ")" << std::endl;
         }
     } else {
         emu->set_reg(0, 0);
         if (is_write) {
-            std::cout << "[File]   -> FAILED: " << strerror(errno) << " (errno=" << errno << ")" << std::endl;
+            // std::cout << "[File]   -> FAILED: " << strerror(errno) << " (errno=" << errno << ")" << std::endl;
         }
     }
 }
@@ -2096,11 +2096,11 @@ void bridge_fwrite(void* emu_ptr) {
     if (g_file_handles.count(handle)) {
         size_t written = fwrite(memory + buf, elem_size, count, g_file_handles[handle]);
         emu->set_reg(0, (uint32_t)written);
-        std::cout << "[File] fwrite(handle=" << handle << ", size=" << elem_size 
-                  << ", count=" << count << ") -> wrote " << written << std::endl;
+        // std::cout << "[File] fwrite(handle=" << handle << ", size=" << elem_size 
+        //           << ", count=" << count << ") -> wrote " << written << std::endl;
     } else {
         emu->set_reg(0, 0);
-        std::cout << "[File] fwrite(handle=" << handle << ") -> INVALID HANDLE" << std::endl;
+        // std::cout << "[File] fwrite(handle=" << handle << ") -> INVALID HANDLE" << std::endl;
     }
 }
 
@@ -2133,14 +2133,14 @@ void bridge_mkdir(void* emu_ptr) {
     uint32_t path_ptr = emu->get_reg(0);
     uint32_t mode = emu->get_reg(1);
     const char* path = (const char*)(memory + path_ptr);
-    std::cout << "[File] mkdir(\"" << path << "\", " << std::oct << mode << std::dec << ")" << std::endl;
+    // std::cout << "[File] mkdir(\"" << path << "\", " << std::oct << mode << std::dec << ")" << std::endl;
     int result = mkdir(path, (mode_t)mode);
     if (result != 0 && errno == EEXIST) {
         // Directory already exists — treat as success (game does recursive mkdir)
         result = 0;
     }
     if (result != 0) {
-        std::cout << "[File]   mkdir FAILED: " << strerror(errno) << std::endl;
+        // std::cout << "[File]   mkdir FAILED: " << strerror(errno) << std::endl;
     }
     emu->set_reg(0, (uint32_t)result);
 }
@@ -2332,9 +2332,9 @@ void bridge_stat(void* emu_ptr) {
     }
     
     if (!emu->quiet_mode) {
-        std::cout << "[File] stat(\"" << path << "\") -> " << result 
-                  << " (mode: 0x" << std::hex << st.st_mode << std::dec 
-                  << ", size: " << st.st_size << ")" << std::endl;
+        // std::cout << "[File] stat(\"" << path << "\") -> " << result 
+        //           << " (mode: 0x" << std::hex << st.st_mode << std::dec 
+        //           << ", size: " << st.st_size << ")" << std::endl;
     }
     emu->set_reg(0, (uint32_t)result);
 }
@@ -2357,7 +2357,7 @@ void bridge_opendir(void* emu_ptr) {
     
     const char* path = (const char*)(memory + name_ptr);
     if (!emu->quiet_mode) {
-        std::cout << "[File] opendir(\"" << path << "\")" << std::endl;
+        // std::cout << "[File] opendir(\"" << path << "\")" << std::endl;
     }
     
     if (!fs::exists(path) || !fs::is_directory(path)) {

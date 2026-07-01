@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iomanip>
 #include <algorithm>
+#include <map>
 
 namespace fs = std::filesystem;
 
@@ -420,6 +421,29 @@ void BinarySelector::set_default(const std::string& filepath) {
     for (auto& b : binaries) {
         b.is_default = (b.filepath == filepath);
     }
+    
+    // Save to ~/.config/swordigo-desktop/default_instance.txt
+    std::string user_config_dir;
+    const char* xdg_config = getenv("XDG_CONFIG_HOME");
+    if (xdg_config) {
+        user_config_dir = std::string(xdg_config) + "/swordigo-desktop";
+    } else {
+        const char* home = getenv("HOME");
+        user_config_dir = std::string(home ? home : ".") + "/.config/swordigo-desktop";
+    }
+    try {
+        fs::create_directories(user_config_dir);
+        std::string default_txt_path = user_config_dir + "/default_instance.txt";
+        std::ofstream df(default_txt_path);
+        if (df) {
+            std::string rel_filepath = filepath;
+            size_t pos = filepath.find("engine/");
+            if (pos != std::string::npos) {
+                rel_filepath = filepath.substr(pos);
+            }
+            df << rel_filepath << std::endl;
+        }
+    } catch (...) {}
 }
 
 const BinaryInfo* BinarySelector::get_loaded_info() const {
@@ -487,7 +511,7 @@ bool BinarySelector::add_custom_instance(const std::string& so_filepath, const s
     
     // Extract base data directory from absolute so_filepath
     // so_filepath = "<data_dir>/engine/<version>/<arch>/libswordigo.so"
-    std::string data_dir;
+    std::string base_data_dir;
     {
         fs::path sp(so_filepath);
         // Walk up to find the "engine" component
@@ -496,16 +520,19 @@ bool BinarySelector::add_custom_instance(const std::string& so_filepath, const s
             parent = parent.parent_path();
         }
         if (parent.filename() == "engine") {
-            data_dir = parent.parent_path().string(); // <data_dir>
+            base_data_dir = parent.parent_path().string(); // <data_dir>
         }
     }
-    if (data_dir.empty()) {
+    if (base_data_dir.empty()) {
         // Fallback: use parent 4 levels up from so_filepath
-        data_dir = fs::path(so_filepath).parent_path().parent_path().parent_path().parent_path().string();
+        base_data_dir = fs::path(so_filepath).parent_path().parent_path().parent_path().parent_path().string();
     }
     
-    std::string dest_dir = data_dir + "/" + rel_dest;
-    std::string dest_path = data_dir + "/" + rel_dest_so;
+    // Store data_dir so save_instance_ini() can use it
+    const_cast<BinarySelector*>(this)->set_data_dir(base_data_dir);
+    
+    std::string dest_dir = base_data_dir + "/" + rel_dest;
+    std::string dest_path = base_data_dir + "/" + rel_dest_so;
 
     try {
         fs::create_directories(dest_dir);
@@ -571,6 +598,7 @@ bool BinarySelector::add_custom_instance(const std::string& so_filepath, const s
     }
 
     binaries.push_back(info);
+    save_instance_ini(info);
 
     std::cout << "[BinSel] Added custom instance: " << info.label << " → " << info.filepath << std::endl;
     return true;
@@ -735,143 +763,340 @@ static std::vector<std::string> split_json_objects(const std::string& content) {
     return objects;
 }
 
-// ── load_manifest: Read system manifest.json ──
+static std::map<std::string, std::string> parse_ini(const std::string& path) {
+    std::map<std::string, std::string> kv;
+    std::ifstream f(path);
+    if (!f) return kv;
+    std::string line;
+    while (std::getline(f, line)) {
+        size_t comment = line.find(';');
+        if (comment != std::string::npos) line = line.substr(0, comment);
+        comment = line.find('#');
+        if (comment != std::string::npos) line = line.substr(0, comment);
+        
+        line.erase(0, line.find_first_not_of(" \t\r\n"));
+        line.erase(line.find_last_not_of(" \t\r\n") + 1);
+        
+        if (line.empty() || line[0] == '[') continue;
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        
+        std::string key = line.substr(0, eq);
+        std::string val = line.substr(eq + 1);
+        
+        key.erase(0, key.find_first_not_of(" \t\r\n"));
+        key.erase(key.find_last_not_of(" \t\r\n") + 1);
+        val.erase(0, val.find_first_not_of(" \t\r\n"));
+        val.erase(val.find_last_not_of(" \t\r\n") + 1);
+        
+        if (val.length() >= 2 && val.front() == '"' && val.back() == '"') {
+            val = val.substr(1, val.length() - 2);
+        }
+        
+        kv[key] = val;
+    }
+    return kv;
+}
+
+static std::vector<std::string> split_comma_string(const std::string& str) {
+    std::vector<std::string> res;
+    if (str.empty()) return res;
+    std::stringstream ss(str);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        token.erase(0, token.find_first_not_of(" \t\r\n"));
+        token.erase(token.find_last_not_of(" \t\r\n") + 1);
+        if (!token.empty()) {
+            res.push_back(token);
+        }
+    }
+    return res;
+}
+
 void BinarySelector::load_manifest(const std::string& manifest_path) {
-    std::ifstream f(manifest_path);
-    if (!f) {
-        std::cout << "[BinSel] No system manifest at: " << manifest_path << std::endl;
+    fs::path engine_dir = fs::path(manifest_path).parent_path();
+    if (!fs::exists(engine_dir) || !fs::is_directory(engine_dir)) {
+        std::cerr << "[BinSel] Engine directory not found: " << engine_dir << std::endl;
         return;
     }
-    
-    std::string content((std::istreambuf_iterator<char>(f)),
-                         std::istreambuf_iterator<char>());
-    f.close();
-    
-    // Resolve base directory: manifest is at <data_dir>/engine/manifest.json
-    // so base = parent of parent = <data_dir>/
-    fs::path manifest_base = fs::path(manifest_path).parent_path().parent_path();
-    std::string base_str = manifest_base.string();
+
+    std::string user_config_dir;
+    const char* xdg_config = getenv("XDG_CONFIG_HOME");
+    if (xdg_config) {
+        user_config_dir = std::string(xdg_config) + "/swordigo-desktop";
+    } else {
+        const char* home = getenv("HOME");
+        user_config_dir = std::string(home ? home : ".") + "/.config/swordigo-desktop";
+    }
+    std::string default_txt_path = user_config_dir + "/default_instance.txt";
+    std::string saved_default_filepath;
+    if (fs::exists(default_txt_path)) {
+        std::ifstream df(default_txt_path);
+        if (df) {
+            std::getline(df, saved_default_filepath);
+            saved_default_filepath.erase(0, saved_default_filepath.find_first_not_of(" \t\r\n"));
+            saved_default_filepath.erase(saved_default_filepath.find_last_not_of(" \t\r\n") + 1);
+        }
+    }
+
+    std::string base_str = engine_dir.parent_path().string();
     if (!base_str.empty() && base_str.back() != '/') base_str += "/";
-    
-    // Extract "default" field
-    default_binary = json_str(content, "default");
-    
-    // Find "instances" array and parse each object
-    auto objects = split_json_objects(content);
+
     int loaded = 0;
-    for (const auto& obj : objects) {
-        BinaryInfo b = parse_instance_json(obj);
-        if (b.filepath.empty()) continue;
+    
+    // Scan exactly 2 levels deep: engine/<instance>/<arch>/instance.ini
+    for (const auto& inst_entry : fs::directory_iterator(engine_dir)) {
+        if (!inst_entry.is_directory()) continue;
         
-        // Resolve relative paths against manifest base directory
-        if (!b.filepath.empty() && b.filepath[0] != '/') {
-            b.filepath = base_str + b.filepath;
-        }
-        // Also resolve dep_paths
-        for (auto& dp : b.dep_paths) {
-            if (!dp.empty() && dp[0] != '/') {
-                dp = base_str + dp;
+        for (const auto& arch_entry : fs::directory_iterator(inst_entry.path())) {
+            if (!arch_entry.is_directory()) continue;
+            
+            fs::path ini_path = arch_entry.path() / "instance.ini";
+            if (!fs::exists(ini_path) || !fs::is_regular_file(ini_path)) continue;
+            
+            std::string ini_str = ini_path.string();
+            fs::path arch_path = arch_entry.path();
+            
+            auto kv = parse_ini(ini_str);
+            if (kv.empty()) continue;
+            
+            // Check schema version compatibility
+            std::string schema_str = kv["schema_version"];
+            if (!schema_str.empty()) {
+                try {
+                    int schema_ver = std::stoi(schema_str);
+                    if (schema_ver > 1) {
+                        std::cerr << "[BinSel] Skipped " << ini_str << " (unsupported schema version: " << schema_str << ")" << std::endl;
+                        continue;
+                    }
+                } catch (...) {
+                    // Treat as legacy/invalid but check if we can load it
+                }
             }
+            
+            BinaryInfo b;
+            b.filename = kv["filename"].empty() ? "libswordigo.so" : kv["filename"];
+            
+            std::string filepath = kv["filepath"];
+            if (!filepath.empty() && filepath[0] != '/') {
+                b.filepath = base_str + filepath;
+            } else {
+                b.filepath = filepath;
+            }
+            
+            if (b.filepath.empty()) {
+                fs::path so_path = arch_path / b.filename;
+                b.filepath = so_path.string();
+            }
+
+            b.sha256 = kv["sha256"];
+            b.version = kv["version"];
+            b.label = kv["name"];
+            b.version_dir = kv["version_dir"];
+            
+            std::string arch_str = kv["arch"];
+            if (arch_str == "ARM64" || arch_str == "arm64-v8a") {
+                b.arch = BinaryArch::ARM64;
+            } else {
+                b.arch = BinaryArch::ARM32;
+            }
+
+            std::string fs_str = kv["file_size"];
+            b.file_size = fs_str.empty() ? 0 : std::stoull(fs_str);
+            
+            b.is_default = (kv["is_default"] == "true");
+            if (!saved_default_filepath.empty() && (filepath == saved_default_filepath || b.filepath == saved_default_filepath || (base_str + filepath) == saved_default_filepath)) {
+                b.is_default = true;
+            }
+            if (b.is_default) {
+                default_binary = b.filepath;
+            }
+
+            std::string status_str = kv["status"];
+            if (status_str == "tested") {
+                b.status = BinaryStatus::TESTED;
+            } else if (status_str == "testing") {
+                b.status = BinaryStatus::TESTING;
+            } else {
+                b.status = BinaryStatus::UNKNOWN;
+            }
+
+            b.game_type = kv["game_type"];
+            b.assets_dir = kv["assets_dir"];
+            b.icon_path = kv["icon_path"];
+
+            b.dependencies = split_comma_string(kv["dependencies"]);
+            b.dep_paths = split_comma_string(kv["dep_paths"]);
+
+            for (auto& dp : b.dep_paths) {
+                if (!dp.empty() && dp[0] != '/') {
+                    dp = base_str + dp;
+                }
+            }
+
+            // Safety check 1: ARM32 instances cannot carry libsre.so
+            if (b.arch == BinaryArch::ARM32) {
+                b.dependencies.erase(
+                    std::remove_if(b.dependencies.begin(), b.dependencies.end(),
+                        [](const std::string& d) {
+                            return d == "libsre.so";
+                        }), b.dependencies.end());
+                b.dep_paths.erase(
+                    std::remove_if(b.dep_paths.begin(), b.dep_paths.end(),
+                        [](const std::string& p) {
+                            return p.find("libsre.so") != std::string::npos;
+                        }), b.dep_paths.end());
+            }
+
+            // Safety check 2: if an instance has libsre.so, remove conflicting modloaders
+            bool has_sre = false;
+            for (const auto& d : b.dependencies) {
+                if (d == "libsre.so") { has_sre = true; break; }
+            }
+            if (has_sre) {
+                b.dependencies.erase(
+                    std::remove_if(b.dependencies.begin(), b.dependencies.end(),
+                        [](const std::string& d) {
+                            return d == "libmini.so" || d == "libGlossHook.so" || d == "libkiwi.so";
+                        }), b.dependencies.end());
+                b.dep_paths.erase(
+                    std::remove_if(b.dep_paths.begin(), b.dep_paths.end(),
+                        [](const std::string& p) {
+                            return p.find("libmini.so") != std::string::npos ||
+                                   p.find("libGlossHook.so") != std::string::npos ||
+                                   p.find("libkiwi.so") != std::string::npos;
+                        }), b.dep_paths.end());
+            }
+
+            if (b.dependencies.empty()) {
+                for (const auto& f_entry : fs::directory_iterator(arch_path)) {
+                    if (!f_entry.is_regular_file()) continue;
+                    std::string fn = f_entry.path().filename().string();
+                    if (fn != b.filename && fn.length() > 3 && fn.substr(fn.length() - 3) == ".so") {
+                        b.dependencies.push_back(fn);
+                        b.dep_paths.push_back(f_entry.path().string());
+                    }
+                }
+                
+                if (fs::exists(arch_path / "libsre.so")) {
+                    b.dependencies.erase(
+                        std::remove_if(b.dependencies.begin(), b.dependencies.end(),
+                            [](const std::string& d) {
+                                return d == "libmini.so" || d == "libGlossHook.so" || d == "libkiwi.so";
+                            }), b.dependencies.end());
+                    b.dep_paths.erase(
+                        std::remove_if(b.dep_paths.begin(), b.dep_paths.end(),
+                            [](const std::string& p) {
+                                return p.find("libmini.so") != std::string::npos ||
+                                       p.find("libGlossHook.so") != std::string::npos ||
+                                       p.find("libkiwi.so") != std::string::npos;
+                            }), b.dep_paths.end());
+                }
+            }
+
+            if (b.sha256.empty() && fs::exists(b.filepath)) {
+                b.sha256 = compute_sha256(b.filepath);
+            }
+            if (b.file_size == 0 && fs::exists(b.filepath)) {
+                b.file_size = fs::file_size(b.filepath);
+            }
+
+            // Check for duplicates
+            bool dup = false;
+            for (const auto& existing : binaries) {
+                if (existing.filepath == b.filepath) { dup = true; break; }
+            }
+            if (dup) continue;
+
+            binaries.push_back(b);
+            loaded++;
         }
-        
-        // Verify the file still exists at this path
-        if (!fs::exists(b.filepath)) {
-            std::cout << "[BinSel] Manifest entry skipped (file missing): " << b.filepath << std::endl;
-            continue;
-        }
-        
-        // Check for duplicates
-        bool dup = false;
-        for (const auto& existing : binaries) {
-            if (existing.filepath == b.filepath) { dup = true; break; }
-        }
-        if (dup) continue;
-        
-        // Apply default
-        b.is_default = (b.filepath == default_binary || b.filepath == (base_str + default_binary));
-        
-        binaries.push_back(b);
-        loaded++;
     }
     
-    std::cout << "[BinSel] Loaded " << loaded << " instances from manifest: " << manifest_path << std::endl;
+    std::cout << "[BinSel] Loaded " << loaded << " instances from local instance.ini files" << std::endl;
 }
 
-// ── load_user_instances: Read user-added instances ──
 void BinarySelector::load_user_instances(const std::string& json_path) {
-    std::ifstream f(json_path);
-    if (!f) {
-        // No user instances yet — that's fine
-        return;
-    }
-    
-    std::string content((std::istreambuf_iterator<char>(f)),
-                         std::istreambuf_iterator<char>());
-    f.close();
-    
-    auto objects = split_json_objects(content);
-    int loaded = 0;
-    for (const auto& obj : objects) {
-        BinaryInfo b = parse_instance_json(obj);
-        if (b.filepath.empty()) continue;
-        
-        if (!fs::exists(b.filepath)) {
-            std::cout << "[BinSel] User instance skipped (file missing): " << b.filepath << std::endl;
-            continue;
-        }
-        
-        // Check for duplicates
-        bool dup = false;
-        for (const auto& existing : binaries) {
-            if (existing.filepath == b.filepath) { dup = true; break; }
-        }
-        if (dup) continue;
-        
-        binaries.push_back(b);
-        loaded++;
-    }
-    
-    if (loaded > 0) {
-        std::cout << "[BinSel] Loaded " << loaded << " user instances from: " << json_path << std::endl;
+    // NO-OP: Handled dynamically by scanning directory in load_manifest
+}
+
+void BinarySelector::save_user_instances(const std::string& json_path) const {
+    for (const auto& b : binaries) {
+        save_instance_ini(b);
     }
 }
 
-// ── save_user_instances: Write only custom/user instances ──
-void BinarySelector::save_user_instances(const std::string& json_path) const {
-    // Filter to custom instances (custom prefix OR non-standard assets)
-    std::vector<const BinaryInfo*> custom_bins;
-    for (const auto& b : binaries) {
-        if (b.version_dir.substr(0, 7) == "custom-" ||
-            (b.assets_dir != "assets" && b.assets_dir != "rl_assets" && !b.assets_dir.empty())) {
-            custom_bins.push_back(&b);
+void BinarySelector::save_instance_ini(const BinaryInfo& b) const {
+    if (b.filepath.empty()) return;
+    
+    // Build absolute path: data_dir + filepath
+    std::string abs_so_path = b.filepath;
+    if (!data_dir.empty() && !fs::path(b.filepath).is_absolute()) {
+        abs_so_path = data_dir + "/" + b.filepath;
+    }
+    
+    fs::path so_path(abs_so_path);
+    fs::path dir_path = so_path.parent_path();
+    if (!fs::exists(dir_path)) {
+        try {
+            fs::create_directories(dir_path);
+        } catch (const std::exception& e) {
+            std::cerr << "[BinSel] Failed to create directory " << dir_path << ": " << e.what() << std::endl;
+            return;
         }
     }
     
-    if (custom_bins.empty()) return;  // Don't write empty file
-    
-    // Ensure parent directory exists
-    fs::path parent = fs::path(json_path).parent_path();
-    if (!parent.empty()) {
-        fs::create_directories(parent);
-    }
-    
-    std::ofstream f(json_path);
+    fs::path ini_path = dir_path / "instance.ini";
+    std::ofstream f(ini_path);
     if (!f) {
-        std::cerr << "[BinSel] Cannot write user instances to: " << json_path << std::endl;
+        std::cerr << "[BinSel] Cannot write instance.ini to: " << ini_path << std::endl;
         return;
     }
     
-    f << "{\n";
-    f << "  \"instances\": [\n";
-    for (size_t i = 0; i < custom_bins.size(); i++) {
-        f << instance_to_json(*custom_bins[i], 4);
-        if (i + 1 < custom_bins.size()) f << ",";
-        f << "\n";
-    }
-    f << "  ]\n";
-    f << "}\n";
+    f << "[instance]\n";
+    f << "schema_version = 1\n";
+    f << "name = " << b.label << "\n";
+    f << "filename = " << b.filename << "\n";
     
-    std::cout << "[BinSel] Saved " << custom_bins.size() << " user instances to: " << json_path << std::endl;
+    std::string rel_filepath = b.filepath;
+    size_t pos = rel_filepath.find("engine/");
+    if (pos != std::string::npos) {
+        rel_filepath = rel_filepath.substr(pos);
+    }
+    f << "filepath = " << rel_filepath << "\n";
+    f << "sha256 = " << b.sha256 << "\n";
+    f << "version = " << b.version << "\n";
+    f << "version_dir = " << b.version_dir << "\n";
+    f << "arch = " << arch_string(b.arch) << "\n";
+    f << "file_size = " << b.file_size << "\n";
+    f << "is_default = " << (b.is_default ? "true" : "false") << "\n";
+    
+    const char* status_str = (b.status == BinaryStatus::TESTED) ? "tested" :
+                             (b.status == BinaryStatus::TESTING) ? "testing" : "unknown";
+    f << "status = " << status_str << "\n";
+    f << "game_type = " << b.game_type << "\n";
+    f << "assets_dir = " << b.assets_dir << "\n";
+    f << "icon_path = " << b.icon_path << "\n";
+    
+    f << "dependencies = ";
+    for (size_t i = 0; i < b.dependencies.size(); i++) {
+        f << b.dependencies[i];
+        if (i + 1 < b.dependencies.size()) f << ", ";
+    }
+    f << "\n";
+    
+    f << "dep_paths = ";
+    for (size_t i = 0; i < b.dep_paths.size(); i++) {
+        std::string dp = b.dep_paths[i];
+        size_t d_pos = dp.find("engine/");
+        if (d_pos != std::string::npos) {
+            f << dp.substr(d_pos);
+        } else {
+            f << dp;
+        }
+        if (i + 1 < b.dep_paths.size()) f << ", ";
+    }
+    f << "\n";
 }
 
 // ── generate_manifest: Scan engine/ dir and write manifest.json ──

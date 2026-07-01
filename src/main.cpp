@@ -43,6 +43,7 @@ namespace fs = std::filesystem;
 #include "platform/binary_selector.h"
 #include "platform/launcher_ui.h"
 #include "platform/srt_overlay.h"
+#include "platform/save_editor.h"
 
 extern bool g_display_active;
 extern int g_win_w;
@@ -211,6 +212,7 @@ struct SreBtnSlot {
     int      padding_l, padding_t, padding_r, padding_b;
     int      alignment;
     int      pressed;
+    int      released;
     int      dragging;
     float    cur_x, cur_y;
     int      active;
@@ -2067,6 +2069,16 @@ void load_and_boot_arm64() {
             if (access("libsre.so", F_OK) == 0) {
                 sre_path = "libsre.so";
             }
+        } else {
+            // Sync current directory's libsre.so to the instance directory
+            if (sre_path != "libsre.so" && access("libsre.so", F_OK) == 0) {
+                try {
+                    fs::copy_file("libsre.so", sre_path, fs::copy_options::overwrite_existing);
+                    std::cout << "[SRE] Synchronized: copied ./libsre.so -> " << sre_path << std::endl;
+                } catch (const std::exception& e) {
+                    std::cerr << "[SRE] Failed to sync ./libsre.so to " << sre_path << ": " << e.what() << std::endl;
+                }
+            }
         }
 
         if (!sre_path.empty() && access(sre_path.c_str(), F_OK) == 0) {
@@ -2990,9 +3002,27 @@ void load_and_boot_arm64() {
                 // ButtonController — SRE-side button array for host rendering + hit-testing
                 sre_btn_array_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_buttons");
                 sre_btn_globally_hidden_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_btn_globally_hidden");
-                if (sre_btn_array_addr)
+                if (sre_btn_array_addr) {
                     std::cout << "[SRE] ButtonController: array=0x" << std::hex << sre_btn_array_addr
                               << " hidden=0x" << sre_btn_globally_hidden_addr << std::dec << std::endl;
+                    std::cout << "[SRE/Host] SreBtnSlot size=" << sizeof(SreBtnSlot)
+                              << " offsets: id=" << offsetof(SreBtnSlot, id)
+                              << " label=" << offsetof(SreBtnSlot, label)
+                              << " x=" << offsetof(SreBtnSlot, x)
+                              << " y=" << offsetof(SreBtnSlot, y)
+                              << " w=" << offsetof(SreBtnSlot, w)
+                              << " h=" << offsetof(SreBtnSlot, h)
+                              << " alpha=" << offsetof(SreBtnSlot, alpha)
+                              << " text_color=" << offsetof(SreBtnSlot, text_color)
+                              << " hidden=" << offsetof(SreBtnSlot, hidden)
+                              << " pressed=" << offsetof(SreBtnSlot, pressed)
+                              << " released=" << offsetof(SreBtnSlot, released)
+                              << " dragging=" << offsetof(SreBtnSlot, dragging)
+                              << " cur_x=" << offsetof(SreBtnSlot, cur_x)
+                              << " active=" << offsetof(SreBtnSlot, active)
+                              << " dirty=" << offsetof(SreBtnSlot, dirty)
+                              << std::endl;
+                }
                 
                 // VFS MiniPath globals — populate so SRE can translate
                 // /ExternalFiles/, /Files/, /Cache/ without calling getenv
@@ -3020,6 +3050,26 @@ void load_and_boot_arm64() {
                     mkdir(ext_dir.c_str(), 0755);
                     mkdir(g_save_dir.c_str(), 0755);
                     mkdir(g_cache_dir.c_str(), 0755);
+
+                    // Populate guest `g_sre_mod_profile_id` with the active save UUID
+                    uint64_t profile_addr = g_loader_64->get_symbol_vaddr(&g_sre_mod, "g_sre_mod_profile_id");
+                    if (profile_addr) {
+                        std::string docs = g_save_dir + "/Documents";
+                        if (fs::exists(docs) && fs::is_directory(docs)) {
+                            for (const auto& entry : fs::directory_iterator(docs)) {
+                                if (entry.path().extension() == ".gplayer") {
+                                    SaveFile sf;
+                                    if (save_load(entry.path().string(), sf)) {
+                                        std::string id = sf.identifier.empty() ? entry.path().stem().string() : sf.identifier;
+                                        strncpy((char*)(g_guest_memory + profile_addr), id.c_str(), 63);
+                                        ((char*)(g_guest_memory + profile_addr))[63] = '\0';
+                                        std::cout << "[SRE] Profile ID = " << id << std::endl;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
                 
                 std::cout << "[SRE] GUI: hp=0x" << std::hex << sre_player_hp_addr
@@ -3435,6 +3485,9 @@ void load_and_boot_arm64() {
                 g_emulator_64->run_pending_threads();
             }
             
+            if (sre_menu_active_addr) {
+                *(int32_t*)(g_guest_memory + sre_menu_active_addr) = 0;
+            }
             g_emulator_64->call(drawApp, {env_ptr, 0});
 
             if (g_display_active) {
@@ -3918,19 +3971,26 @@ void load_and_boot_arm64() {
                     }
                 }
                 
-                // ---- ButtonController: auto-hide during menus ----
-                if (sre_btn_globally_hidden_addr && sre_menu_active_addr) {
-                    int menu_active = *(int32_t*)(g_guest_memory + sre_menu_active_addr);
-                    *(int32_t*)(g_guest_memory + sre_btn_globally_hidden_addr) = (menu_active != 0) ? 1 : 0;
-                }
-                
                 // ---- ButtonController overlay ----
                 if (sre_btn_array_addr) {
                     int btn_globally_hidden = 0;
                     if (sre_btn_globally_hidden_addr)
                         btn_globally_hidden = *(int32_t*)(g_guest_memory + sre_btn_globally_hidden_addr);
                     
-                    if (!btn_globally_hidden) {
+                    int menu_active = sre_menu_active_addr ? *(int32_t*)(g_guest_memory + sre_menu_active_addr) : 0;
+                    // Only hide buttons if a main menu (0x01) or alert/popup (0x02) is active.
+                    // Do NOT hide buttons for sliders (0x04) which can be drawn as HUD.
+                    int menu_hidden = ((menu_active & 0x03) != 0) ? 1 : 0;
+                    
+                    static int glob_cooldown = 0;
+                    if (glob_cooldown++ % 120 == 0) {
+                        std::cout << "[SRE/Host] Overlay check: globally_hidden=" << btn_globally_hidden
+                                  << " menu_active=" << menu_active
+                                  << " menu_hidden=" << menu_hidden
+                                  << std::endl;
+                    }
+                    
+                    if (!btn_globally_hidden && !menu_hidden) {
                         // ---- Compute game viewport in LOGICAL pixels (matching this glOrtho) ----
                         // The glOrtho above is (0, g_win_w, 0, g_win_h) with Y=0 at BOTTOM.
                         // g_sre_viewport_* is in draw/physical pixels — do NOT use it here.
@@ -3954,8 +4014,213 @@ void load_and_boot_arm64() {
                         }
                         int base = std::min(vp_w, vp_h);
 
+                        auto draw_vector_char = [](char c, float x, float y, float w, float h, float line_width) {
+                            glLineWidth(line_width);
+                            glBegin(GL_LINES);
+                            #define VX(gx) (x + ((gx) / 6.0f) * w)
+                            #define VY(gy) (y + ((gy) / 10.0f) * h)
+                            #define LINE(x1, y1, x2, y2) { glVertex2f(VX(x1), VY(y1)); glVertex2f(VX(x2), VY(y2)); }
+
+                            char upper_c = toupper(c);
+                            switch (upper_c) {
+                                case 'A':
+                                    LINE(0,0, 0,6); LINE(0,6, 3,10); LINE(3,10, 6,6); LINE(6,6, 6,0);
+                                    LINE(0,4, 6,4);
+                                    LINE(-1,0, 1,0); LINE(5,0, 7,0);
+                                    break;
+                                case 'B':
+                                    LINE(0,0, 0,10); LINE(0,10, 4,10); LINE(4,10, 6,8); LINE(6,8, 4,5);
+                                    LINE(4,5, 0,5); LINE(4,5, 6,2); LINE(6,2, 4,0); LINE(4,0, 0,0);
+                                    LINE(-1,10, 1,10); LINE(-1,0, 1,0);
+                                    break;
+                                case 'C':
+                                    LINE(6,10, 1,10); LINE(1,10, 0,8); LINE(0,8, 0,2); LINE(0,2, 1,0); LINE(1,0, 6,0);
+                                    LINE(6,10, 6,8.5); LINE(6,0, 6,1.5);
+                                    break;
+                                case 'D':
+                                    LINE(0,0, 0,10); LINE(0,10, 4,10); LINE(4,10, 6,7); LINE(6,7, 6,3); LINE(6,3, 4,0); LINE(4,0, 0,0);
+                                    LINE(-1,10, 1,10); LINE(-1,0, 1,0);
+                                    break;
+                                case 'E':
+                                    LINE(6,10, 0,10); LINE(0,10, 0,0); LINE(0,0, 6,0);
+                                    LINE(0,5, 4,5);
+                                    LINE(6,10, 6,8.5); LINE(6,0, 6,1.5); LINE(4,5, 4,4);
+                                    break;
+                                case 'F':
+                                    LINE(6,10, 0,10); LINE(0,10, 0,0);
+                                    LINE(0,5, 4,5);
+                                    LINE(6,10, 6,8.5); LINE(-1,0, 1,0); LINE(4,5, 4,4);
+                                    break;
+                                case 'G':
+                                    LINE(6,10, 1,10); LINE(1,10, 0,8); LINE(0,8, 0,2); LINE(0,2, 1,0); LINE(1,0, 6,0);
+                                    LINE(6,0, 6,4); LINE(6,4, 3,4);
+                                    LINE(6,10, 6,8.5); LINE(3,4, 3,2.5);
+                                    break;
+                                case 'H':
+                                    LINE(0,0, 0,10); LINE(6,0, 6,10);
+                                    LINE(0,5, 6,5);
+                                    LINE(-1,10, 1,10); LINE(-1,0, 1,0);
+                                    LINE(5,10, 7,10); LINE(5,0, 7,0);
+                                    break;
+                                case 'I':
+                                    LINE(1,10, 5,10); LINE(3,10, 3,0); LINE(1,0, 5,0);
+                                    break;
+                                case 'J':
+                                    LINE(1,2, 3,0); LINE(3,0, 5,0); LINE(5,0, 5,10); LINE(3,10, 5,10);
+                                    LINE(2,10, 4,10);
+                                    break;
+                                case 'K':
+                                    LINE(0,0, 0,10); LINE(0,4, 5,10); LINE(0,4, 5,0);
+                                    LINE(-1,10, 1,10); LINE(-1,0, 1,0);
+                                    LINE(4,10, 6,10); LINE(4,0, 6,0);
+                                    break;
+                                case 'L':
+                                    LINE(0,10, 0,0); LINE(0,0, 6,0);
+                                    LINE(-1,10, 1,10); LINE(6,0, 6,1.5);
+                                    break;
+                                case 'M':
+                                    LINE(0,0, 0,10); LINE(0,10, 3,4); LINE(3,4, 6,10); LINE(6,10, 6,0);
+                                    LINE(-1,10, 1,10); LINE(5,10, 7,10);
+                                    LINE(-1,0, 1,0); LINE(5,0, 7,0);
+                                    break;
+                                case 'N':
+                                    LINE(0,0, 0,10); LINE(0,10, 6,0); LINE(6,0, 6,10);
+                                    LINE(-1,10, 1,10); LINE(5,0, 7,0);
+                                    LINE(-1,0, 1,0); LINE(5,10, 7,10);
+                                    break;
+                                case 'O':
+                                    LINE(1,10, 5,10); LINE(5,10, 6,8); LINE(6,8, 6,2); LINE(6,2, 5,0);
+                                    LINE(5,0, 1,0); LINE(1,0, 0,2); LINE(0,2, 0,8); LINE(0,8, 1,10);
+                                    break;
+                                case 'P':
+                                    LINE(0,0, 0,10); LINE(0,10, 4,10); LINE(4,10, 6,8); LINE(6,8, 4,5); LINE(4,5, 0,5);
+                                    LINE(-1,10, 1,10); LINE(-1,0, 1,0);
+                                    break;
+                                case 'Q':
+                                    LINE(1,10, 5,10); LINE(5,10, 6,8); LINE(6,8, 6,2); LINE(6,2, 5,0);
+                                    LINE(5,0, 1,0); LINE(1,0, 0,2); LINE(0,2, 0,8); LINE(0,8, 1,10);
+                                    LINE(4,2, 6,0);
+                                    break;
+                                case 'R':
+                                    LINE(0,0, 0,10); LINE(0,10, 4,10); LINE(4,10, 6,8); LINE(6,8, 4,5); LINE(4,5, 0,5);
+                                    LINE(3,5, 6,0);
+                                    LINE(-1,10, 1,10); LINE(-1,0, 1,0); LINE(5,0, 7,0);
+                                    break;
+                                case 'S':
+                                    LINE(6,9, 5,10); LINE(5,10, 1,10); LINE(1,10, 0,9); LINE(0,9, 0,6);
+                                    LINE(0,6, 1,5); LINE(1,5, 5,5); LINE(5,5, 6,4); LINE(6,4, 6,1);
+                                    LINE(6,1, 5,0); LINE(5,0, 1,0); LINE(1,0, 0,1);
+                                    break;
+                                case 'T':
+                                    LINE(0,10, 6,10); LINE(3,10, 3,0);
+                                    LINE(0,10, 0,8.5); LINE(6,10, 6,8.5); LINE(1,0, 5,0);
+                                    break;
+                                case 'U':
+                                    LINE(0,10, 0,2); LINE(0,2, 2,0); LINE(2,0, 4,0); LINE(4,0, 6,2); LINE(6,2, 6,10);
+                                    LINE(-1,10, 1,10); LINE(5,10, 7,10);
+                                    break;
+                                case 'V':
+                                    LINE(0,10, 3,0); LINE(3,0, 6,10);
+                                    LINE(-1,10, 1,10); LINE(5,10, 7,10);
+                                    break;
+                                case 'W':
+                                    LINE(0,10, 1,0); LINE(1,0, 3,4); LINE(3,4, 5,0); LINE(5,0, 6,10);
+                                    LINE(-1,10, 1,10); LINE(5,10, 7,10);
+                                    break;
+                                case 'X':
+                                    LINE(0,10, 6,0); LINE(0,0, 6,10);
+                                    LINE(-1,10, 1,10); LINE(5,10, 7,10);
+                                    LINE(-1,0, 1,0); LINE(5,0, 7,0);
+                                    break;
+                                case 'Y':
+                                    LINE(0,10, 3,5); LINE(6,10, 3,5); LINE(3,5, 3,0);
+                                    LINE(-1,10, 1,10); LINE(5,10, 7,10); LINE(1,0, 5,0);
+                                    break;
+                                case 'Z':
+                                    LINE(0,10, 6,10); LINE(6,10, 0,0); LINE(0,0, 6,0);
+                                    LINE(0,10, 0,8.5); LINE(6,0, 6,1.5);
+                                    break;
+                                case '0':
+                                    LINE(0,0, 0,10); LINE(0,10, 6,10); LINE(6,10, 6,0); LINE(6,0, 0,0);
+                                    LINE(0,0, 6,10);
+                                    break;
+                                case '1':
+                                    LINE(1,8, 3,10); LINE(3,10, 3,0); LINE(1,0, 5,0);
+                                    break;
+                                case '2':
+                                    LINE(0,8, 1,10); LINE(1,10, 5,10); LINE(5,10, 6,8); LINE(6,8, 0,0); LINE(0,0, 6,0);
+                                    break;
+                                case '3':
+                                    LINE(0,10, 6,10); LINE(6,10, 3,5); LINE(3,5, 5,5); LINE(5,5, 6,4); LINE(6,4, 6,1); LINE(6,1, 5,0); LINE(5,0, 0,0);
+                                    break;
+                                case '4':
+                                    LINE(4,0, 4,10); LINE(4,10, 0,3); LINE(0,3, 6,3);
+                                    break;
+                                case '5':
+                                    LINE(6,10, 0,10); LINE(0,10, 0,5); LINE(0,5, 5,5); LINE(5,5, 6,4); LINE(6,4, 6,1); LINE(6,1, 5,0); LINE(5,0, 0,0);
+                                    break;
+                                case '6':
+                                    LINE(6,9, 5,10); LINE(5,10, 1,10); LINE(1,10, 0,8); LINE(0,8, 0,0); LINE(0,0, 6,0); LINE(6,0, 6,5); LINE(6,5, 0,5);
+                                    break;
+                                case '7':
+                                    LINE(0,10, 6,10); LINE(6,10, 2,0);
+                                    break;
+                                case '8':
+                                    LINE(1,10, 5,10); LINE(5,10, 6,8); LINE(6,8, 5,5); LINE(5,5, 1,5); LINE(1,5, 0,8); LINE(0,8, 1,10);
+                                    LINE(1,5, 5,5); LINE(5,5, 6,2); LINE(6,2, 5,0); LINE(5,0, 1,0); LINE(1,0, 0,2); LINE(0,2, 1,5);
+                                    break;
+                                case '9':
+                                    LINE(0,5, 6,5); LINE(6,5, 6,10); LINE(6,10, 0,10); LINE(0,10, 0,5); LINE(6,5, 6,0); LINE(6,0, 1,0); LINE(1,0, 0,1);
+                                    break;
+                                case '-':
+                                    LINE(1,5, 5,5);
+                                    break;
+                                case '+':
+                                    LINE(1,5, 5,5); LINE(3,2.5, 3,7.5);
+                                    break;
+                                case '!':
+                                    LINE(3,10, 3,3); LINE(3,1, 3,0);
+                                    break;
+                                case '.':
+                                    LINE(2.5,0, 3.5,0); LINE(3.5,0, 3.5,1); LINE(3.5,1, 2.5,1); LINE(2.5,1, 2.5,0);
+                                    break;
+                                case ':':
+                                    LINE(2.5,1, 3.5,1); LINE(3.5,1, 3.5,2); LINE(3.5,2, 2.5,2); LINE(2.5,2, 2.5,1);
+                                    LINE(2.5,6, 3.5,6); LINE(3.5,6, 3.5,7); LINE(3.5,7, 2.5,7); LINE(2.5,7, 2.5,6);
+                                    break;
+                                case '/':
+                                    LINE(0,0, 6,10);
+                                    break;
+                                case '_':
+                                    LINE(0,0, 6,0);
+                                    break;
+                                case '?':
+                                    LINE(1,8, 3,10); LINE(3,10, 5,8); LINE(5,8, 5,6); LINE(5,6, 3,4); LINE(3,4, 3,3);
+                                    LINE(3,1, 3,0);
+                                    break;
+                                default:
+                                    break;
+                            }
+                            glEnd();
+                            #undef VX
+                            #undef VY
+                            #undef LINE
+                        };
+
                         for (int i = 0; i < SRE_BTN_MAX; i++) {
                             SreBtnSlot* btn = (SreBtnSlot*)(g_guest_memory + sre_btn_array_addr + i * sizeof(SreBtnSlot));
+                            if (btn->active) {
+                                static int print_cooldown = 0;
+                                if (print_cooldown++ % 60 == 0) {
+                                    std::cout << "[SRE/Host] ACTIVE Button " << i
+                                              << ": label='" << btn->label << "'"
+                                              << " x=" << btn->x << " y=" << btn->y
+                                              << " w=" << btn->w << " h=" << btn->h
+                                              << " hidden=" << btn->hidden
+                                              << " active=" << btn->active
+                                              << std::endl;
+                                }
+                            }
                             if (!btn->active || btn->hidden) continue;
 
                             // cur_x, cur_y are 0..1 fractions within the game viewport.
@@ -3972,34 +4237,80 @@ void load_and_boot_arm64() {
                             float a  = btn->alpha / 255.0f;
                             int   ba = (int)(btn->bg_alpha * a);
 
+                            bool hover = (mouse_x >= px && mouse_x <= px + pw && mouse_y >= py && mouse_y <= py + ph);
+
                             glEnable(GL_BLEND);
                             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+                            // Draw a semi-transparent gradient glassmorphic background
                             glBegin(GL_QUADS);
-                            glColor4ub(30, 50, 80, ba);
-                            glVertex2i(px,      py);
-                            glVertex2i(px + pw, py);
-                            glColor4ub(20, 35, 60, ba);
-                            glVertex2i(px + pw, py + ph);
-                            glVertex2i(px,      py + ph);
-                            glEnd();
-
-                            glBegin(GL_LINE_LOOP);
-                            glColor4ub(80, 120, 180, (int)(200 * a));
-                            glVertex2i(px,      py);
-                            glVertex2i(px + pw, py);
-                            glVertex2i(px + pw, py + ph);
-                            glVertex2i(px,      py + ph);
-                            glEnd();
-
                             if (btn->pressed) {
-                                glBegin(GL_QUADS);
-                                glColor4ub(100, 160, 255, (int)(80 * a));
-                                glVertex2i(px,      py);
-                                glVertex2i(px + pw, py);
-                                glVertex2i(px + pw, py + ph);
-                                glVertex2i(px,      py + ph);
-                                glEnd();
+                                glColor4ub(40, 90, 150, (int)(180 * a));
+                            } else if (hover) {
+                                glColor4ub(35, 65, 105, ba);
+                            } else {
+                                glColor4ub(20, 35, 55, ba);
                             }
+                            glVertex2i(px,      py);
+                            glVertex2i(px + pw, py);
+                            
+                            if (btn->pressed) {
+                                glColor4ub(30, 70, 120, (int)(180 * a));
+                            } else if (hover) {
+                                glColor4ub(25, 45, 75, ba);
+                            } else {
+                                glColor4ub(12, 22, 38, ba);
+                            }
+                            glVertex2i(px + pw, py + ph);
+                            glVertex2i(px,      py + ph);
+                            glEnd();
+
+                            // Chamfered sci-fi border
+                            int c = std::min(6, std::min(pw, ph) / 6);
+                            glLineWidth(hover ? 2.0f : 1.2f);
+                            glBegin(GL_LINE_LOOP);
+                            if (btn->pressed) {
+                                glColor4ub(100, 200, 255, (int)(230 * a));
+                            } else if (hover) {
+                                glColor4ub(90, 160, 255, (int)(220 * a));
+                            } else {
+                                glColor4ub(65, 105, 170, (int)(160 * a));
+                            }
+                            glVertex2i(px + c,      py);
+                            glVertex2i(px + pw - c, py);
+                            glVertex2i(px + pw,     py + c);
+                            glVertex2i(px + pw,     py + ph - c);
+                            glVertex2i(px + pw - c, py + ph);
+                            glVertex2i(px + c,      py + ph);
+                            glVertex2i(px,          py + ph - c);
+                            glVertex2i(px,          py + c);
+                            glEnd();
+
+                            // Corner accents for that sleek PC UI feel
+                            glBegin(GL_LINES);
+                            if (btn->pressed) {
+                                glColor4ub(120, 220, 255, (int)(255 * a));
+                            } else if (hover) {
+                                glColor4ub(100, 180, 255, (int)(255 * a));
+                            } else {
+                                glColor4ub(80, 130, 210, (int)(180 * a));
+                            }
+                            // Top-left accent bracket
+                            glVertex2i(px, py + ph - c - 4);
+                            glVertex2i(px, py + ph - c);
+                            glVertex2i(px, py + ph - c);
+                            glVertex2i(px + c, py + ph);
+                            glVertex2i(px + c, py + ph);
+                            glVertex2i(px + c + 4, py + ph);
+
+                            // Bottom-right accent bracket
+                            glVertex2i(px + pw, py + c + 4);
+                            glVertex2i(px + pw, py + c);
+                            glVertex2i(px + pw, py + c);
+                            glVertex2i(px + pw - c, py);
+                            glVertex2i(px + pw - c, py);
+                            glVertex2i(px + pw - c - 4, py);
+                            glEnd();
 
                             if (btn->label[0]) {
                                 int tr = (btn->text_color >> 16) & 0xFF;
@@ -4007,10 +4318,45 @@ void load_and_boot_arm64() {
                                 int tb =  btn->text_color        & 0xFF;
                                 int ta = (int)(((btn->text_color >> 24) & 0xFF) * a);
                                 if (ta == 0) ta = (int)(255 * a);
-                                float ts = btn->text_scale * (ph * 0.04f);
-                                if (ts < 0.5f) ts = 0.5f;
-                                g_gui.draw_string(btn->label, px + btn->padding_l + 4,
-                                                  py + ph / 2 - 5, ts, tr, tg, tb, ta);
+                                
+                                if (hover && !btn->pressed) {
+                                    tr = std::min(tr + 40, 255);
+                                    tg = std::min(tg + 40, 255);
+                                    tb = std::min(tb + 55, 255);
+                                } else if (btn->pressed) {
+                                    tr = 255;
+                                    tg = 255;
+                                    tb = 255;
+                                }
+
+                                float char_h = ph * 0.38f; // scale relative to button height
+                                float line_w = hover ? 2.2f : 1.6f;
+                                
+                                // Calculate total width of string to center it
+                                float total_w = 0.0f;
+                                std::string lbl = btn->label;
+                                for (char chr : lbl) {
+                                    float w_c = char_h * 0.6f;
+                                    total_w += w_c + char_h * 0.15f;
+                                }
+                                if (!lbl.empty()) {
+                                    total_w -= char_h * 0.15f;
+                                }
+                                
+                                float text_start_x = px + (pw - total_w) / 2.0f;
+                                float text_start_y = py + (ph - char_h) / 2.0f;
+                                
+                                glEnable(GL_LINE_SMOOTH);
+                                glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+                                
+                                float cur_tx = text_start_x;
+                                for (char chr : lbl) {
+                                    float w_c = char_h * 0.6f;
+                                    glColor4ub(tr, tg, tb, ta);
+                                    draw_vector_char(chr, cur_tx, text_start_y, w_c, char_h, line_w);
+                                    cur_tx += w_c + char_h * 0.15f;
+                                }
+                                glDisable(GL_LINE_SMOOTH);
                             }
                         }
                     }
@@ -4566,8 +4912,10 @@ void load_and_boot_arm64() {
                                         int my = event.button.y;
                                         int globally_hidden = sre_btn_globally_hidden_addr ?
                                             *(int32_t*)(g_guest_memory + sre_btn_globally_hidden_addr) : 0;
+                                        int menu_active = sre_menu_active_addr ? *(int32_t*)(g_guest_memory + sre_menu_active_addr) : 0;
+                                        int menu_hidden = ((menu_active & 0x03) != 0) ? 1 : 0;
                                         
-                                        if (!globally_hidden) {
+                                        if (!globally_hidden && !menu_hidden) {
                                             extern int GAME_W, GAME_H;
                                             float game_asp = (float)GAME_W / (float)GAME_H;
                                             float win_asp  = (float)g_win_w / (float)g_win_h;
@@ -4669,6 +5017,9 @@ void load_and_boot_arm64() {
                                         if (btn->dragging && btn->snapback) {
                                             btn->cur_x = btn->home_x;
                                             btn->cur_y = btn->home_y;
+                                        }
+                                        if (btn->pressed) {
+                                            btn->released = 1;
                                         }
                                         btn->pressed = 0;
                                         btn->dragging = 0;
@@ -4996,15 +5347,13 @@ int main(int argc, char* argv[]) {
     std::string user_instances_path = user_config_dir + "/instances.json";
     std::string registry_path = base_dir + "/swordigo_binaries.json";
     
-    // Strategy: manifest.json → scan fallback
-    if (fs::exists(system_manifest)) {
-        // Primary: read pre-built manifest (fast, no hashing at boot)
-        std::cout << "[Boot] Loading system manifest: " << system_manifest << std::endl;
+    // Set data_dir on BinarySelector so save_instance_ini() can use it
+    g_binary_selector.set_data_dir(data_dir);
+    
+    // Strategy: always use INI-based scan on engine/ dir if exists
+    if (fs::exists(engine_dir) && fs::is_directory(engine_dir)) {
+        std::cout << "[Boot] Scanning engine directory for instance.ini files..." << std::endl;
         g_binary_selector.load_manifest(system_manifest);
-    } else if (fs::exists(engine_dir) && fs::is_directory(engine_dir)) {
-        // Fallback: scan engine/ directory (dev mode or first run before packaging)
-        std::cout << "[Boot] No manifest found, scanning: " << engine_dir << std::endl;
-        g_binary_selector.scan_engine_directory(engine_dir);
     } else {
         // Legacy: flat directory scan
         std::cout << "[Boot] No engine/ dir, flat scan: " << data_dir << std::endl;

@@ -586,16 +586,19 @@ static void DrawInstancePanel(BinarySelector& selector, int& selected, float wid
         ImGui::TextDisabled("Click '+' to add one.");
     }
 
-    // Build sorted index: ARM64 first, then by version descending
+    // Build sorted index: group by version first, with ARM64 before ARM32 within each version
     std::vector<int> sorted_idx(bins.size());
     std::iota(sorted_idx.begin(), sorted_idx.end(), 0);
     std::sort(sorted_idx.begin(), sorted_idx.end(), [&bins](int a, int b_idx) {
         const auto& ba = bins[a];
         const auto& bb = bins[b_idx];
-        // ARM64 before ARM32
-        if (ba.arch != bb.arch) return ba.arch == BinaryArch::ARM64;
-        // Higher version first
-        return ba.version > bb.version;
+        if (ba.version != bb.version) {
+            return ba.version > bb.version;
+        }
+        if (ba.arch != bb.arch) {
+            return ba.arch == BinaryArch::ARM64;
+        }
+        return false;
     });
 
     // Initial selection: prefer ARM64 v1.4.12

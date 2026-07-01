@@ -9,8 +9,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/blob/master/LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20x86__64-purple.svg)](#)
-[![Version](https://img.shields.io/badge/Version-v7.1-00e5ff.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases)
-[![Engine](https://img.shields.io/badge/Engine-SRT%20v7.1-8b3dff.svg)](#-srt-architecture)
+[![Version](https://img.shields.io/badge/Version-v7.2-00e5ff.svg)](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases)
+[![Engine](https://img.shields.io/badge/Engine-SRT%20v7.2-8b3dff.svg)](#-srt-architecture)
 
 [Website](https://thecorrectsynovian.github.io/SwordigoDesktop/web/) · [Download](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases) · [Research](https://thecorrectsynovian.github.io/SwordigoDesktop/web/research.html) · [Changelog](https://thecorrectsynovian.github.io/SwordigoDesktop/web/changelog.html)
 
@@ -20,7 +20,33 @@
 
 **Swordigo Desktop** is a native Linux port of the beloved mobile action-adventure platformer by Touch Foo. Rather than running through Android emulation layers, this project uses the **Swordigo Runtime (SRT)** — a layered runtime architecture that treats `libswordigo.so` as a gameplay kernel while progressively replacing subsystems with clean, native reimplementations.
 
-v7.0 brings the **Dynarmic JIT revolution** — ARM64 code now runs through a Just-In-Time compiler at near-native speed, delivering **60fps buttery smooth gameplay** with instant touch response. Combined with **RLSwordigo support** and **KiwiAPI compatibility**, this is the biggest performance update ever.
+v7.2 Hotfix II brings **I/O optimization, decentralized per-instance configuration**, and **MP3 music support** — all while maintaining the **60fps Dynarmic JIT performance** from v7.0. Combined with **KiwiAPI beta support** for custom buttons and experimental features, this release focuses on stability and modding ecosystem expansion.
+
+---
+
+## 🎯 What's New in v7.2
+
+### 🎵 MP3 Music Support
+- Direct libmpg123 decoding (no temp files, no shell ffmpeg)
+- Supports MP3, OGG, WAV with unified modular search
+- **10× faster music loading**, drastically reduced I/O
+
+### 📁 Decentralized `.ini` Configuration
+- Migrated from centralized JSON manifests (like modern launchers: PolyMC, Prism)
+- Each instance self-contained with `instance.ini` config
+- Build time simplified by ~80 lines (manifest generation deprecated)
+
+### 💨 I/O & Logging Optimization
+- Suppressed high-volume file operation logs
+- Reduced typical session console output by 95%
+- Memory leak fixes in music system
+
+### 🔧 KiwiAPI Buttons & Touchables (Early Beta)
+- Experimental interactive GUI elements
+- Full backward compatibility with existing mods
+- Primary modding framework going forward
+
+> See [v7.2 Release Notes](RELEASE_NOTES_v7.2.md) for full details.
 
 ---
 
@@ -91,13 +117,15 @@ v7.0 brings the **Dynarmic JIT revolution** — ARM64 code now runs through a Ju
 - Save system with persistent progress (`~/.local/share/swordigo-desktop/save/`)
 - Full audio: music tracks + sound effects through OpenAL
 - **Music loop watchdog** — ensures background music never stops unexpectedly
+- **Music format support** — MP3, OGG, WAV via direct libmpg123 (v7.2+)
 
-### 🚀 RLSwordigo Support
-- **RLSwordigo (RLSwordigo)** is now fully supported as an instance
-- Load RLSwordigo binaries alongside vanilla Swordigo
-- **Compatible with KiwiAPI** — the SwKiwi modding framework works out of the box
+### 🚀 Multi-Instance Support
+- **Vanilla Swordigo 1.4.12 ARM64** — fully stable, beatable end-to-end
+- **RLSwordigo 6.6** — roguelike mode, near-stable with experimental features
+- **Modded Instances** — Mason Mod, Phonkdigo, and more (KiwiAPI framework)
+- **Decentralized `.ini` configs** (v7.2+) — each instance is self-contained
 
-### 🖥️ Desktop-Native Experience
+### 🎨 Desktop-Native Experience
 - **1920×1080 internal rendering** with FBO-based scaling (Sharp Bilinear, Nearest, CRT Scanline)
 - **Keyboard controls** — fully remappable via the in-game Controls Editor (F2)
 - **Gamepad support** — Xbox/PlayStation controllers with analog stick + D-pad
@@ -126,18 +154,42 @@ v7.0 brings the **Dynarmic JIT revolution** — ARM64 code now runs through a Ju
 - **PolyMC-inspired Instance Manager** — Card grid layout with instance icons
 - **Multi-Binary Support** — v1.4.6, v1.4.12 in ARM32 + ARM64
 - **Engine Selection** — Dynarmic JIT (default) or Unicorn interpreter
-- **Binary Registry** — JSON-based version tracking with validation status
+- **Decentralized Config** — `.ini` files per instance (v7.2+)
 - **Custom Instance Import** — Add any `.so` binary with custom naming
 
 ---
 
-## 📦 Install (v7.1)
+## 🎮 Modding Ecosystem
+
+### Two Modding Frameworks
+
+Swordigo Desktop supports **two parallel modding approaches:**
+
+#### 1️⃣ **KiwiAPI / Mini API (Primary — Active Development)**
+- **Status:** Beta (actively developed, primary focus for new mods)
+- **Framework:** SwKiwi/SwMini modloader hooks into SRE
+- **Capabilities:** Full game hooks, custom entities, audio, GUI, saves
+- **Examples:** RLSwordigo, Phonkdigo, KiwiAPI button mods
+- **Recommendation:** Use this for new mods — it's the future of Swordigo modding
+
+#### 2️⃣ **SDMOD (Lightweight Custom — Maintained, Not Expanded)**
+- **Status:** Early beta (lightweight, not actively expanded)
+- **Framework:** Direct binary patching + simple Lua tweaks
+- **Capabilities:** Cosmetics, lightweight behavior changes, simple tweaks
+- **Limitations:** Fragile, no advanced hooks, breaks on game updates
+- **Note:** Useful for quick tweaks, but superseded by KiwiAPI for complex work
+
+**Bottom line:** Use **KiwiAPI** for serious modding. Use **SDMOD** only for lightweight adjustments.
+
+---
+
+## 📦 Install (v7.2)
 
 ### Pre-built Packages
 | Format | Platform | Command |
 |--------|----------|---------|
-| `.rpm` | Fedora x86_64 | `sudo dnf install swordigo-desktop-7.1.0-1.x86_64.rpm` |
-| `.deb` | Debian/Ubuntu x86_64 | `sudo dpkg -i swordigo-desktop_7.1.0-1_amd64.deb` |
+| `.rpm` | Fedora x86_64 | `sudo dnf install swordigo-desktop-7.2.0-1.x86_64.rpm` |
+| `.deb` | Debian/Ubuntu x86_64 | `sudo dpkg -i swordigo-desktop_7.2.0-1_amd64.deb` |
 
 ### Build from Source
 
@@ -146,16 +198,47 @@ See [BUILD.md](BUILD.md) for the full developer build guide.
 **Quick Start:**
 ```bash
 # Install dependencies (Fedora)
-sudo dnf install unicorn-devel SDL3-devel SDL3_image-devel openal-soft-devel \
-    mesa-libGL-devel zlib-devel libvorbis-devel gcc-aarch64-linux-gnu cmake
+sudo dnf install libmpg123-devel unicorn-devel SDL3-devel SDL3_image-devel \
+    openal-soft-devel mesa-libGL-devel zlib-devel libvorbis-devel \
+    gcc-aarch64-linux-gnu cmake
 
 # Clone and build
 git clone https://github.com/TheCorrectSynovian/SwordigoDesktop.git
 cd SwordigoDesktop
-./run_swordigo.sh   # Auto-builds Dynarmic JIT, compiles, installs SRE, and launches
+./run_swordigo.sh   # Auto-builds, compiles, installs SRE, and launches
 ```
 
 > **Note**: `aarch64-linux-gnu-gcc` is required to cross-compile libsre.so for ARM64. Dynarmic JIT is built from included source automatically on first run.
+
+---
+
+## ⚠️ Supported Instances & Bug Reporting
+
+### ✅ Officially Supported (Bug Reports Welcome)
+
+| Instance | Status | Details |
+|----------|--------|---------|
+| **Vanilla Swordigo 1.4.12 ARM64** | ✅ Fully stable | Beatable end-to-end, all bosses accessible, all progression paths verified |
+| **RLSwordigo 6.6** | 🟡 Near stable | Gameplay stable; some RogueSpells mod features incomplete |
+| **Mason Mod** | 🟡 Near stable | Core mechanics work; cosmetic features untested |
+
+### ❌ Not Supported (No Bug Reports)
+
+| Instance | Status | Reason |
+|----------|--------|--------|
+| **Combatch v3** | Works, unstable | Partially functional; crashes on certain mod combinations |
+| **ARM32 instances** | Deprecated | No SRE support, not actively maintained (ARM64 is the future) |
+| **Other custom mods** | As-is | Use KiwiAPI framework for new mod development |
+
+### How to Report Bugs
+
+Only report crashes/bugs for **supported instances listed above**:
+1. Clearly state the instance name and version
+2. Provide exact reproduction steps
+3. Include console output or log files
+4. Submit on [GitHub Issues](https://github.com/TheCorrectSynovian/SwordigoDesktop/issues)
+
+**Note:** ARM32 support is intentionally deprecated in favor of ARM64 performance. We focus 100% on ARM64.
 
 ---
 
@@ -190,38 +273,49 @@ All controls are fully remappable — press **F2** to open the Controls Editor. 
 ## ⚠️ Known Limitations
 
 ### ARM64 (arm64-v8a) — Primary Target
-No major known limitations. Emulation is stable, feature-complete, and runs at locked 60 FPS.
+| Issue | Severity | Details |
+|-------|----------|---------|
+| Bolt/timer misbehavior | 🟡 Medium | Timing misalignment causes certain bosses, bolt-shooting enemies, and bolt traps to fire at abnormal rates. Will be patched. |
+| Text input crash | 🟡 Medium | Typing into certain UI fields can crash — avoid F7 in menus |
 
-### ARM32 (armeabi-v7a)
+### ARM32 (armeabi-v7a) — Deprecated
 | Issue | Severity | Details |
 |-------|----------|---------|
 | Timer-based spikes | 🔴 High | Repeating timer spikes don't activate |
 | Boss gates | 🔴 High | Post-boss gates don't trigger |
-| No SRE | 🟡 Medium | libsre.so only supports ARM64 — ARM32 runs without engine hooks |
+| No SRE | 🔴 High | libsre.so is ARM64 only — ARM32 runs without engine hooks |
+| **Not actively maintained** | ⚠️ Design | Focus is 100% on ARM64 for best performance. ARM32 is effectively deprecated. |
 
 ---
 
-## 🆕 What's New in v7.0
+## 🆕 What's New in v7.2
 
-### ⚡ Dynarmic JIT — The Performance Revolution
-- **ARM64 JIT compiler** replaces Unicorn interpreter as the default engine
-- **60fps buttery smooth gameplay** — near-native execution speed
-- **Instant touch/input response** — zero perceptible input latency
-- **Handles any mob count** — no performance scaling issues
-- **Scene transitions work flawlessly** — portals, level loading, all at full speed
-- Unicorn interpreter remains available as fallback (`--no-dynarmic`)
+### ⚡ Dynarmic JIT (v7.0 foundation, still present)
+- **ARM64 JIT compiler** — near-native execution
+- **60fps stable framerate** — smooth gameplay
+- **Instant input response** — zero perceptible latency
 
-### 🎮 RLSwordigo Support
-- **RLSwordigo** is now a first-class supported mod
-- Load as a separate instance alongside vanilla Swordigo
-- **KiwiAPI compatible** — the SwKiwi modding framework works natively
+### 🎵 v7.2 NEW: Custom Music Format Support
+- MP3, OGG, WAV unified support via direct libmpg123
+- **10× faster music loading**
+- Modular search algorithm — all directories checked for all formats
+- Fixed RLSwordigo MP3 loading
 
-### Build System
-- **Dynarmic source included** in repo (`deps/dynarmic/`)
-- **`run_swordigo.sh`** auto-builds Dynarmic on first run
-- **`.gitignore`** added for clean repository management
+### 📁 v7.2 NEW: Decentralized Configuration
+- Per-instance `.ini` files (like PolyMC/Prism)
+- Eliminated centralized JSON manifests
+- Each instance self-contained
 
-> See [v7.0 Release Notes](https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/tag/v7.0) for full details.
+### 💨 v7.2 NEW: I/O Optimization
+- Suppressed verbose file operation logs
+- Reduced console spam by 95%
+- Memory leak fixes
+
+### 🔧 v7.2 NEW: KiwiAPI Buttons & Touchables (Beta)
+- Experimental interactive GUI elements
+- Full backward compatibility with existing mods
+
+> See [v7.2 Release Notes](RELEASE_NOTES_v7.2.md) for comprehensive details.
 
 ---
 
@@ -231,11 +325,19 @@ No major known limitations. Emulation is stable, feature-complete, and runs at l
 
 | Role | Name | GitHub |
 |------|------|--------|
-| **Lead Developer** | TheMegineBraine | [@Mano K](https://github.com/branirayine) |
-| **Developer** | TheCorrectSynovian | [@QuantumCreeper](https://github.com/TheCorrectSynovian) |
-| **Developer** | MrSinup | [@BingsWumpus](https://github.com/MrSinup) |
-| **Developer** | X Dukinja | [@Duke](https://github.com/Dukinja) |
-| **Designer** | ETPV | [@ETPV07](https://github.com/ETPV07) | 
+| **Lead Developer** | TheMegineBraine | -- |
+| **Developer / Project Creator** | TheCorrectSynovian | [@QuantumCreeper](https://github.com/TheCorrectSynovian) |
+| **Developer** | MrSinup | -- |
+
+### v7.2 Contributors
+
+| Contribution | Name |
+|-------------|------|
+| **MP3 Playback & Direct libmpg123 Integration** | MrSinup |
+| **KiwiAPI Buttons & Touchables** | Mano K |
+| **Music System Improvements** | Mano K |
+| **I/O Optimization & Build Script Refactoring** | QuantumCreeper |
+| **Launcher & Configuration Architecture** | QuantumCreeper |
 
 ### Research & Community
 

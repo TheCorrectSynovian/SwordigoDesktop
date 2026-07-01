@@ -102,6 +102,7 @@ typedef int64_t (*pfn_lua_tointeger)(lua_State* L, int idx);
 typedef void  (*pfn_lua_pushinteger)(lua_State* L, int64_t n);
 typedef void  (*pfn_lua_concat)(lua_State* L, int n);
 typedef void  (*pfn_lua_pushlstring)(lua_State* L, const char* s, size_t len);
+typedef int   (*pfn_lua_setmetatable)(lua_State* L, int idx);
 
 /* Extended globals (set by sre_init_lua_ext) */
 extern pfn_lua_pushvalue   g_lua_pushvalue;
@@ -123,6 +124,7 @@ extern pfn_lua_tointeger   g_lua_tointeger;
 extern pfn_lua_pushinteger g_lua_pushinteger;
 extern pfn_lua_concat      g_lua_concat;
 extern pfn_lua_pushlstring g_lua_pushlstring;
+extern pfn_lua_setmetatable g_lua_setmetatable;
 
 /* Convenience macros */
 #define lua_tostring(L, idx) g_lua_tolstring(L, idx, (sre_size_t*)0)

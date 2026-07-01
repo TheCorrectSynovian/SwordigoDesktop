@@ -78,7 +78,7 @@ typedef struct {
 } SreLuaAddrs;
 
 extern void sre_mini_ensure_injected(lua_State* L);
-static void sre_log_lua_error(const char* source, const char* err_msg);
+extern void sre_log_lua_error(const char* source, const char* err_msg);
 extern lua_State* g_sre_last_lua_state;
 
 void sre_init_lua(SreLuaAddrs* addrs) {
@@ -157,7 +157,7 @@ static int sre_itoa(int val, char* buf) {
     return len + 1;
 }
 
-static void sre_log_lua_error(const char* source, const char* err_msg) {
+void sre_log_lua_error(const char* source, const char* err_msg) {
     static int log_counter = 0;
     log_counter++;
     

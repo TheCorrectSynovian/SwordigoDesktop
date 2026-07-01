@@ -42,6 +42,7 @@ pfn_lua_tointeger      g_lua_tointeger      = 0;
 pfn_lua_pushinteger    g_lua_pushinteger    = 0;
 pfn_lua_concat         g_lua_concat         = 0;
 pfn_lua_pushlstring    g_lua_pushlstring    = 0;
+pfn_lua_setmetatable   g_lua_setmetatable   = 0;
 
 /* Extended init — called from host after sre_init_lua */
 typedef struct {
@@ -64,6 +65,7 @@ typedef struct {
     sre_u64 lua_pushinteger;
     sre_u64 lua_concat;
     sre_u64 lua_pushlstring;
+    sre_u64 lua_setmetatable;
 } SreLuaExtAddrs;
 
 void sre_init_lua_ext(SreLuaExtAddrs* a) {
@@ -86,6 +88,7 @@ void sre_init_lua_ext(SreLuaExtAddrs* a) {
     g_lua_pushinteger    = (pfn_lua_pushinteger)a->lua_pushinteger;
     g_lua_concat         = (pfn_lua_concat)a->lua_concat;
     g_lua_pushlstring    = (pfn_lua_pushlstring)a->lua_pushlstring;
+    g_lua_setmetatable   = (pfn_lua_setmetatable)a->lua_setmetatable;
 }
 
 

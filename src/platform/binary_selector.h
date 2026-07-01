@@ -55,6 +55,13 @@ public:
     // Save user instances (only custom ones, not system ones)
     void save_user_instances(const std::string& json_path) const;
     
+    // Set the base data directory for saving instance.ini files
+    void set_data_dir(const std::string& dir) { data_dir = dir; }
+    std::string get_data_dir() const { return data_dir; }
+
+    // Save a single instance to its local instance.ini file
+    void save_instance_ini(const BinaryInfo& b) const;
+    
     // Generate manifest.json from current engine/ directory (used by packaging)
     // This does a full scan + hash + writes manifest.json
     void generate_manifest(const std::string& engine_path, const std::string& output_path);
@@ -126,6 +133,7 @@ private:
     std::vector<BinaryInfo> binaries;
     std::string default_binary;
     std::string loaded_binary;
+    std::string data_dir;  // Base directory for saving instance.ini files
 
     // Known binary hashes (hardcoded fallbacks)
     static const std::map<std::string, std::pair<std::string, BinaryStatus>> KNOWN_HASHES;

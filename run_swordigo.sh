@@ -52,13 +52,9 @@ if [ $NO_BUILD -eq 0 ]; then
         if [ $USE_DYNARMIC -eq 1 ]; then
             echo "=== Building with Dynarmic JIT ==="
             make -j$(nproc) DYNARMIC=1
-            echo "=== Building asset_viewer ==="
-            make asset_viewer
         else
             echo "=== Building with Unicorn ==="
             make -j$(nproc)
-            echo "=== Building asset_viewer ==="
-            make asset_viewer
         fi
     fi
 fi
@@ -66,13 +62,15 @@ fi
 # ---- Install libsre.so to ALL ARM64 engine directories ----
 if [ -f libsre.so ]; then
     SRE_INSTALLED=0
-    for dir in "$HOME/.local/share/swordigo-desktop/engine"/*/arm64-v8a; do
+    # Overwrite libsre.so inside all matching engine instance subdirectories
+    while IFS= read -r dir; do
         if [ -d "$dir" ]; then
             cp libsre.so "$dir/libsre.so"
             echo "[OK] libsre.so -> $dir/"
             SRE_INSTALLED=$((SRE_INSTALLED + 1))
         fi
-    done
+    done < <(find "$HOME/.local/share/swordigo-desktop/engine" -type d -name "arm64-v8a" 2>/dev/null)
+
     if [ $SRE_INSTALLED -eq 0 ]; then
         mkdir -p "$ENGINE_DIR"
         cp libsre.so "$ENGINE_DIR/libsre.so"

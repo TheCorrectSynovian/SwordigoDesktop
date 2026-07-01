@@ -30,6 +30,8 @@
 #include <filesystem>
 namespace fs = std::filesystem;
 #include <vorbis/vorbisfile.h>
+#include <mpg123.h>
+#include <algorithm>
 #include <time.h>
 #include <unistd.h>
 #include <thread>
@@ -322,6 +324,41 @@ static void bridge_free(void* emu_ptr) {
         g_guest_allocs.erase(ptr);
     }
 }
+
+static void bridge_getenv(void* emu_ptr) {
+    IEmulatorArm64* emu = (IEmulatorArm64*)emu_ptr;
+    uint64_t name_addr = emu->get_reg(0);
+    if (name_addr == 0) {
+        emu->set_reg(0, 0);
+        return;
+    }
+    const char* name = (const char*)(emu->get_memory_base() + name_addr);
+    
+    // Static cache to avoid leaking guest memory on repeated lookups
+    static std::unordered_map<std::string, uint32_t> env_cache;
+    auto it = env_cache.find(name);
+    if (it != env_cache.end()) {
+        emu->set_reg(0, it->second);
+        return;
+    }
+    
+    const char* value = std::getenv(name);
+    if (value == nullptr) {
+        env_cache[name] = 0;
+        emu->set_reg(0, 0);
+        return;
+    }
+    
+    uint32_t len = std::strlen(value);
+    uint32_t addr = g_guest_heap_ptr;
+    g_guest_heap_ptr += (len + 1 + 7) & ~7;
+    
+    std::memcpy(emu->get_memory_base() + addr, value, len + 1);
+    env_cache[name] = addr;
+    
+    emu->set_reg(0, addr);
+}
+
 
 // --- Standard C Memory & String Bridges ---
 static void bridge_memcpy(void* emu_ptr) {
@@ -998,32 +1035,100 @@ static bool load_wav_to_buffer(const std::string& path, ALuint buffer) {
     return alGetError() == AL_NO_ERROR;
 }
 
-// Load MP3 file → decode via mpg123/ffmpeg → fill OpenAL buffer
-// Uses external tool to decode to raw PCM. Falls back gracefully.
+// Static MPG123 initialization (called once at first MP3 load)
+static bool g_mpg123_initialized = false;
+static void ensure_mpg123_init() {
+    if (!g_mpg123_initialized) {
+        int err = mpg123_init();
+        if (err == MPG123_OK) {
+            g_mpg123_initialized = true;
+        } else {
+            std::cerr << "[SRE-Music] WARNING: mpg123_init failed: " << mpg123_plain_strerror(err) << std::endl;
+        }
+    }
+}
+
+// Load MP3 file → decode via libmpg123 → fill OpenAL buffer
+// Direct library-based decoding (no temporary files or shell commands)
 static bool load_mp3_to_buffer(const std::string& path, ALuint buffer) {
-    // Try mpg123 first (lightweight, commonly installed)
-    // Decodes to raw 16-bit signed PCM at original sample rate
-    std::string tmp_raw = "/tmp/sre_music_decode.raw";
-    std::string cmd = "mpg123 -q -w /tmp/sre_music_decode.wav \"" + path + "\" 2>/dev/null";
-    int ret = system(cmd.c_str());
-    if (ret == 0) {
-        // mpg123 -w produces a WAV file, load it
-        bool result = load_wav_to_buffer("/tmp/sre_music_decode.wav", buffer);
-        std::remove("/tmp/sre_music_decode.wav");
-        return result;
+    // Ensure mpg123 is initialized
+    ensure_mpg123_init();
+    if (!g_mpg123_initialized) {
+        return false;
     }
-    
-    // Fallback: try ffmpeg
-    cmd = "ffmpeg -y -i \"" + path + "\" -f wav /tmp/sre_music_decode.wav -loglevel quiet 2>/dev/null";
-    ret = system(cmd.c_str());
-    if (ret == 0) {
-        bool result = load_wav_to_buffer("/tmp/sre_music_decode.wav", buffer);
-        std::remove("/tmp/sre_music_decode.wav");
-        return result;
+
+    // Create decoder handle
+    int err = 0;
+    mpg123_handle* mh = mpg123_new(nullptr, &err);
+    if (!mh) {
+        std::cerr << "[SRE-Music] Failed to create mpg123 handle: " << mpg123_plain_strerror(err) << std::endl;
+        return false;
     }
+
+    // Open the MP3 file
+    err = mpg123_open(mh, path.c_str());
+    if (err != MPG123_OK) {
+        std::cerr << "[SRE-Music] Failed to open MP3: " << path << " - " << mpg123_strerror(mh) << std::endl;
+        mpg123_delete(mh);
+        return false;
+    }
+
+    // Get audio format info
+    long rate = 0;
+    int channels = 0, encoding = 0;
+    err = mpg123_getformat(mh, &rate, &channels, &encoding);
+    if (err != MPG123_OK) {
+        std::cerr << "[SRE-Music] Failed to get MP3 format: " << mpg123_strerror(mh) << std::endl;
+        mpg123_close(mh);
+        mpg123_delete(mh);
+        return false;
+    }
+
+    // Determine OpenAL format
+    ALenum al_format;
+    if (channels == 1) {
+        al_format = AL_FORMAT_MONO16;
+    } else if (channels == 2) {
+        al_format = AL_FORMAT_STEREO16;
+    } else {
+        std::cerr << "[SRE-Music] Unsupported channel count: " << channels << std::endl;
+        mpg123_close(mh);
+        mpg123_delete(mh);
+        return false;
+    }
+
+    // Allocate buffer for decoded PCM data
+    std::vector<unsigned char> pcm_data;
+    unsigned char decode_buf[8192];
+    size_t bytes_read = 0;
+
+    // Decode entire MP3 to PCM
+    while (mpg123_read(mh, decode_buf, sizeof(decode_buf), &bytes_read) == MPG123_OK && bytes_read > 0) {
+        pcm_data.insert(pcm_data.end(), decode_buf, decode_buf + bytes_read);
+    }
+
+    if (pcm_data.empty()) {
+        std::cerr << "[SRE-Music] Failed to decode MP3 data: " << path << std::endl;
+        mpg123_close(mh);
+        mpg123_delete(mh);
+        return false;
+    }
+
+    // Upload to OpenAL buffer
+    alBufferData(buffer, al_format, pcm_data.data(), (ALsizei)pcm_data.size(), (ALsizei)rate);
+    ALenum al_err = alGetError();
     
-    std::cerr << "[SRE-Music] MP3 decode failed (install mpg123 or ffmpeg): " << path << std::endl;
-    return false;
+    // Clean up
+    mpg123_close(mh);
+    mpg123_delete(mh);
+
+    if (al_err != AL_NO_ERROR) {
+        std::cerr << "[SRE-Music] OpenAL buffer error: " << al_err << std::endl;
+        return false;
+    }
+
+    std::cerr << "[SRE-Music] Loaded MP3: " << path << " (" << channels << "ch @ " << rate << "Hz)" << std::endl;
+    return true;
 }
 
 // Load OGG Vorbis file → decode to PCM → fill OpenAL buffer
@@ -2485,9 +2590,9 @@ static void bridge_fopen(void* emu_ptr) {
     // Always log write-mode opens for save debugging
     bool is_write = (strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+'));
     if (is_write) {
-        std::cout << "[File] fopen(\"" << path << "\", \"" << mode << "\") [WRITE]" << std::endl;
+        // std::cout << "[File] fopen(\"" << path << "\", \"" << mode << "\") [WRITE]" << std::endl;
     } else if (!emu->quiet_mode) {
-        std::cout << "[File] fopen(\"" << path << "\", \"" << mode << "\")" << std::endl;
+        // std::cout << "[File] fopen(\"" << path << "\", \"" << mode << "\")" << std::endl;
     }
     
     FILE* f = fopen(path, mode);
@@ -2496,12 +2601,12 @@ static void bridge_fopen(void* emu_ptr) {
         g_file_handles[handle] = f;
         emu->set_reg(0, handle);
         if (is_write) {
-            std::cout << "[File]   -> OK (handle=" << handle << ")" << std::endl;
+            // std::cout << "[File]   -> OK (handle=" << handle << ")" << std::endl;
         }
     } else {
         emu->set_reg(0, 0);
         if (is_write) {
-            std::cout << "[File]   -> FAILED: " << strerror(errno) << " (errno=" << errno << ")" << std::endl;
+            // std::cout << "[File]   -> FAILED: " << strerror(errno) << " (errno=" << errno << ")" << std::endl;
         }
     }
 }
@@ -2557,8 +2662,8 @@ static void bridge_fwrite(void* emu_ptr) {
     if (g_file_handles.count(handle)) {
         size_t written = fwrite(memory + buf, elem_size, count, g_file_handles[handle]);
         emu->set_reg(0, (uint32_t)written);
-        std::cout << "[File] fwrite(handle=" << handle << ", size=" << elem_size 
-                  << ", count=" << count << ") -> wrote " << written << std::endl;
+        // std::cout << "[File] fwrite(handle=" << handle << ", size=" << elem_size 
+        //           << ", count=" << count << ") -> wrote " << written << std::endl;
     } else {
         // Unknown handle (likely stderr/stdout guest pointers) — pretend success
         // to prevent cascading abort() calls
@@ -6076,6 +6181,7 @@ void JniBridge64::init_standard_bridges() {
     register_handler("calloc", bridge_calloc);
     register_handler("realloc", bridge_realloc);
     register_handler("free", bridge_free);
+    register_handler("getenv", bridge_getenv);
 
     register_handler("memcpy", bridge_memcpy);
     register_handler("memset", bridge_memset);
@@ -6653,6 +6759,7 @@ bool sre_music_host_load(const std::string& name) {
     // Build paths using resolved track name
     std::string music_dir = get_data_path(g_assets_dir + "/resources/music");
     std::string music_dir_alt = get_data_path(g_assets_dir + "/music");
+    std::string res_raw = get_data_path("res/raw");
     
     // Sanitize: replace dashes with underscores
     std::string safe = track;
@@ -6660,20 +6767,52 @@ bool sre_music_host_load(const std::string& name) {
         if (safe[i] == '-') safe[i] = '_';
     }
     
-    // Try all path variants — mod path first, then vanilla
+    // === SMARTER PATH SEARCH ORDER ===
+    // Try each location with ALL formats before moving to next location
+    // This ensures we find MP3 files in game-specific directories (e.g., rl_assets/music)
+    // instead of skipping to res/raw too early
+    
     std::vector<std::string> paths;
+    
+    // 1. Mod overrides (already checked above, highest priority)
     if (!mod_music_path.empty()) {
         paths.push_back(mod_music_path);
     }
-    paths.push_back(music_dir + "/music_" + safe + ".ogg");
-    paths.push_back(music_dir + "/" + safe + ".ogg");
-    paths.push_back(music_dir_alt + "/" + safe + ".ogg");
-    paths.push_back(music_dir_alt + "/music_" + safe + ".ogg");
-    paths.push_back(music_dir + "/music_" + safe + ".wav");
-    // Also try res/raw/ directory (vanilla .mp3 files live here)
-    std::string res_raw = get_data_path("res/raw");
-    paths.push_back(res_raw + "/music_" + safe + ".mp3");
-    paths.push_back(res_raw + "/" + safe + ".mp3");
+    
+    // 2. Game-specific music directory (e.g., assets/resources/music or rl_assets/music)
+    //    Try ALL formats here before moving on
+    const std::string formats[] = {".mp3", ".ogg", ".wav"};
+    const std::string prefixes[] = {"music_", ""};
+    
+    // Try primary music directory with all formats and name variants
+    for (const auto& fmt : formats) {
+        for (const auto& pfx : prefixes) {
+            paths.push_back(music_dir + "/" + pfx + safe + fmt);
+        }
+    }
+    
+    // Try alternate music directory with all formats and name variants
+    for (const auto& fmt : formats) {
+        for (const auto& pfx : prefixes) {
+            paths.push_back(music_dir_alt + "/" + pfx + safe + fmt);
+        }
+    }
+    
+    // 3. Fallback: res/raw/ (vanilla location, lowest priority)
+    for (const auto& fmt : formats) {
+        for (const auto& pfx : prefixes) {
+            paths.push_back(res_raw + "/" + pfx + safe + fmt);
+        }
+    }
+    
+    // Remove duplicates while preserving order
+    std::vector<std::string> unique_paths;
+    for (const auto& p : paths) {
+        if (std::find(unique_paths.begin(), unique_paths.end(), p) == unique_paths.end()) {
+            unique_paths.push_back(p);
+        }
+    }
+    paths = unique_paths;
     
     if (g_music_buffer == 0) {
         alGenBuffers(1, &g_music_buffer);

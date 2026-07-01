@@ -795,6 +795,8 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                             if (!input_text.empty()) {
                                 std::cout << "[Launcher] Adding custom instance: " << input_text
                                           << " from " << dialog_result.path << std::endl;
+                                // Set data_dir before adding custom instance
+                                selector.set_data_dir(get_user_data_dir());
                                 selector.add_custom_instance(dialog_result.path, input_text, "assets");
                                 // Re-select the last item (newly added)
                                 const auto& updated_bins = selector.get_binaries();

@@ -24,7 +24,7 @@
  *           [+0x00] char original[64]   e.g. "plains1"
  *           [+0x40] char replacement[64] e.g. "custom_plains"
  *
- *   [0x1840] Background replacement entries (128 bytes each):
+ *   [0x1040] Background replacement entries (128 bytes each):
  *            [+0x00] char original[64]
  *            [+0x40] char replacement[64]
  *
@@ -219,10 +219,10 @@ void sre_init_mods(uint64_t config_addr) {
     g_scene_repl_count = sc;
     g_sre_mod_scene_count = sc;
 
-    /* Read background replacements (at offset 0x1840) */
+    /* Read background replacements (at offset 0x1040) */
     int bc = hdr->bg_count;
     if (bc > SRE_MAX_BG_REPL) bc = SRE_MAX_BG_REPL;
-    SreModBgEntry* bg_entries = (SreModBgEntry*)(config_addr + 0x1840);
+    SreModBgEntry* bg_entries = (SreModBgEntry*)(config_addr + 0x1040);
     for (i = 0; i < bc; i++) {
         mod_strcpy(g_bg_replacements[i].original,
                    bg_entries[i].original, SRE_MOD_PATH_LEN);

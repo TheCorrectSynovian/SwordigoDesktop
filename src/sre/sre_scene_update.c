@@ -202,18 +202,7 @@ void sre_GameSceneView_Update(void* self, float deltaTime) {
     /* Export gamestate pointer for host-side modding */
     g_sre_gamestate_ptr = (uint64_t)gamestate;
 
-    /* Synchronize global camera coordinates using hero position fallback */
-    if (ctrl_ptr != 0) {
-        uint64_t hero_ref = *(uint64_t*)((char*)ctrl_ptr + 0xd8);
-        if (hero_ref != 0) {
-            extern volatile float g_sre_cam_x;
-            extern volatile float g_sre_cam_y;
-            extern volatile float g_sre_cam_z;
-            g_sre_cam_x = *(float*)((char*)hero_ref + 0x70);
-            g_sre_cam_y = *(float*)((char*)hero_ref + 0x74);
-            g_sre_cam_z = *(float*)((char*)hero_ref + 0x78);
-        }
-    }
+    /* Synchronize global camera coordinates using hero position fallback disabled */
     
     /* ---- 1. HEALTH BAR ---- */
     {

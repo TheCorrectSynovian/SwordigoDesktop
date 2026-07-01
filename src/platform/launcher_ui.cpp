@@ -586,16 +586,19 @@ static void DrawInstancePanel(BinarySelector& selector, int& selected, float wid
         ImGui::TextDisabled("Click '+' to add one.");
     }
 
-    // Build sorted index: ARM64 first, then by version descending
+    // Build sorted index: group by version first, with ARM64 before ARM32 within each version
     std::vector<int> sorted_idx(bins.size());
     std::iota(sorted_idx.begin(), sorted_idx.end(), 0);
     std::sort(sorted_idx.begin(), sorted_idx.end(), [&bins](int a, int b_idx) {
         const auto& ba = bins[a];
         const auto& bb = bins[b_idx];
-        // ARM64 before ARM32
-        if (ba.arch != bb.arch) return ba.arch == BinaryArch::ARM64;
-        // Higher version first
-        return ba.version > bb.version;
+        if (ba.version != bb.version) {
+            return ba.version > bb.version;
+        }
+        if (ba.arch != bb.arch) {
+            return ba.arch == BinaryArch::ARM64;
+        }
+        return false;
     });
 
     // Initial selection: prefer ARM64 v1.4.12
@@ -2019,12 +2022,16 @@ LaunchConfig show_launcher(BinarySelector& selector) {
                     }
 
                     if (g_add_status.empty()) {
-                        std::string base_so = get_user_data_dir() + "/engine/v1.4.12/arm64-v8a/libswordigo.so";
+                        std::string user_data = get_user_data_dir();
+                        std::string base_so = user_data + "/engine/v1.4.12/arm64-v8a/libswordigo.so";
+
+                        // Set data_dir on selector before adding custom instance
+                        selector.set_data_dir(user_data);
 
                         if (selector.add_custom_instance(base_so, g_add_name, assets_dir_name)) {
                             if (g_add_use_sre) {
-                                std::string sre_src = get_user_data_dir() + "/engine/v1.4.12/arm64-v8a/libsre.so";
-                                std::string arch_dir = get_user_data_dir() + "/engine/custom-" + std::string(g_add_name) + "/arm64-v8a";
+                                std::string sre_src = user_data + "/engine/v1.4.12/arm64-v8a/libsre.so";
+                                std::string arch_dir = user_data + "/engine/custom-" + std::string(g_add_name) + "/arm64-v8a";
                                 if (fs::exists(sre_src)) {
                                     try {
                                         fs::copy_file(sre_src, arch_dir + "/libsre.so", fs::copy_options::overwrite_existing);

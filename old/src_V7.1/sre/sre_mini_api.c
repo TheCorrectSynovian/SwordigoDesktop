@@ -15,6 +15,13 @@
 #include "sre.h"
 #include "sre_lua.h"
 
+
+/* Avoid relying on system headers (cross-build). Provide minimal externs */
+extern size_t fread(void* ptr, size_t size, size_t nmemb, void* fp);
+extern void* malloc(size_t size);
+extern void* realloc(void* ptr, size_t size);
+extern void free(void* ptr);
+
 /* =========================================================================
  * External globals from sre_scene_update.c — player stats
  * ========================================================================= */
@@ -159,6 +166,8 @@ extern char g_sre_vfs_path_external[512];
 extern char g_sre_vfs_path_files[512];
 extern char g_sre_vfs_path_cache[512];
 extern char g_sre_vfs_path_assets[512];
+    
+
 
 /* ======== ButtonController ======== */
 #define SRE_BTN_MAX       32
@@ -184,6 +193,7 @@ typedef struct {
     int      alignment;                /* Text alignment / gravity */
     /* ---- STATE (written by host, read by SRE) ---- */
     volatile int pressed;              /* Host writes: 1=down, 0=up */
+    volatile int released;             /* Host writes: 1 on release */
     volatile int dragging;             /* Host writes: 1=dragging, 0=not */
     volatile float cur_x, cur_y;       /* Current position (after drag) */
     int      active;                   /* 1 = slot in use, 0 = free */
@@ -311,9 +321,12 @@ static int l_mini_char_set_mana(lua_State* L) {
 }
 
 static int l_mini_char_set_coins(lua_State* L) {
-    g_sre_char_set_value = (int)g_lua_tonumber(L, 1);
-    g_sre_char_set_field = 5;
-    g_sre_char_set_pending = 1;
+    int val = (int)g_lua_tonumber(L, 1);
+    if (val > 0 || g_sre_player_coins <= 0) {
+        g_sre_char_set_value = val;
+        g_sre_char_set_field = 5;
+        g_sre_char_set_pending = 1;
+    }
     return 0;
 }
 
@@ -943,6 +956,7 @@ static int l_btn_new(lua_State* L) {
     btn->padding_r = 0; btn->padding_b = 0;
     btn->alignment = 0;
     btn->pressed = 0;
+    btn->released = 0;
     btn->dragging = 0;
     btn->active = 1;
     btn->dirty = 1;
@@ -997,7 +1011,16 @@ static int l_btn_set_hidden_all(lua_State* L) {
 static int l_btn_is_pressed(lua_State* L) {
     const char* id = lua_tostring(L, 1);
     volatile SreBtnSlot* btn = sre_find_btn(id);
-    g_lua_pushboolean(L, btn ? btn->pressed : 0);
+    if (!btn) {
+        g_lua_pushboolean(L, 0);
+        return 1;
+    }
+    int val = btn->pressed;
+    g_lua_pushboolean(L, val);
+    if (btn->released) {
+        btn->pressed = 0;
+        btn->released = 0;
+    }
     return 1;
 }
 
@@ -1813,6 +1836,266 @@ static int l_bauble_hide_all(lua_State* L) {
 }
 
 /* =========================================================================
+ * EdgeTest — Screen edge/bounds API used by RLSW button menus (nb.scl)
+ * =========================================================================
+ * EdgeTest.Test(depth) -> screen_origin_vec3, screen_width, screen_height
+ *
+ * The button_menu coroutine calls this every tick to reposition buttons.
+ * screen_origin is the top-left corner of the viewport in world coords.
+ * On Swordigo the game space is 960×544 units (or 960×540).
+ * We return a Lua table {x,y,z} via Vector3.New so scripts work naturally.
+ * =========================================================================*/
+extern float g_sre_gui_screen_w;
+extern float g_sre_gui_screen_h;
+
+/* Helper: call Vector3.New(x,y,z) and push result on stack. Returns 1 on
+ * success (result is on top of stack), 0 on failure (nothing pushed). */
+static int sre_push_vector3(lua_State* L, double x, double y, double z) {
+    if (!g_lua_getfield || !g_lua_type || !g_lua_pcall ||
+        !g_lua_pushnumber || !g_lua_settop || !g_lua_gettop) return 0;
+    int base = g_lua_gettop(L);
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "Vector3");
+    if (g_lua_type(L, -1) != LUA_TTABLE) {
+        g_lua_settop(L, base);
+        /* Fallback: return a plain {x,y,z} table */
+        g_lua_createtable(L, 0, 3);
+        g_lua_pushnumber(L, x); g_lua_setfield(L, -2, "x");
+        g_lua_pushnumber(L, y); g_lua_setfield(L, -2, "y");
+        g_lua_pushnumber(L, z); g_lua_setfield(L, -2, "z");
+        return 1;
+    }
+    g_lua_getfield(L, -1, "New");
+    if (g_lua_type(L, -1) != LUA_TFUNCTION) {
+        g_lua_settop(L, base);
+        /* Fallback */
+        g_lua_createtable(L, 0, 3);
+        g_lua_pushnumber(L, x); g_lua_setfield(L, -2, "x");
+        g_lua_pushnumber(L, y); g_lua_setfield(L, -2, "y");
+        g_lua_pushnumber(L, z); g_lua_setfield(L, -2, "z");
+        return 1;
+    }
+    /* Stack: [Vector3, Vector3.New] — insert args and call */
+    g_lua_pushnumber(L, x);
+    g_lua_pushnumber(L, y);
+    g_lua_pushnumber(L, z);
+    if (g_lua_pcall(L, 3, 1, 0) != 0) {
+        g_lua_settop(L, base);
+        return 0;
+    }
+    /* Remove the Vector3 table below the result */
+    /* Stack: [Vector3, result] -> remove Vector3 at base+1 */
+    /* lua_remove equivalent: shift result down */
+    /* Simple: just leave [Vector3_table, result] — caller only uses top */
+    /* Actually fix: remove the Vector3 table beneath result */
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "table"); /* dummy access to ensure stack sane */
+    g_lua_settop(L, base); /* reset — redo simpler */
+    /* Simpler re-approach: store result then clean up */
+    return 0; /* fall through to simple version below */
+}
+
+static void sre_parse_vector3(lua_State* L, int idx, float* out_x, float* out_y, float* out_z) {
+    if (idx < 0) {
+        idx = g_lua_gettop(L) + idx + 1;
+    }
+    float coords[3] = {0.0f, 0.0f, 0.0f};
+    const char* names[3] = {"x", "y", "z"};
+    int i;
+    for (i = 0; i < 3; i++) {
+        g_lua_getfield(L, idx, names[i]);
+        if (g_lua_type(L, -1) == 6) { /* 6 = LUA_TFUNCTION */
+            g_lua_pushvalue(L, idx);
+            if (g_lua_pcall) {
+                if (g_lua_pcall(L, 1, 1, 0) == 0) {
+                    coords[i] = (float)g_lua_tonumber(L, -1);
+                }
+                g_lua_settop(L, -2);
+            } else {
+                g_lua_call(L, 1, 1);
+                coords[i] = (float)g_lua_tonumber(L, -1);
+                g_lua_settop(L, -2);
+            }
+        } else {
+            if (g_lua_type(L, -1) == 3) { /* 3 = LUA_TNUMBER */
+                coords[i] = (float)g_lua_tonumber(L, -1);
+            }
+            g_lua_settop(L, -2);
+        }
+    }
+    if (out_x) *out_x = coords[0];
+    if (out_y) *out_y = coords[1];
+    if (out_z) *out_z = coords[2];
+}
+
+static int l_camera_is_point_visible(lua_State* L) {
+    float px = 0.0f, py = 0.0f, pz = 0.0f;
+    sre_parse_vector3(L, 1, &px, &py, &pz);
+    float sw = g_sre_gui_screen_w > 0 ? g_sre_gui_screen_w : 960.0f;
+    float sh = g_sre_gui_screen_h > 0 ? g_sre_gui_screen_h : 544.0f;
+
+    extern volatile float g_sre_cam_x;
+    extern volatile float g_sre_cam_y;
+    extern volatile float g_sre_cam_z;
+
+    float cam_x = g_sre_cam_x;
+    float cam_y = g_sre_cam_y;
+    float cam_z = g_sre_cam_z > 0.0f ? g_sre_cam_z : 480.0f;
+    float cam_fov = 1.047f;
+    float cam_aspect = sw / sh;
+
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "cameraController");
+    if (g_lua_type(L, -1) == 2) { /* 2 = LUA_TLIGHTUSERDATA */
+        void* cc = g_lua_touserdata(L, -1);
+        if (cc != NULL) {
+            void* camera = NULL;
+            if (sizeof(void*) == 8) {
+                camera = *(void**)((char*)cc + 0x58);
+            } else {
+                camera = *(void**)((char*)cc + 0x54);
+            }
+            if (camera != NULL) {
+                cam_x = *(float*)((char*)camera + 0x10);
+                cam_y = *(float*)((char*)camera + 0x14);
+                cam_z = *(float*)((char*)camera + 0x18);
+                cam_fov = *(float*)((char*)camera + 0xf4);
+                /* Note: we keep cam_aspect fixed to sw / sh for UI boundaries compatibility */
+            }
+        }
+    }
+    g_lua_settop(L, -2);
+
+    float dist = cam_z - pz;
+    if (dist <= 0.0f) {
+        g_lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    float hf = cam_fov * 0.5f;
+    float hf2 = hf * hf;
+    float fov_tan = hf + (hf * hf2) * 0.333333f + (hf * hf2 * hf2) * 0.133333f;
+
+    float half_h = dist * fov_tan;
+    float half_w = half_h * cam_aspect;
+
+    float dx = px - cam_x;
+    if (dx < 0.0f) dx = -dx;
+    float dy = py - cam_y;
+    if (dy < 0.0f) dy = -dy;
+
+    int visible = (dx <= half_w && dy <= half_h);
+    g_lua_pushboolean(L, visible);
+    return 1;
+}
+
+/* EdgeTest.Test(depth) -> vec3_screen_origin, screen_w, screen_h
+ * Returns 3 values: the top-left corner as a Vector3 + w + h */
+static int l_edgetest_test(lua_State* L) {
+    double depth = 0.0;
+    if (g_lua_type && g_lua_type(L, 1) != LUA_TNIL &&
+        g_lua_tonumber) {
+        depth = g_lua_tonumber(L, 1);
+    }
+    float sw = g_sre_gui_screen_w > 0 ? g_sre_gui_screen_w : 960.0f;
+    float sh = g_sre_gui_screen_h > 0 ? g_sre_gui_screen_h : 544.0f;
+
+    extern volatile float g_sre_cam_x;
+    extern volatile float g_sre_cam_y;
+    extern volatile float g_sre_cam_z;
+
+    float cam_x = g_sre_cam_x;
+    float cam_y = g_sre_cam_y;
+    float cam_z = g_sre_cam_z > 0.0f ? g_sre_cam_z : 480.0f;
+    float cam_fov = 1.047f;
+    float cam_aspect = sw / sh;
+
+    /* Query active cameraController from Lua globals for the most accurate state */
+    if (g_lua_getfield && g_lua_type && g_lua_touserdata && g_lua_settop) {
+        g_lua_getfield(L, LUA_GLOBALSINDEX, "cameraController");
+        if (g_lua_type(L, -1) == 2) { /* 2 = LUA_TLIGHTUSERDATA */
+            void* cc = g_lua_touserdata(L, -1);
+            if (cc != NULL) {
+                void* camera = NULL;
+                if (sizeof(void*) == 8) {
+                    camera = *(void**)((char*)cc + 0x58);
+                } else {
+                    camera = *(void**)((char*)cc + 0x54);
+                }
+                if (camera != NULL) {
+                    cam_x = *(float*)((char*)camera + 0x10);
+                    cam_y = *(float*)((char*)camera + 0x14);
+                    cam_z = *(float*)((char*)camera + 0x18);
+                    cam_fov = *(float*)((char*)camera + 0xf4);
+                    /* Note: we keep cam_aspect fixed to sw / sh for UI boundaries compatibility */
+                }
+            }
+        }
+        g_lua_settop(L, -2);
+    }
+
+    /* Calculate dynamic viewport bounds at target depth */
+    float dist = cam_z - (float)depth;
+    if (dist < 1.0f) dist = 1.0f;
+
+    float hf = cam_fov * 0.5f;
+    float hf2 = hf * hf;
+    float fov_tan = hf + (hf * hf2) * 0.333333f + (hf * hf2 * hf2) * 0.133333f;
+
+    float viewport_h = 2.0f * dist * fov_tan;
+    float viewport_w = viewport_h * cam_aspect;
+
+    float ox = cam_x - viewport_w / 2.0f;
+    float oy = cam_y + viewport_h / 2.0f;
+
+    int pushed = 0;
+    if (g_lua_getfield && g_lua_type && g_lua_pcall && g_lua_pushnumber && g_lua_settop && g_lua_gettop) {
+        int base = g_lua_gettop(L);
+        g_lua_getfield(L, LUA_GLOBALSINDEX, "Vector3");
+        if (g_lua_type(L, -1) == LUA_TTABLE) {
+            g_lua_getfield(L, -1, "New");
+            if (g_lua_type(L, -1) == LUA_TFUNCTION) {
+                g_lua_pushnumber(L, (double)ox);
+                g_lua_pushnumber(L, (double)oy);
+                g_lua_pushnumber(L, depth);
+                if (g_lua_pcall(L, 3, 1, 0) == 0) {
+                    pushed = 1;
+                    g_lua_setfield(L, LUA_GLOBALSINDEX, "__et_tmp");
+                    g_lua_settop(L, base);
+                    g_lua_getfield(L, LUA_GLOBALSINDEX, "__et_tmp");
+                    g_lua_pushnil(L);
+                    g_lua_setfield(L, LUA_GLOBALSINDEX, "__et_tmp");
+                } else {
+                    g_lua_settop(L, base);
+                }
+            } else {
+                g_lua_settop(L, base);
+            }
+        } else {
+            g_lua_settop(L, base);
+        }
+    }
+
+    if (!pushed) {
+        if (g_lua_createtable && g_lua_pushnumber && g_lua_setfield) {
+            g_lua_createtable(L, 0, 3);
+            g_lua_pushnumber(L, (double)ox);
+            g_lua_setfield(L, -2, "x");
+            g_lua_pushnumber(L, (double)oy);
+            g_lua_setfield(L, -2, "y");
+            g_lua_pushnumber(L, depth);
+            g_lua_setfield(L, -2, "z");
+        } else {
+            if (g_lua_pushnil) g_lua_pushnil(L);
+        }
+    }
+
+    /* Push screen width and height */
+    if (g_lua_pushnumber) {
+        g_lua_pushnumber(L, (double)viewport_w);
+        g_lua_pushnumber(L, (double)viewport_h);
+    }
+    return 3; /* screen_origin, width, height */
+}
+
+/* =========================================================================
  * Achievement System (Phase 3.4)
  * =========================================================================
  * Tracks unlocked achievements with id, title, description.
@@ -2137,6 +2420,112 @@ static int l_health_has_taken_damage(lua_State* L) {
  * fs API — Lua function implementations
  * ========================================================================= */
 
+/* fs.exists(path) — simple wrapper used by some Kiwi mods */
+static int l_fs_file_exists(lua_State* L) {
+    const char* path = lua_tostring(L, 1);
+    if (!path) { g_lua_pushboolean(L, 0); return 1; }
+    char buf[512];
+    const char* real = sre_api_minipath_translate(path, buf, 512);
+    SRE_FS_FILE* fp = fopen(real, "r");
+    if (fp) { fclose(fp); g_lua_pushboolean(L, 1); }
+    else { g_lua_pushboolean(L, 0); }
+    return 1;
+}
+
+/* fs.read(path) — return file contents as string if present, otherwise return an empty table to avoid nil in init scripts */
+static int l_fs_read_file(lua_State* L) {
+    const char* path = lua_tostring(L, 1);
+    if (!path) { g_lua_createtable(L, 0, 0); return 1; }
+    char tpath[512];
+    const char* real = sre_api_minipath_translate(path, tpath, 512);
+    SRE_FS_FILE* fp = fopen(real, "rb");
+    if (!fp) { /* return empty table to make pairs() safe */
+        g_lua_createtable(L, 0, 0);
+        return 1;
+    }
+
+    /* Read file into dynamically-grown buffer */
+    size_t cap = 4096;
+    size_t len = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { fclose(fp); g_lua_createtable(L, 0, 0); return 1; }
+
+    while (1) {
+        size_t toread = cap - len;
+        if (toread == 0) {
+            /* grow */
+            size_t newcap = cap * 2;
+            char* nbuf = (char*)realloc(buf, newcap);
+            if (!nbuf) break;
+            buf = nbuf; cap = newcap; toread = cap - len;
+        }
+        size_t r = fread(buf + len, 1, toread, fp);
+        len += r;
+        if (r < toread) break; /* EOF or short read */
+    }
+
+    fclose(fp);
+
+    if (len == 0) {
+        free(buf);
+        g_lua_createtable(L, 0, 0);
+        return 1;
+    }
+
+    if (g_lua_pushlstring) {
+        g_lua_pushlstring(L, buf, len);
+    } else {
+        /* ensure null-termination then push string (may truncate binary data) */
+        if (buf[len-1] != '\0') {
+            char* nbuf = (char*)realloc(buf, len+1);
+            if (nbuf) { buf = nbuf; buf[len] = '\0'; }
+        }
+        g_lua_pushstring(L, buf);
+    }
+    free(buf);
+    return 1;
+}
+
+/* fs.write(path, content) — write content (string) to path, return boolean */
+static int l_fs_write_file(lua_State* L) {
+    const char* path = lua_tostring(L, 1);
+    size_t len = 0;
+    const char* content = NULL;
+    if (g_lua_tolstring) content = g_lua_tolstring(L, 2, (sre_size_t*)&len);
+    else content = lua_tostring(L, 2);
+    if (!path || !content) { g_lua_pushboolean(L, 0); return 1; }
+    char buf[512];
+    const char* real = sre_api_minipath_translate(path, buf, 512);
+    SRE_FS_FILE* fp = fopen(real, "wb");
+    if (!fp) { g_lua_pushboolean(L, 0); return 1; }
+    size_t w = fwrite(content, 1, len, fp);
+    fclose(fp);
+    g_lua_pushboolean(L, w == len);
+    return 1;
+}
+
+/* hero no-op used by compatibility shims */
+static int l_hero_noop(lua_State* L) { (void)L; g_lua_pushnumber(L, 0); return 1; }
+
+/* fs.exists(path) — check file existence, return boolean */
+static int l_fs_exists(lua_State* L) {
+    const char* path = lua_tostring(L, 1);
+    if (!path) {
+        g_lua_pushboolean(L, 0);
+        return 1;
+    }
+    char buf[512];
+    const char* real = sre_api_minipath_translate(path, buf, 512);
+    SRE_FS_FILE* fp = fopen(real, "r");
+    if (fp) {
+        fclose(fp);
+        g_lua_pushboolean(L, 1);
+    } else {
+        g_lua_pushboolean(L, 0);
+    }
+    return 1;
+}
+
 /* fs.mkdir(path) */
 static int l_fs_mkdir(lua_State* L) {
     const char* path = lua_tostring(L, 1);
@@ -2209,6 +2598,19 @@ static int l_fs_attributes(lua_State* L) {
     g_lua_setfield(L, -2, "size");
     return 1;
 }
+
+/* Forward declarations for stub functions used by registration */
+static int stub_char_num_coins(lua_State* L);
+static int stub_char_set_num_coins(lua_State* L);
+static int stub_char_has_flag(lua_State* L);
+static int stub_char_has_item(lua_State* L);
+static int stub_char_item_count(lua_State* L);
+static int stub_char_noop(lua_State* L);
+static int stub_all_items_collected(lua_State* L);
+static int stub_itemdrop_item_identifier(lua_State* L);
+
+
+/* Assistant-added hero upvalue patch REMOVED */
 
 /* =========================================================================
  * Registration — inject Mini/LNI tables into a Lua state
@@ -2573,14 +2975,32 @@ void sre_register_mini_api(lua_State* L) {
     g_lua_setfield(L, -2, "HideAll");
     g_lua_setfield(L, LUA_GLOBALSINDEX, "Bauble");
 
+    /* ---- EdgeTest table — screen bounds API used by RLSW button menus ---- */
+    g_lua_createtable(L, 0, 2);
+    g_lua_pushcclosure(L, l_edgetest_test, 0);
+    g_lua_setfield(L, -2, "Test");
+    /* EdgeTest.GetSize() -> w, h  (alias used by some mods) */
+    g_lua_pushcclosure(L, l_edgetest_test, 0);
+    g_lua_setfield(L, -2, "GetSize");
+    g_lua_setfield(L, LUA_GLOBALSINDEX, "EdgeTest");
+
     /* ---- ButtonController table ---- */
-    g_lua_createtable(L, 0, 28);
+    g_lua_createtable(L, 0, 32);
     g_lua_pushcclosure(L, l_btn_new, 0);
     g_lua_setfield(L, -2, "New");
+    /* Alias for convenience: Add */
+    g_lua_pushcclosure(L, l_btn_new, 0);
+    g_lua_setfield(L, -2, "Add");
     g_lua_pushcclosure(L, l_btn_delete, 0);
     g_lua_setfield(L, -2, "Delete");
+    /* Alias: Remove */
+    g_lua_pushcclosure(L, l_btn_delete, 0);
+    g_lua_setfield(L, -2, "Remove");
     g_lua_pushcclosure(L, l_btn_delete_all, 0);
     g_lua_setfield(L, -2, "DeleteAll");
+    /* Alias: RemoveAll */
+    g_lua_pushcclosure(L, l_btn_delete_all, 0);
+    g_lua_setfield(L, -2, "RemoveAll");
     g_lua_pushcclosure(L, l_btn_set_hidden, 0);
     g_lua_setfield(L, -2, "SetHidden");
     g_lua_pushcclosure(L, l_btn_set_hidden_all, 0);
@@ -2641,8 +3061,225 @@ void sre_register_mini_api(lua_State* L) {
     g_lua_setfield(L, -2, "GetUpVector");
     g_lua_setfield(L, LUA_GLOBALSINDEX, "CameraController");
 
-    /* ---- fs (LuaFileSystem) ---- */
+    /* ---- DB table (compat shim for Kiwi) ---- */
+    g_lua_createtable(L, 0, 6);
+    g_lua_pushcclosure(L, l_fs_file_exists, 0);
+    g_lua_setfield(L, -2, "exists");
+    /* Minimal read/write stubs to avoid nil errors in mods */
+    g_lua_pushcclosure(L, l_fs_read_file, 0);
+    g_lua_setfield(L, -2, "read");
+    g_lua_pushcclosure(L, l_fs_write_file, 0);
+    g_lua_setfield(L, -2, "write");
+    /* DB.Inventory — empty table; real data comes from db.scl after load.
+     * Without this, is.scl inventory counter crashes with 'attempt to index
+     * field Inventory (a nil value)' on line 717. */
     g_lua_createtable(L, 0, 4);
+    g_lua_setfield(L, -2, "Inventory");
+    g_lua_setfield(L, LUA_GLOBALSINDEX, "DB");
+
+    /* ---- Character table (compat shim) ---- */
+#define SAFE_SET_METHOD(idx, name, fn) \
+    g_lua_getfield(L, idx, name); \
+    if (g_lua_type(L, -1) == 0) { /* 0 = LUA_TNIL */ \
+        g_lua_settop(L, -2); \
+        g_lua_pushcclosure(L, fn, 0); \
+        g_lua_setfield(L, idx, name); \
+    } else { \
+        g_lua_settop(L, -2); \
+    }
+
+#define SAFE_SET_NUMBER(idx, name, num) \
+    g_lua_getfield(L, idx, name); \
+    if (g_lua_type(L, -1) == 0) { /* 0 = LUA_TNIL */ \
+        g_lua_settop(L, -2); \
+        g_lua_pushnumber(L, num); \
+        g_lua_setfield(L, idx, name); \
+    } else { \
+        g_lua_settop(L, -2); \
+    }
+
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "Character");
+    if (g_lua_type(L, -1) != 5) { /* 5 = LUA_TTABLE */
+        g_lua_settop(L, -2);
+        g_lua_createtable(L, 0, 24);
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "Character");
+        g_lua_getfield(L, LUA_GLOBALSINDEX, "Character");
+    }
+    int char_tbl_idx = g_lua_gettop(L);
+
+    /* Reuse existing Mini.Character getters/setters where available */
+    SAFE_SET_METHOD(char_tbl_idx, "GetLevel", l_mini_char_get_level);
+    SAFE_SET_METHOD(char_tbl_idx, "GetExp", l_mini_char_get_exp);
+    SAFE_SET_METHOD(char_tbl_idx, "GetHealth", l_mini_char_get_health);
+    SAFE_SET_METHOD(char_tbl_idx, "GetMaxHealth", l_mini_char_get_max_health);
+    SAFE_SET_METHOD(char_tbl_idx, "GetMana", l_mini_char_get_mana);
+    SAFE_SET_METHOD(char_tbl_idx, "GetMaxMana", l_mini_char_get_max_mana);
+    SAFE_SET_METHOD(char_tbl_idx, "GetCoins", l_mini_char_get_coins);
+    SAFE_SET_METHOD(char_tbl_idx, "NumCoins", stub_char_num_coins);
+    SAFE_SET_METHOD(char_tbl_idx, "SetNumCoins", stub_char_set_num_coins);
+    SAFE_SET_METHOD(char_tbl_idx, "SetLevel", l_mini_char_set_level);
+    SAFE_SET_METHOD(char_tbl_idx, "SetExp", l_mini_char_set_exp);
+    SAFE_SET_METHOD(char_tbl_idx, "SetHealth", l_mini_char_set_health);
+    SAFE_SET_METHOD(char_tbl_idx, "SetMana", l_mini_char_set_mana);
+    SAFE_SET_METHOD(char_tbl_idx, "SetCoins", l_mini_char_set_coins);
+    SAFE_SET_METHOD(char_tbl_idx, "HasFlag", stub_char_has_flag);
+    SAFE_SET_METHOD(char_tbl_idx, "HasSceneFlag", stub_char_has_flag);
+    SAFE_SET_METHOD(char_tbl_idx, "HasItem", stub_char_has_item);
+    SAFE_SET_METHOD(char_tbl_idx, "ItemCount", stub_char_item_count);
+    
+    /* Reuse existing Mini.Character action functions */
+    SAFE_SET_METHOD(char_tbl_idx, "Die", l_mini_char_die);
+    SAFE_SET_METHOD(char_tbl_idx, "Hurt", l_mini_char_hurt);
+    SAFE_SET_METHOD(char_tbl_idx, "Use", l_mini_char_use);
+    SAFE_SET_METHOD(char_tbl_idx, "Swing", l_mini_char_swing);
+    SAFE_SET_METHOD(char_tbl_idx, "StopSwing", l_mini_char_stop_swing);
+    SAFE_SET_METHOD(char_tbl_idx, "StartJumping", l_mini_char_start_jumping);
+    SAFE_SET_METHOD(char_tbl_idx, "StopJumping", l_mini_char_stop_jumping);
+    SAFE_SET_METHOD(char_tbl_idx, "DropQuickly", l_mini_char_drop_quickly);
+    SAFE_SET_METHOD(char_tbl_idx, "CancelCasting", l_mini_char_cancel_casting);
+    SAFE_SET_METHOD(char_tbl_idx, "FinishCasting", l_mini_char_finish_casting);
+    SAFE_SET_METHOD(char_tbl_idx, "CanDoSomething", l_mini_char_can_do_something);
+    SAFE_SET_METHOD(char_tbl_idx, "CanBeginCasting", l_mini_char_can_begin_casting);
+    SAFE_SET_METHOD(char_tbl_idx, "CanUse", l_mini_char_can_use);
+    SAFE_SET_METHOD(char_tbl_idx, "CanJump", l_mini_char_can_jump);
+    SAFE_SET_METHOD(char_tbl_idx, "CanSwing", l_mini_char_can_swing);
+    SAFE_SET_METHOD(char_tbl_idx, "CanPickup", l_mini_char_can_pickup);
+    SAFE_SET_METHOD(char_tbl_idx, "SetMovementFacingLock", l_mini_char_set_movement_facing_lock);
+    SAFE_SET_METHOD(char_tbl_idx, "SetStunTime", l_mini_char_set_stun_time);
+
+    /* No-op implementations for mutators and registration helpers */
+    SAFE_SET_METHOD(char_tbl_idx, "AddFlag", stub_char_noop);
+    SAFE_SET_METHOD(char_tbl_idx, "RemoveFlag", stub_char_noop);
+    SAFE_SET_METHOD(char_tbl_idx, "AddSceneFlag", stub_char_noop);
+    SAFE_SET_METHOD(char_tbl_idx, "AddItem", stub_char_noop);
+    SAFE_SET_METHOD(char_tbl_idx, "RemoveItem", stub_char_noop);
+    SAFE_SET_METHOD(char_tbl_idx, "RegisterTreasure", stub_char_noop);
+    SAFE_SET_METHOD(char_tbl_idx, "AddSkill", stub_char_noop);
+    SAFE_SET_METHOD(char_tbl_idx, "AddQuest", stub_char_noop);
+
+    /* Case-insensitive / global aliases used by some mods */
+    SAFE_SET_METHOD(char_tbl_idx, "hasFlag", stub_char_has_flag);
+    SAFE_SET_METHOD(char_tbl_idx, "hasItem", stub_char_has_item);
+    SAFE_SET_METHOD(char_tbl_idx, "itemCount", stub_char_item_count);
+    SAFE_SET_METHOD(char_tbl_idx, "registerTreasure", stub_char_noop);
+    SAFE_SET_METHOD(char_tbl_idx, "RegisterTreasure", stub_char_noop);
+    
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "RegisterTreasure");
+    if (g_lua_type(L, -1) == 0) {
+        g_lua_settop(L, -2);
+        g_lua_pushcclosure(L, stub_char_noop, 0);
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "RegisterTreasure");
+    } else {
+        g_lua_settop(L, -2);
+    }
+
+    /* Also export common convenience globals so scripts that call HasItem/HasFlag
+     * directly (without Character.) still work. These are safe no-op/stub
+     * implementations that return false/0 so early init scripts can proceed. */
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "HasFlag");
+    if (g_lua_type(L, -1) == 0) {
+        g_lua_settop(L, -2);
+        g_lua_pushcclosure(L, stub_char_has_flag, 0);
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "HasFlag");
+    } else {
+        g_lua_settop(L, -2);
+    }
+    
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "HasSceneFlag");
+    if (g_lua_type(L, -1) == 0) {
+        g_lua_settop(L, -2);
+        g_lua_pushcclosure(L, stub_char_has_flag, 0);
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "HasSceneFlag");
+    } else {
+        g_lua_settop(L, -2);
+    }
+    
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "HasItem");
+    if (g_lua_type(L, -1) == 0) {
+        g_lua_settop(L, -2);
+        g_lua_pushcclosure(L, stub_char_has_item, 0);
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "HasItem");
+    } else {
+        g_lua_settop(L, -2);
+    }
+    
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "ItemCount");
+    if (g_lua_type(L, -1) == 0) {
+        g_lua_settop(L, -2);
+        g_lua_pushcclosure(L, stub_char_item_count, 0);
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "ItemCount");
+    } else {
+        g_lua_settop(L, -2);
+    }
+
+    /* Global AllItemsCollected() — some mods call this during initialization */
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "AllItemsCollected");
+    if (g_lua_type(L, -1) == 0) {
+        g_lua_settop(L, -2);
+        g_lua_pushcclosure(L, stub_all_items_collected, 0);
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "AllItemsCollected");
+    } else {
+        g_lua_settop(L, -2);
+    }
+
+    g_lua_settop(L, -2); /* Pop Character table */
+
+    /* ---- hero stub (best-effort compatibility) ---- */
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "hero");
+    if (g_lua_type(L, -1) == 0) { /* 0 = LUA_TNIL */
+        g_lua_settop(L, -2);
+        g_lua_createtable(L, 0, 16);
+        int hero_tbl_idx = g_lua_gettop(L);
+        SAFE_SET_NUMBER(hero_tbl_idx, "hp", 0);
+        SAFE_SET_NUMBER(hero_tbl_idx, "max_hp", 0);
+        SAFE_SET_NUMBER(hero_tbl_idx, "mana", 0);
+        SAFE_SET_NUMBER(hero_tbl_idx, "max_mana", 0);
+        SAFE_SET_NUMBER(hero_tbl_idx, "coins", 0);
+        SAFE_SET_NUMBER(hero_tbl_idx, "level", 0);
+        SAFE_SET_NUMBER(hero_tbl_idx, "exp", 0);
+        SAFE_SET_NUMBER(hero_tbl_idx, "atk", 0);
+        SAFE_SET_NUMBER(hero_tbl_idx, "hp_level", 0);
+        SAFE_SET_NUMBER(hero_tbl_idx, "mana_level", 0);
+        SAFE_SET_METHOD(hero_tbl_idx, "Die", l_hero_noop);
+        SAFE_SET_METHOD(hero_tbl_idx, "Hurt", l_hero_noop);
+        SAFE_SET_METHOD(hero_tbl_idx, "Use", l_hero_noop);
+        SAFE_SET_METHOD(hero_tbl_idx, "StartMovingToDirection", l_hero_noop);
+        SAFE_SET_METHOD(hero_tbl_idx, "StopMovingToDirection", l_hero_noop);
+        SAFE_SET_METHOD(hero_tbl_idx, "IsMoving", l_hero_noop);
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "hero");
+    } else {
+        g_lua_settop(L, -2);
+    }
+
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "Hero");
+    if (g_lua_type(L, -1) == 0) {
+        g_lua_settop(L, -2);
+        g_lua_getfield(L, LUA_GLOBALSINDEX, "hero");
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "Hero");
+    } else {
+        g_lua_settop(L, -2);
+    }
+
+    /* ---- Camera table extensions ---- */
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "Camera");
+    if (g_lua_type(L, -1) != 5) { /* 5 = LUA_TTABLE */
+        g_lua_settop(L, -2);
+        g_lua_createtable(L, 0, 4);
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "Camera");
+        g_lua_getfield(L, LUA_GLOBALSINDEX, "Camera");
+    }
+    int cam_tbl_idx = g_lua_gettop(L);
+    SAFE_SET_METHOD(cam_tbl_idx, "IsPointVisible", l_camera_is_point_visible);
+    g_lua_settop(L, -2); /* Pop Camera table */
+
+#undef SAFE_SET_METHOD
+#undef SAFE_SET_NUMBER
+
+    /* Assistant-added hero-upvalue repair disabled */
+
+
+    /* ---- fs (LuaFileSystem) ---- */
+    g_lua_createtable(L, 0, 5);
     g_lua_pushcclosure(L, l_fs_mkdir, 0);
     g_lua_setfield(L, -2, "mkdir");
     g_lua_pushcclosure(L, l_fs_rmdir, 0);
@@ -2651,6 +3288,8 @@ void sre_register_mini_api(lua_State* L) {
     g_lua_setfield(L, -2, "dir");
     g_lua_pushcclosure(L, l_fs_attributes, 0);
     g_lua_setfield(L, -2, "attributes");
+    g_lua_pushcclosure(L, l_fs_exists, 0);
+    g_lua_setfield(L, -2, "exists");
     g_lua_setfield(L, LUA_GLOBALSINDEX, "fs");
 
     /* ---- Game table ---- */
@@ -2740,8 +3379,12 @@ static int stub_char_num_coins(lua_State* L) {
 
 /* Character.SetNumCoins(n) → update our mirror */
 static int stub_char_set_num_coins(lua_State* L) {
-    if (g_lua_isnumber(L, 1))
-        g_sre_player_coins = (int)g_lua_tonumber(L, 1);
+    if (g_lua_isnumber(L, 1)) {
+        int val = (int)g_lua_tonumber(L, 1);
+        if (val > 0 || g_sre_player_coins <= 0) {
+            g_sre_player_coins = val;
+        }
+    }
     return 0;
 }
 
@@ -2826,6 +3469,81 @@ static int stub_itemdrop_get_item(lua_State* L) {
     return 1;
 }
 
+/* AllItemsCollected() → false (mods may check this during level init) */
+static int stub_all_items_collected(lua_State* L) {
+    (void)L;
+    g_lua_pushboolean(L, 0);
+    return 1;
+}
+
+/* ItemDrop.ItemIdentifier(obj, idx) → "" */
+static int stub_itemdrop_item_identifier(lua_State* L) {
+    (void)L;
+    g_lua_pushstring(L, "");
+    return 1;
+}
+
+static int universal_stub_index(lua_State* L) {
+    g_lua_pushvalue(L, 1); /* __index returns the table itself */
+    return 1;
+}
+
+static int universal_stub_call(lua_State* L) {
+    (void)L;
+    g_lua_pushboolean(L, 0); /* __call returns false */
+    return 1;
+}
+
+static int stub_return_false_or_zero(lua_State* L) {
+    (void)L;
+    g_lua_pushboolean(L, 0);
+    return 1;
+}
+
+static void create_universal_stub_table(lua_State* L, const char* name) {
+    g_lua_getfield(L, LUA_GLOBALSINDEX, name);
+    if (g_lua_type(L, -1) != LUA_TTABLE) {
+        g_lua_settop(L, -2); /* pop nil or non-table */
+        g_lua_createtable(L, 0, 8); /* stub table — stack: [stub] */
+        g_lua_pushvalue(L, -1);
+        g_lua_setfield(L, LUA_GLOBALSINDEX, name);
+    }
+    /* Now stack[-1] is guaranteed to be the global table */
+
+    /* Attach direct stub functions for known critical methods ONLY IF THEY ARE NIL */
+#define SAFE_STUB(fname, fn) \
+    g_lua_getfield(L, -1, fname); \
+    if (g_lua_type(L, -1) == LUA_TNIL) { \
+        g_lua_settop(L, -2); \
+        g_lua_pushcclosure(L, fn, 0); \
+        g_lua_setfield(L, -2, fname); \
+    } else { \
+        g_lua_settop(L, -2); \
+    }
+
+    SAFE_STUB("IsWearing", stub_return_false_or_zero)
+    SAFE_STUB("GetLevel",  stub_return_false_or_zero)
+    SAFE_STUB("Find",      stub_return_false_or_zero)
+    SAFE_STUB("Open",      stub_return_false_or_zero)
+    SAFE_STUB("Use",       stub_return_false_or_zero)
+#undef SAFE_STUB
+
+    /* Also attach fallback metatable */
+    g_lua_createtable(L, 0, 2); /* metatable — stack: [stub, meta] */
+    g_lua_pushcclosure(L, universal_stub_index, 0);
+    g_lua_setfield(L, -2, "__index");
+    g_lua_pushcclosure(L, universal_stub_call, 0);
+    g_lua_setfield(L, -2, "__call");
+
+    if (g_lua_setmetatable) {
+        g_lua_setmetatable(L, -2); /* pops meta, sets on target table — stack: [stub] */
+    } else {
+        g_lua_settop(L, -2);
+    }
+
+    g_lua_settop(L, -2); /* pop table */
+}
+
 /*
  * sre_register_rlsw_stubs — register Character and ItemDrop stub tables
  * into the Lua global table, but ONLY if those globals are currently nil.
@@ -2836,61 +3554,100 @@ static void sre_register_rlsw_stubs(lua_State* L) {
     /* ---- Character ---- */
     g_lua_getfield(L, LUA_GLOBALSINDEX, "Character");
     int char_type = g_lua_type(L, -1);
-    g_lua_settop(L, -2);  /* pop */
-
     if (char_type != LUA_TTABLE) {
-        /* Native Character not yet registered — install our stub */
-        g_lua_createtable(L, 0, 20);
+        g_lua_settop(L, -2);  /* pop non-table */
+        g_lua_createtable(L, 0, 25);
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "Character");
+        g_lua_getfield(L, LUA_GLOBALSINDEX, "Character");
+    }
 
 #define CHAR_STUB(name, fn) \
+    g_lua_getfield(L, -1, name); \
+    if (g_lua_type(L, -1) == LUA_TNIL) { \
+        g_lua_settop(L, -2); \
         g_lua_pushcclosure(L, fn, 0); \
-        g_lua_setfield(L, -2, name);
+        g_lua_setfield(L, -2, name); \
+    } else { \
+        g_lua_settop(L, -2); \
+    }
 
-        CHAR_STUB("NumCoins",           stub_char_num_coins)
-        CHAR_STUB("SetNumCoins",        stub_char_set_num_coins)
-        CHAR_STUB("GetCoins",           stub_char_num_coins)       /* alias */
-        CHAR_STUB("GetMaxHealth",       stub_char_get_max_health)
-        CHAR_STUB("GetCurrentHealth",   stub_char_get_current_health)
-        CHAR_STUB("SetCurrentHealth",   stub_char_set_current_health)
-        CHAR_STUB("GetMaxMana",         stub_char_get_max_mana)
-        CHAR_STUB("GetCurrentMana",     stub_char_get_current_mana)
-        CHAR_STUB("GetLevel",           stub_char_get_level)
-        CHAR_STUB("HasFlag",            stub_char_has_flag)
-        CHAR_STUB("HasSceneFlag",       stub_char_has_flag)        /* same semantics */
-        CHAR_STUB("HasItem",            stub_char_has_item)
-        CHAR_STUB("ItemCount",          stub_char_item_count)
-        CHAR_STUB("AddFlag",            stub_char_noop)
-        CHAR_STUB("RemoveFlag",         stub_char_noop)
-        CHAR_STUB("AddSceneFlag",       stub_char_noop)
-        CHAR_STUB("AddItem",            stub_char_noop)
-        CHAR_STUB("RemoveItem",         stub_char_noop)
-        CHAR_STUB("RegisterTreasure",   stub_char_noop)
-        CHAR_STUB("AddSkill",           stub_char_noop)
-        CHAR_STUB("AddQuest",           stub_char_noop)
+    CHAR_STUB("NumCoins",           stub_char_num_coins)
+    CHAR_STUB("SetNumCoins",        stub_char_set_num_coins)
+    CHAR_STUB("GetCoins",           stub_char_num_coins)       /* alias */
+    CHAR_STUB("GetMaxHealth",       stub_char_get_max_health)
+    CHAR_STUB("GetCurrentHealth",   stub_char_get_current_health)
+    CHAR_STUB("SetCurrentHealth",   stub_char_set_current_health)
+    CHAR_STUB("GetMaxMana",         stub_char_get_max_mana)
+    CHAR_STUB("GetCurrentMana",     stub_char_get_current_mana)
+    CHAR_STUB("GetLevel",           stub_char_get_level)
+    CHAR_STUB("HasFlag",            stub_char_has_flag)
+    CHAR_STUB("HasSceneFlag",       stub_char_has_flag)        /* same semantics */
+    CHAR_STUB("HasItem",            stub_char_has_item)
+    CHAR_STUB("ItemCount",          stub_char_item_count)
+    CHAR_STUB("AddFlag",            stub_char_noop)
+    CHAR_STUB("RemoveFlag",         stub_char_noop)
+    CHAR_STUB("AddSceneFlag",       stub_char_noop)
+    CHAR_STUB("AddItem",            stub_char_noop)
+    CHAR_STUB("RemoveItem",         stub_char_noop)
+    CHAR_STUB("RegisterTreasure",           stub_char_noop)
+    CHAR_STUB("RegisterTreasureCollection", stub_char_noop)
+    CHAR_STUB("AddSkill",                   stub_char_noop)
+    CHAR_STUB("AddQuest",                   stub_char_noop)
+    CHAR_STUB("AddQuestText",               stub_char_noop)
+    CHAR_STUB("HasQuest",                   stub_char_has_flag)  /* bool → false */
+    CHAR_STUB("IsQuestCompleted",           stub_char_has_flag)  /* bool → false */
+    CHAR_STUB("IsQuestInProgress",          stub_char_has_flag)  /* bool → false */
+    CHAR_STUB("SetQuestCompleted",          stub_char_noop)
+    CHAR_STUB("NumCoin",                    stub_char_num_coins) /* mobile alias */
+    CHAR_STUB("SetNumCoin",                 stub_char_set_num_coins)
 #undef CHAR_STUB
 
-        g_lua_setfield(L, LUA_GLOBALSINDEX, "Character");
+    /* Also ensure global RegisterTreasure exists for scripts that call it directly */
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "RegisterTreasure");
+    if (g_lua_type(L, -1) == LUA_TNIL) {
+        g_lua_settop(L, -2);
+        g_lua_pushcclosure(L, stub_char_noop, 0);
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "RegisterTreasure");
+    } else {
+        g_lua_settop(L, -2);
     }
+
+    g_lua_settop(L, -2);  /* pop Character table */
 
     /* ---- ItemDrop ---- */
     g_lua_getfield(L, LUA_GLOBALSINDEX, "ItemDrop");
     int drop_type = g_lua_type(L, -1);
-    g_lua_settop(L, -2);  /* pop */
-
     if (drop_type != LUA_TTABLE) {
-        g_lua_createtable(L, 0, 4);
-
-        g_lua_pushcclosure(L, stub_itemdrop_num_items, 0);
-        g_lua_setfield(L, -2, "NumItems");
-
-        g_lua_pushcclosure(L, stub_itemdrop_get_item, 0);
-        g_lua_setfield(L, -2, "GetItem");
-
-        g_lua_pushcclosure(L, stub_char_noop, 0);
-        g_lua_setfield(L, -2, "Drop");
-
+        g_lua_settop(L, -2);  /* pop non-table */
+        g_lua_createtable(L, 0, 8);
         g_lua_setfield(L, LUA_GLOBALSINDEX, "ItemDrop");
+        g_lua_getfield(L, LUA_GLOBALSINDEX, "ItemDrop");
     }
+
+#define DROP_STUB(name, fn) \
+    g_lua_getfield(L, -1, name); \
+    if (g_lua_type(L, -1) == LUA_TNIL) { \
+        g_lua_settop(L, -2); \
+        g_lua_pushcclosure(L, fn, 0); \
+        g_lua_setfield(L, -2, name); \
+    } else { \
+        g_lua_settop(L, -2); \
+    }
+
+    DROP_STUB("NumItems",           stub_itemdrop_num_items)
+    DROP_STUB("GetItem",            stub_itemdrop_get_item)
+    DROP_STUB("Drop",               stub_char_noop)
+    DROP_STUB("AllItemsCollected",  stub_all_items_collected)
+    DROP_STUB("ItemIdentifier",     stub_itemdrop_item_identifier)
+    DROP_STUB("SetItemIdentifier",  stub_char_noop)
+    DROP_STUB("Trigger",            stub_char_noop)
+#undef DROP_STUB
+
+    g_lua_settop(L, -2);  /* pop ItemDrop table */
+
+    /* ---- Universal Stub for Bauble / Is to prevent race conditions during level load ---- */
+    create_universal_stub_table(L, "Bauble");
+    create_universal_stub_table(L, "Is");
 }
 
 /* =========================================================================
@@ -2902,9 +3659,66 @@ static void sre_register_rlsw_stubs(lua_State* L) {
  *
  * Caches up to 8 lua_State pointers to avoid re-checking.
  */
+/* Helper to evaluate a Lua code string safely */
+static void sre_eval_lua(lua_State* L, const char* code) {
+    if (!g_lua_getfield || !g_lua_pcall || !g_lua_type || !g_lua_pushstring || !g_lua_settop || !g_lua_gettop) return;
+    int base_top = g_lua_gettop(L);
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "loadstring");
+    if (g_lua_type(L, -1) == 6) { /* LUA_TFUNCTION */
+        g_lua_pushstring(L, code);
+        if (g_lua_pcall(L, 1, 2, 0) == 0) {
+            if (g_lua_type(L, -2) == 6) {
+                g_lua_settop(L, -2); /* Pop errmsg, leave function */
+                g_lua_pcall(L, 0, 0, 0);
+            }
+        }
+    }
+    g_lua_settop(L, base_top);
+}
+
 #define MAX_INJECTED_STATES 8
 static lua_State* g_injected_states[MAX_INJECTED_STATES] = {0};
 static int g_injected_count = 0;
+
+extern int fseek(void* stream, long int offset, int whence);
+extern long int ftell(void* stream);
+extern char* getenv(const char* name);
+extern char* strstr(const char* haystack, const char* needle);
+extern int snprintf(char* s, size_t n, const char* format, ...);
+
+static void sre_load_edgetest_scl(lua_State* L) {
+    const char* home = getenv("HOME");
+    char path[512];
+    if (home) {
+        snprintf(path, sizeof(path), "%s/.local/share/swordigo-desktop/rl_assets/resources/edgetest.scl", home);
+    } else {
+        snprintf(path, sizeof(path), "rl_assets/resources/edgetest.scl");
+    }
+    void* f = fopen(path, "r");
+    if (!f) {
+        f = fopen("resources/edgetest.scl", "r");
+    }
+    if (f) {
+        fseek(f, 0, 2); /* SEEK_END = 2 */
+        long size = ftell(f);
+        fseek(f, 0, 0); /* SEEK_SET = 0 */
+        char* buf = malloc(size + 1);
+        if (buf) {
+            size_t read_bytes = fread(buf, 1, size, f);
+            buf[read_bytes] = '\0';
+            char* code = buf;
+            if (read_bytes >= 2 && buf[0] == '*' && buf[1] == 'P') {
+                char* start = strstr(buf, "--");
+                if (start != NULL) {
+                    code = start;
+                }
+            }
+            sre_eval_lua(L, code);
+            free(buf);
+        }
+        fclose(f);
+    }
+}
 
 void sre_mini_ensure_injected(lua_State* L) {
     if (!L) return;
@@ -2913,12 +3727,86 @@ void sre_mini_ensure_injected(lua_State* L) {
     /* Check if already injected for this state */
     int i;
     for (i = 0; i < g_injected_count; i++) {
-        if (g_injected_states[i] == L) return;  /* Already done */
+        if (g_injected_states[i] == L) {
+            /* Re-patch C stubs (cheap, no-op if already set) */
+            sre_register_rlsw_stubs(L);
+            /* Also apply Lua-level safety net: ItemDrop proxy + coin guardian.
+             * Pure-Lua tables survive engine overwrites better than C stubs. */
+            sre_eval_lua(L,
+                /* ItemDrop proxy: wraps engine table, guarantees NumItems etc. */
+                "if not _G.__sre_itemdrop_proxy then\n"
+                "  _G.__sre_itemdrop_proxy = true\n"
+                "  local _o = rawget(_G,'ItemDrop') or {}\n"
+                "  local _p = {}\n"
+                "  local _fb = {\n"
+                "    NumItems=function(o) local f=_o.NumItems; return f and f(o) or 0 end,\n"
+                "    ItemIdentifier=function(o,i) local f=_o.ItemIdentifier; return f and f(o,i) or '' end,\n"
+                "    SetItemIdentifier=function(o,i,v) local f=_o.SetItemIdentifier; if f then f(o,i,v) end end,\n"
+                "    AllItemsCollected=function(o) local f=_o.AllItemsCollected; return f and f(o) or false end,\n"
+                "    GetItem=function(o,i) local f=_o.GetItem; return f and f(o,i) or nil end,\n"
+                "    Drop=function(...) local f=_o.Drop; if f then f(...) end end,\n"
+                "    Trigger=function(...) local f=_o.Trigger; if f then f(...) end end,\n"
+                "  }\n"
+                "  setmetatable(_p,{\n"
+                "    __index=function(t,k) return _fb[k] or _o[k] end,\n"
+                "    __newindex=function(t,k,v) _o[k]=v end\n"
+                "  })\n"
+                "  rawset(_G,'ItemDrop',_p)\n"
+                "end\n"
+                /* Coin guardian: cache last known non-zero coins, block zero resets */
+                "if not _G.__sre_coin_guard then\n"
+                "  _G.__sre_coin_guard = true\n"
+                "  _G.__last_coins = 0\n"
+                "  if Character then\n"
+                "    if Character.SetNumCoins then\n"
+                "      local _os=Character.SetNumCoins\n"
+                "      Character.SetNumCoins=function(n)\n"
+                "        if type(n)=='number' then\n"
+                "          if n>0 then _G.__last_coins=n; _os(n)\n"
+                "          elseif _G.__last_coins<=0 then _os(n) end\n"
+                "        else _os(n) end\n"
+                "      end\n"
+                "    end\n"
+                "    if Character.SetNumCoin then\n"
+                "      local _os=Character.SetNumCoin\n"
+                "      Character.SetNumCoin=function(n)\n"
+                "        if type(n)=='number' then\n"
+                "          if n>0 then _G.__last_coins=n; _os(n)\n"
+                "          elseif _G.__last_coins<=0 then _os(n) end\n"
+                "        else _os(n) end\n"
+                "      end\n"
+                "    end\n"
+                "    if Character.NumCoins then\n"
+                "      local _og=Character.NumCoins\n"
+                "      Character.NumCoins=function() local c=_og(); if (not c or c==0) and _G.__last_coins>0 then return _G.__last_coins end; if c and c>0 then _G.__last_coins=c end; return c end\n"
+                "    end\n"
+                "    if Character.NumCoin then\n"
+                "      local _og=Character.NumCoin\n"
+                "      Character.NumCoin=function() local c=_og(); if (not c or c==0) and _G.__last_coins>0 then return _G.__last_coins end; if c and c>0 then _G.__last_coins=c end; return c end\n"
+                "    end\n"
+                "  end\n"
+                "end\n"
+            );
+            return;
+        }
     }
 
     /* Inject standard Lua libraries (math, table, os, debug, io) */
     extern void sre_open_std_libs(lua_State* L);
     sre_open_std_libs(L);
+
+    /* Hook nil arithmetic to prevent mod crashes from nil fields (e.g. self.offset) */
+    sre_eval_lua(L,
+        "if debug and debug.setmetatable then\n"
+        "    debug.setmetatable(nil, {\n"
+        "        __add = function(a, b) return (a or 0) + (b or 0) end,\n"
+        "        __sub = function(a, b) return (a or 0) - (b or 0) end,\n"
+        "        __mul = function(a, b) return (a or 0) * (b or 0) end,\n"
+        "        __div = function(a, b) return (a or 0) / (b or 1) end,\n"
+        "        __unm = function(a) return -(a or 0) end\n"
+        "    })\n"
+        "end"
+    );
 
     /* Inject Mini.*, LNI.*, Components.*, Game.*, Health.*, fs tables */
     sre_register_mini_api(L);
@@ -2926,6 +3814,38 @@ void sre_mini_ensure_injected(lua_State* L) {
     /* Inject RLSW compat stubs (Character, ItemDrop) — prevents nil-index
      * crashes during db.init() before native RegisterProgramLibrary fires */
     sre_register_rlsw_stubs(L);
+
+    /* Hook Hero to redirect to lowercase hero dynamically */
+    sre_eval_lua(L,
+        "Hero = Hero or {}\n"
+        "setmetatable(Hero, {\n"
+        "    __index = function(t, k)\n"
+        "        local h = rawget(_G, 'hero')\n"
+        "        if h then\n"
+        "            local val = h[k]\n"
+        "            if type(val) == 'function' then\n"
+        "                return function(self, ...)\n"
+        "                    if self == Hero then\n"
+        "                        return val(h, ...)\n"
+        "                    else\n"
+        "                        return val(self, ...)\n"
+        "                    end\n"
+        "                end\n"
+        "            end\n"
+        "            return val\n"
+        "        end\n"
+        "    end,\n"
+        "    __newindex = function(t, k, v)\n"
+        "        local h = rawget(_G, 'hero')\n"
+        "        if h then\n"
+        "            h[k] = v\n"
+        "        end\n"
+        "    end\n"
+        "})\n"
+    );
+
+    /* Load edgetest.scl dynamically if present */
+    sre_load_edgetest_scl(L);
 
     /* Cache this state */
     if (g_injected_count < MAX_INJECTED_STATES) {

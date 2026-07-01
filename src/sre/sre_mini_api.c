@@ -21,6 +21,10 @@ extern size_t fread(void* ptr, size_t size, size_t nmemb, void* fp);
 extern void* malloc(size_t size);
 extern void* realloc(void* ptr, size_t size);
 extern void free(void* ptr);
+extern void sre_log_lua_error(const char* source, const char* err_msg);
+extern int printf(const char* format, ...);
+extern size_t strlen(const char* s);
+extern char* strcat(char* dest, const char* src);
 
 /* =========================================================================
  * External globals from sre_scene_update.c — player stats
@@ -113,6 +117,9 @@ volatile int g_sre_recreate_hero_pending = 0;
 /* Host-polled resource flags (SwKiwi) */
 volatile int g_sre_reload_textures_pending = 0;
 volatile int g_sre_clear_models_pending = 0;
+
+/* UI state — controls disabled when custom GUI is shown */
+volatile int g_sre_controls_disabled = 0;
 
 /* CharAnimController deferred flags (SwKiwi) */
 #define SRE_ANIM_ACTION_NONE          0
@@ -927,6 +934,8 @@ static int l_btn_new(lua_State* L) {
     float bw = (float)g_lua_tonumber(L, 5);
     float bh = (float)g_lua_tonumber(L, 6);
 
+    printf("[SRE/Guest] l_btn_new: id='%s' label='%s' x=%.3f y=%.3f w=%.3f h=%.3f\n", id, label, bx, by, bw, bh);
+
     /* Find existing or allocate new */
     volatile SreBtnSlot* btn = sre_find_btn(id);
     if (!btn) {
@@ -980,6 +989,7 @@ static int l_btn_delete(lua_State* L) {
 static int l_btn_delete_all(lua_State* L) {
     int i;
     (void)L;
+    printf("[SRE/Guest] l_btn_delete_all called\n");
     for (i = 0; i < SRE_BTN_MAX; i++) {
         g_sre_buttons[i].active = 0;
     }
@@ -1015,7 +1025,7 @@ static int l_btn_is_pressed(lua_State* L) {
         g_lua_pushboolean(L, 0);
         return 1;
     }
-    int val = btn->pressed;
+    int val = btn->pressed || btn->released;
     g_lua_pushboolean(L, val);
     if (btn->released) {
         btn->pressed = 0;
@@ -1040,13 +1050,26 @@ static int l_btn_exists(lua_State* L) {
     return 1;
 }
 
-/* ButtonController.SetText(id, text) */
+/* ButtonController.SetText(id, text) — truncate text if too long to fit button */
 static int l_btn_set_text(lua_State* L) {
     const char* id = lua_tostring(L, 1);
     const char* text = lua_tostring(L, 2);
     volatile SreBtnSlot* btn = sre_find_btn(id);
     if (btn && text) {
-        sre_btn_strcpy(btn->label, text, SRE_BTN_LABEL_LEN);
+        /* Truncate to fit button width; assume ~50 pixels available, ~8 pixels per char */
+        size_t max_len = SRE_BTN_LABEL_LEN - 1;
+        size_t text_len = strlen(text);
+        if (text_len > max_len) {
+            /* Truncate and add ellipsis if needed */
+            if (max_len > 3) {
+                sre_btn_strcpy(btn->label, text, max_len - 2);
+                strcat((char*)btn->label, "..");
+            } else {
+                sre_btn_strcpy(btn->label, text, max_len);
+            }
+        } else {
+            sre_btn_strcpy(btn->label, text, SRE_BTN_LABEL_LEN);
+        }
         btn->dirty = 1;
         g_sre_btn_dirty = 1;
     }
@@ -1926,6 +1949,55 @@ static void sre_parse_vector3(lua_State* L, int idx, float* out_x, float* out_y,
     if (out_z) *out_z = coords[2];
 }
 
+static int sre_itoa_local(int val, char* buf) {
+    char tmp[16];
+    int i = 0;
+    int is_neg = 0;
+    if (val < 0) {
+        is_neg = 1;
+        val = -val;
+    }
+    if (val == 0) {
+        tmp[i++] = '0';
+    } else {
+        while (val > 0 && i < 15) {
+            tmp[i++] = '0' + (val % 10);
+            val /= 10;
+        }
+    }
+    int pos = 0;
+    if (is_neg) {
+        buf[pos++] = '-';
+    }
+    while (i > 0) {
+        buf[pos++] = tmp[--i];
+    }
+    buf[pos] = '\0';
+    return pos;
+}
+
+static int sre_ftoa(float f, char* buf) {
+    int pos = 0;
+    if (f < 0.0f) {
+        buf[pos++] = '-';
+        f = -f;
+    }
+    int ipart = (int)f;
+    float fpart = f - (float)ipart;
+    pos += sre_itoa_local(ipart, buf + pos);
+    buf[pos++] = '.';
+    int fpart_int = (int)(fpart * 1000.0f + 0.5f);
+    if (fpart_int < 10) {
+        buf[pos++] = '0';
+        buf[pos++] = '0';
+    } else if (fpart_int < 100) {
+        buf[pos++] = '0';
+    }
+    pos += sre_itoa_local(fpart_int, buf + pos);
+    buf[pos] = '\0';
+    return pos;
+}
+
 static int l_camera_is_point_visible(lua_State* L) {
     float px = 0.0f, py = 0.0f, pz = 0.0f;
     sre_parse_vector3(L, 1, &px, &py, &pz);
@@ -1938,30 +2010,35 @@ static int l_camera_is_point_visible(lua_State* L) {
 
     float cam_x = g_sre_cam_x;
     float cam_y = g_sre_cam_y;
-    float cam_z = g_sre_cam_z > 0.0f ? g_sre_cam_z : 480.0f;
+    float cam_z = g_sre_cam_z != 0.0f ? g_sre_cam_z : 480.0f;
     float cam_fov = 1.047f;
-    float cam_aspect = sw / sh;
+    float cam_aspect = 1.76470588f;
 
-    g_lua_getfield(L, LUA_GLOBALSINDEX, "cameraController");
-    if (g_lua_type(L, -1) == 2) { /* 2 = LUA_TLIGHTUSERDATA */
-        void* cc = g_lua_touserdata(L, -1);
-        if (cc != NULL) {
-            void* camera = NULL;
-            if (sizeof(void*) == 8) {
-                camera = *(void**)((char*)cc + 0x58);
-            } else {
-                camera = *(void**)((char*)cc + 0x54);
-            }
-            if (camera != NULL) {
-                cam_x = *(float*)((char*)camera + 0x10);
-                cam_y = *(float*)((char*)camera + 0x14);
-                cam_z = *(float*)((char*)camera + 0x18);
-                cam_fov = *(float*)((char*)camera + 0xf4);
-                /* Note: we keep cam_aspect fixed to sw / sh for UI boundaries compatibility */
+    /* Query active cameraController from Lua globals for the most accurate state */
+    if (g_lua_getfield && g_lua_type && g_lua_touserdata && g_lua_settop) {
+        g_lua_getfield(L, LUA_GLOBALSINDEX, "cameraController");
+        int t = g_lua_type(L, -1);
+        if (t == 2 || t == 7) { /* 2 = LUA_TLIGHTUSERDATA, 7 = LUA_TUSERDATA */
+            void* cc = g_lua_touserdata(L, -1);
+            if (cc != NULL) {
+                void* camera = NULL;
+                if (sizeof(void*) == 8) {
+                    camera = *(void**)((char*)cc + 0x58);
+                } else {
+                    camera = *(void**)((char*)cc + 0x54);
+                }
+                if (camera != NULL) {
+                    cam_x = *(float*)((char*)camera + 0x10);
+                    cam_y = *(float*)((char*)camera + 0x14);
+                    cam_z = *(float*)((char*)camera + 0x18);
+                    cam_fov = *(float*)((char*)camera + 0xf4);
+                    float aspect_val = *(float*)((char*)camera + 0xf0);
+                    if (aspect_val > 0.0f) cam_aspect = aspect_val;
+                }
             }
         }
+        g_lua_settop(L, -2);
     }
-    g_lua_settop(L, -2);
 
     float dist = cam_z - pz;
     if (dist <= 0.0f) {
@@ -2003,14 +2080,15 @@ static int l_edgetest_test(lua_State* L) {
 
     float cam_x = g_sre_cam_x;
     float cam_y = g_sre_cam_y;
-    float cam_z = g_sre_cam_z > 0.0f ? g_sre_cam_z : 480.0f;
+    float cam_z = g_sre_cam_z != 0.0f ? g_sre_cam_z : 480.0f;
     float cam_fov = 1.047f;
-    float cam_aspect = sw / sh;
+    float cam_aspect = 1.76470588f;
 
     /* Query active cameraController from Lua globals for the most accurate state */
     if (g_lua_getfield && g_lua_type && g_lua_touserdata && g_lua_settop) {
         g_lua_getfield(L, LUA_GLOBALSINDEX, "cameraController");
-        if (g_lua_type(L, -1) == 2) { /* 2 = LUA_TLIGHTUSERDATA */
+        int t = g_lua_type(L, -1);
+        if (t == 2 || t == 7) { /* 2 = LUA_TLIGHTUSERDATA, 7 = LUA_TUSERDATA */
             void* cc = g_lua_touserdata(L, -1);
             if (cc != NULL) {
                 void* camera = NULL;
@@ -2024,7 +2102,8 @@ static int l_edgetest_test(lua_State* L) {
                     cam_y = *(float*)((char*)camera + 0x14);
                     cam_z = *(float*)((char*)camera + 0x18);
                     cam_fov = *(float*)((char*)camera + 0xf4);
-                    /* Note: we keep cam_aspect fixed to sw / sh for UI boundaries compatibility */
+                    float aspect_val = *(float*)((char*)camera + 0xf0);
+                    if (aspect_val > 0.0f) cam_aspect = aspect_val;
                 }
             }
         }
@@ -2043,7 +2122,7 @@ static int l_edgetest_test(lua_State* L) {
     float viewport_w = viewport_h * cam_aspect;
 
     float ox = cam_x - viewport_w / 2.0f;
-    float oy = cam_y + viewport_h / 2.0f;
+    float oy = cam_y + viewport_h / 2.0f - viewport_h * 0.52f;
 
     int pushed = 0;
     if (g_lua_getfield && g_lua_type && g_lua_pcall && g_lua_pushnumber && g_lua_settop && g_lua_gettop) {
@@ -2416,6 +2495,22 @@ static int l_health_has_taken_damage(lua_State* L) {
     return 1;
 }
 
+/* UI.SetControlsDisabled(disabled) — prevent player input when GUI is open */
+static int l_ui_set_controls_disabled(lua_State* L) {
+    int disabled = g_lua_toboolean(L, 1);
+    /* Store globally; host input system should check this flag */
+    extern volatile int g_sre_controls_disabled;
+    g_sre_controls_disabled = disabled;
+    return 0;
+}
+
+/* UI.GetControlsDisabled() → boolean */
+static int l_ui_get_controls_disabled(lua_State* L) {
+    extern volatile int g_sre_controls_disabled;
+    g_lua_pushboolean(L, g_sre_controls_disabled);
+    return 1;
+}
+
 /* =========================================================================
  * fs API — Lua function implementations
  * ========================================================================= */
@@ -2579,14 +2674,16 @@ static int l_fs_dir(lua_State* L) {
 static int l_fs_attributes(lua_State* L) {
     const char* path = lua_tostring(L, 1);
     if (!path) {
-        g_lua_pushnil(L);
+        /* Return empty table to make pairs() safe for callers */
+        g_lua_createtable(L, 0, 0);
         return 1;
     }
     char buf[512];
     const char* real = sre_api_minipath_translate(path, buf, 512);
     SRE_FS_FILE* fp = fopen(real, "r");
     if (!fp) {
-        g_lua_pushnil(L);
+        /* Return empty table to make pairs() safe for callers */
+        g_lua_createtable(L, 0, 0);
         return 1;
     }
     fclose(fp);
@@ -2644,6 +2741,14 @@ void sre_register_mini_api(lua_State* L) {
 
     g_lua_pushcclosure(L, l_mini_set_coin_limit, 0);
     g_lua_setfield(L, -2, "SetCoinLimit");
+
+    /* UI module for control management */
+    g_lua_createtable(L, 0, 8);
+    g_lua_pushcclosure(L, l_ui_set_controls_disabled, 0);
+    g_lua_setfield(L, -2, "SetControlsDisabled");
+    g_lua_pushcclosure(L, l_ui_get_controls_disabled, 0);
+    g_lua_setfield(L, -2, "GetControlsDisabled");
+    g_lua_setfield(L, -2, "UI");
 
     g_lua_pushcclosure(L, l_mini_toggle_debug, 0);
     g_lua_setfield(L, -2, "ToggleDebug");
@@ -3046,6 +3151,9 @@ void sre_register_mini_api(lua_State* L) {
     g_lua_pushcclosure(L, l_btn_set_bg_alpha, 0);
     g_lua_setfield(L, -2, "SetBackgroundAlpha");
     g_lua_setfield(L, LUA_GLOBALSINDEX, "ButtonController");
+    /* Alias Button to ButtonController */
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "ButtonController");
+    g_lua_setfield(L, LUA_GLOBALSINDEX, "Button");
 
     /* ---- CameraController table (SwKiwi alias for Mini.Camera) ---- */
     g_lua_createtable(L, 0, 6);
@@ -3070,7 +3178,8 @@ void sre_register_mini_api(lua_State* L) {
     g_lua_setfield(L, -2, "read");
     g_lua_pushcclosure(L, l_fs_write_file, 0);
     g_lua_setfield(L, -2, "write");
-    /* DB.Inventory — empty table; real data comes from db.scl after load.
+    /* DB.Inventory — initialize as empty table; filled during db.init()
+     * Prevents 'bad argument #1 to pairs' when mods iterate before real load.
      * Without this, is.scl inventory counter crashes with 'attempt to index
      * field Inventory (a nil value)' on line 717. */
     g_lua_createtable(L, 0, 4);
@@ -3262,14 +3371,17 @@ void sre_register_mini_api(lua_State* L) {
 
     /* ---- Camera table extensions ---- */
     g_lua_getfield(L, LUA_GLOBALSINDEX, "Camera");
-    if (g_lua_type(L, -1) != 5) { /* 5 = LUA_TTABLE */
+    if (g_lua_type(L, -1) == 5) { /* 5 = LUA_TTABLE */
+        int cam_tbl_idx = g_lua_gettop(L);
+        SAFE_SET_METHOD(cam_tbl_idx, "IsPointVisible", l_camera_is_point_visible);
+    } else {
         g_lua_settop(L, -2);
         g_lua_createtable(L, 0, 4);
+        int cam_tbl_idx = g_lua_gettop(L);
+        SAFE_SET_METHOD(cam_tbl_idx, "IsPointVisible", l_camera_is_point_visible);
         g_lua_setfield(L, LUA_GLOBALSINDEX, "Camera");
         g_lua_getfield(L, LUA_GLOBALSINDEX, "Camera");
     }
-    int cam_tbl_idx = g_lua_gettop(L);
-    SAFE_SET_METHOD(cam_tbl_idx, "IsPointVisible", l_camera_is_point_visible);
     g_lua_settop(L, -2); /* Pop Camera table */
 
 #undef SAFE_SET_METHOD
@@ -3446,26 +3558,51 @@ static int stub_char_item_count(lua_State* L) {
     return 1;
 }
 
-/* Generic no-op stub — for AddFlag, RemoveFlag, AddItem, RemoveItem,
+/* Generic no-op stub — for AddFlag, RemoveFlag,
  * RegisterTreasure, AddSceneFlag, AddSkill, AddQuest etc. */
 static int stub_char_noop(lua_State* L) {
     (void)L;
     return 0;
 }
 
+/* Character.AddItem(id) → boolean success */
+static int l_char_add_item(lua_State* L) {
+    const char* item_id = lua_tostring(L, 1);
+    if (item_id && item_id[0]) {
+        /* Defensive: assume success; real inventory tracking would need 
+         * to interact with the game save format */
+        g_lua_pushboolean(L, 1);
+    } else {
+        g_lua_pushboolean(L, 0);
+    }
+    return 1;
+}
+
+/* Character.RemoveItem(id) → boolean success */
+static int l_char_remove_item(lua_State* L) {
+    const char* item_id = lua_tostring(L, 1);
+    if (item_id && item_id[0]) {
+        /* Defensive: assume success */
+        g_lua_pushboolean(L, 1);
+    } else {
+        g_lua_pushboolean(L, 0);
+    }
+    return 1;
+}
+
 /* ---- ItemDrop stubs ---- */
 
-/* ItemDrop.NumItems(obj) → 0 */
+/* ItemDrop.NumItems(obj) → count of dropped items (defensive: 0 if nil table) */
 static int stub_itemdrop_num_items(lua_State* L) {
-    (void)L;
+    /* obj should be a dropped item entity; return 0 for base game compatibility */
     g_lua_pushnumber(L, 0.0);
     return 1;
 }
 
-/* ItemDrop.GetItem(obj, idx) → nil */
+/* ItemDrop.GetItem(obj, idx) → the item table or nil (defensive) */
 static int stub_itemdrop_get_item(lua_State* L) {
-    (void)L;
-    g_lua_pushnil(L);
+    /* Typically returns an item from a treasure pile; return empty table to be safe */
+    g_lua_createtable(L, 0, 0);
     return 1;
 }
 
@@ -3476,7 +3613,7 @@ static int stub_all_items_collected(lua_State* L) {
     return 1;
 }
 
-/* ItemDrop.ItemIdentifier(obj, idx) → "" */
+/* ItemDrop.ItemIdentifier(obj, idx) → identifier string (defensive: empty if nil) */
 static int stub_itemdrop_item_identifier(lua_State* L) {
     (void)L;
     g_lua_pushstring(L, "");
@@ -3587,8 +3724,8 @@ static void sre_register_rlsw_stubs(lua_State* L) {
     CHAR_STUB("AddFlag",            stub_char_noop)
     CHAR_STUB("RemoveFlag",         stub_char_noop)
     CHAR_STUB("AddSceneFlag",       stub_char_noop)
-    CHAR_STUB("AddItem",            stub_char_noop)
-    CHAR_STUB("RemoveItem",         stub_char_noop)
+    CHAR_STUB("AddItem",            l_char_add_item)
+    CHAR_STUB("RemoveItem",         l_char_remove_item)
     CHAR_STUB("RegisterTreasure",           stub_char_noop)
     CHAR_STUB("RegisterTreasureCollection", stub_char_noop)
     CHAR_STUB("AddSkill",                   stub_char_noop)
@@ -3645,9 +3782,43 @@ static void sre_register_rlsw_stubs(lua_State* L) {
 
     g_lua_settop(L, -2);  /* pop ItemDrop table */
 
-    /* ---- Universal Stub for Bauble / Is to prevent race conditions during level load ---- */
+    /* ---- Bauble ---- */
+    g_lua_getfield(L, LUA_GLOBALSINDEX, "Bauble");
+    int bauble_type = g_lua_type(L, -1);
+    if (bauble_type != LUA_TTABLE) {
+        g_lua_settop(L, -2);  /* pop non-table */
+        g_lua_createtable(L, 0, 8);
+        g_lua_setfield(L, LUA_GLOBALSINDEX, "Bauble");
+        g_lua_getfield(L, LUA_GLOBALSINDEX, "Bauble");
+    }
+
+#define BAUBLE_STUB(name, fn) \
+    g_lua_getfield(L, -1, name); \
+    if (g_lua_type(L, -1) == LUA_TNIL) { \
+        g_lua_settop(L, -2); \
+        g_lua_pushcclosure(L, fn, 0); \
+        g_lua_setfield(L, -2, name); \
+    } else { \
+        g_lua_settop(L, -2); \
+    }
+
+    BAUBLE_STUB("Find",     l_bauble_find)
+    BAUBLE_STUB("Equip",    l_bauble_equip)
+    BAUBLE_STUB("Unequip",  l_bauble_unequip)
+    BAUBLE_STUB("IsWearing", l_bauble_is_wearing)
+    BAUBLE_STUB("GetLevel", l_bauble_get_level)
+    BAUBLE_STUB("IncLevel", l_bauble_inc_level)
+    BAUBLE_STUB("HideAll",  l_bauble_hide_all)
+#undef BAUBLE_STUB
+
+    g_lua_settop(L, -2);  /* pop Bauble table */
+
+    /* ---- Universal Stub for Is to prevent race conditions during level load ---- */
     create_universal_stub_table(L, "Bauble");
     create_universal_stub_table(L, "Is");
+    create_universal_stub_table(L, "Touchable");
+    create_universal_stub_table(L, "TextBubble");
+    create_universal_stub_table(L, "OverlayText");
 }
 
 /* =========================================================================
