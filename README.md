@@ -106,12 +106,7 @@ The SRE layer implements broad compatibility with the **SwKiwi (KiwiAPI)** moddi
 
 ## Future Roadmap: SwMega Framework
 
-The project is laying structural groundwork for the next-generation modding framework, **SwMega**, which aims to lift remaining engine limitations:
-
-- **Dynamic Entity Injection**: Adding entirely new enemies, items, and NPCs with custom behavior trees defined dynamically, bypassing the hardcoded entity index limits in `libswordigo.so`.
-- **Custom Shaders and Materials**: Enabling mods to define custom GLSL scripts, dynamic lighting maps, and particle effects per level.
-- **Unified Asset Packer**: A compilation utility to package scripts, textures, and models into single, compressed `.mega` files.
-- **Multiplayer State Sync**: A lightweight UDP synchronization client to track and render player coordinates, basic combat events, and shared lobby spaces in co-op sessions.
+The project is laying structural groundwork for the next-generation modding framework, **SwMega**, which aims to lift remaining engine limitations
 
 ---
 
